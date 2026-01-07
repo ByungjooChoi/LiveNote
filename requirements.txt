@@ -1,0 +1,7 @@
+PyQt6>=6.6.0
+google-generativeai>=0.3.0
+sounddevice>=0.4.6
+numpy>=1.24.0
+pyyaml>=6.0
+python-dotenv>=1.0.0
+qasync>=0.27.1
