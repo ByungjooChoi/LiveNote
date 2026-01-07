@@ -25,3 +25,9 @@
   - `src/ui/audio_selector.py`: 오디오 장치 선택 콤보박스 위젯 구현
   - `src/ui/main_window.py`: 메인 UI, 비동기 번역 제어 및 실시간 텍스트 표시 구현
   - `src/main.py`: `MainWindow` 호출 로직 추가
+
+## 2026-01-07 (Phase 5 Update)
+### 구현 내용
+- **Phase 5: 파일 저장 모듈 구현**
+  - `src/utils/file_writer.py`: 번역 텍스트를 실시간으로 파일에 저장하는 기능 구현 (세션별 파일 생성, 타임스탬프 포함)
+  - `src/ui/main_window.py`: `FileWriter`를 통합하여 번역 시작 시 세션 파일 생성, 번역 텍스트 수신 시 파일 쓰기 연동

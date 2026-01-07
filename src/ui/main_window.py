@@ -9,6 +9,8 @@ from src.ui.audio_selector import AudioSelector
 from src.audio.capture import AudioCapture
 from src.translator.gemini_client import GeminiClient
 from src.config.secure_storage import SecureStorage
+from src.utils.file_writer import FileWriter
+from src.config.settings_manager import settings
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -20,6 +22,7 @@ class MainWindow(QMainWindow):
         self.is_running = False
         self.audio_capture = None
         self.gemini_client = GeminiClient()
+        self.file_writer = FileWriter()
         self.process_task = None
         
         self.init_ui()
@@ -101,6 +104,10 @@ class MainWindow(QMainWindow):
             # Note: capture.py creates its own queue
             self.audio_capture = AudioCapture(device_id=device_id)
             await self.audio_capture.start()
+
+            # Start File Session
+            if settings.get("output", "auto_save", True):
+                self.file_writer.start_session()
             
             # Connect Gemini
             await self.gemini_client.connect()
@@ -123,6 +130,8 @@ class MainWindow(QMainWindow):
         if self.audio_capture:
             self.audio_capture.stop()
             self.audio_capture = None
+
+        self.file_writer.close_session()
             
         if self.gemini_client:
             self.gemini_client.disconnect()
@@ -151,6 +160,9 @@ class MainWindow(QMainWindow):
                 self.text_area.moveCursor(self.text_area.textCursor().MoveOperation.End)
                 self.text_area.insertPlainText(text + " ") # Add space or newline
                 self.text_area.moveCursor(self.text_area.textCursor().MoveOperation.End)
+                
+                # Write to file
+                self.file_writer.write_line(text)
                 
         except Exception as e:
             print(f"Stream processing error: {e}")
