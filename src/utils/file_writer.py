@@ -38,6 +38,10 @@ class FileWriter:
 
     def write_line(self, text):
         """Writes a line of text with timestamp."""
+        # Skip empty or whitespace-only text
+        if not text or not text.strip():
+            return
+            
         if self.current_file and not self.current_file.closed:
             timestamp = datetime.datetime.now().strftime("%H:%M:%S")
             try:

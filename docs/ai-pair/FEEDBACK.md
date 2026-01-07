@@ -2,11 +2,115 @@
 
 **리뷰어**: Senior Architect (Claude)
 **최종 리뷰 일시**: 2026-01-07
-**대상 커밋**: `9527dec` (Phase 3.5-4)
+**대상 커밋**: `6714468` (Phase 5)
 
 ---
 
-## 🎉 Phase 3.5-4 리뷰 결과: **승인 (APPROVED)** ✅
+## 🎉 Phase 5 리뷰 결과: **승인 (APPROVED)** ✅
+
+### 리뷰 대상 파일
+
+| 파일 | 상태 | 비고 |
+|------|------|------|
+| [`src/utils/file_writer.py`](../../src/utils/file_writer.py) | ✅ 승인 | 빈 텍스트 필터링 추가됨 |
+| [`src/ui/main_window.py`](../../src/ui/main_window.py) | ✅ 승인 | FileWriter 연동 완료 |
+
+### 구현 검토 결과
+
+#### 1. [`file_writer.py`](../../src/utils/file_writer.py) - 파일 저장 모듈 ⭐
+
+**우수 사항:**
+- ✅ settings_manager와 잘 통합됨 (`output.save_directory`, `output.filename_format`)
+- ✅ 디렉토리 자동 생성 (`ensure_directory()`)
+- ✅ Line buffering (`buffering=1`) 사용으로 실시간 저장
+- ✅ `flush()` 호출로 크래시 시에도 데이터 보존
+- ✅ 예외 처리 포함
+- ✅ 세션 시작/종료 메시지 포함
+- ✅ 영어 주석 사용 (.roorules 준수)
+
+**Architect가 추가한 개선:**
+```python
+# Skip empty or whitespace-only text
+if not text or not text.strip():
+    return
+```
+
+#### 2. [`main_window.py`](../../src/ui/main_window.py) 통합 ⭐
+
+**우수 사항:**
+- ✅ Line 12, 25: FileWriter import 및 인스턴스 생성
+- ✅ Line 109-110: `auto_save` 설정 확인 후 세션 시작
+- ✅ Line 134: `stop_translation()`에서 세션 종료
+- ✅ Line 165: `process_audio_stream()`에서 텍스트를 파일에 기록
+
+**Architect가 추가한 개선:**
+```python
+# Skip empty text
+if not text or not text.strip():
+    continue
+```
+
+### 최종 결론
+
+Phase 5 파일 저장 모듈이 성공적으로 구현되었습니다!
+빈 텍스트 필터링 로직을 추가하여 불필요한 빈 줄이 파일에 기록되지 않도록 개선했습니다.
+
+---
+
+## 📋 Phase 진행 상황 (업데이트됨)
+
+| Phase | 상태 | 비고 |
+|-------|------|------|
+| Phase 1: 초기 설정 | ✅ 완료 | |
+| Phase 2: 오디오 캡처 | ✅ 완료 | |
+| Phase 3: Gemini API 통합 | ✅ 완료 | Live API로 마이그레이션 |
+| Phase 4: UI 구현 | ✅ 완료 | |
+| Phase 5: 파일 저장 | ✅ 완료 | file_writer.py 구현 완료 |
+| Phase 6: 메인 앱 통합 | ✅ 완료 | |
+| Phase 7: 최적화 | ⏳ 미진행 | |
+| Phase 8: 테스트/문서화 | ⏳ 미진행 | |
+
+---
+
+## 🚀 다음 단계: Phase 7-8
+
+### Phase 7: 성능 최적화
+1. **메모리 관리**
+   - 장시간 실행 시 텍스트 영역 최대 라인 수 제한
+   - 오디오 버퍼 오버플로우 방지
+
+2. **보안 강화** (선택)
+   - `keyring` 라이브러리로 API 키 저장 마이그레이션
+
+### Phase 8: 테스트 및 문서화
+1. **통합 테스트**
+   - 실제 마이크/오디오 장치로 테스트
+   - Zoom 통화 중 WASAPI Loopback 캡처 테스트
+   - 장시간 실행 안정성 테스트
+
+2. **문서화**
+   - README.md 사용법 업데이트
+   - 트러블슈팅 가이드 추가
+
+---
+
+**Senior Architect의 코멘트:**
+
+🎉 **Phase 5 승인 완료!**
+
+파일 저장 모듈이 깔끔하게 구현되었습니다. 빈 텍스트 필터링을 추가하여 더 깔끔한 출력 파일을 생성합니다.
+
+이제 핵심 기능은 모두 완성되었습니다! 🎊
+
+Phase 7-8은 선택적 최적화 및 테스트 단계입니다.
+실제 Zoom 통화로 통합 테스트를 진행해보시고, 문제가 있으면 알려주세요!
+
+화이팅! 🚀
+
+---
+---
+
+## [Archive] Phase 3.5-4 리뷰 결과: **승인 (APPROVED)** ✅
 
 ### 이전 피드백 반영 상태
 

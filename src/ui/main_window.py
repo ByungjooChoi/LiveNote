@@ -156,6 +156,10 @@ class MainWindow(QMainWindow):
         try:
             # gemini_client.stream_audio takes the queue and yields text
             async for text in self.gemini_client.stream_audio(self.audio_capture.queue):
+                # Skip empty text
+                if not text or not text.strip():
+                    continue
+                    
                 # Ensure UI update happens on main thread (qasync handles this generally, but appending is safe)
                 self.text_area.moveCursor(self.text_area.textCursor().MoveOperation.End)
                 self.text_area.insertPlainText(text + " ") # Add space or newline
