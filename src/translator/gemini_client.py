@@ -65,8 +65,10 @@ class GeminiClient:
         is_native_audio = "native-audio" in self.model_name
 
         if is_native_audio:
+            # Native Audio model requires AUDIO modality, but returns both TEXT and AUDIO.
+            # Explicitly requesting ["TEXT", "AUDIO"] causes an error.
             config = types.LiveConnectConfig(
-                response_modalities=["TEXT", "AUDIO"],
+                response_modalities=["AUDIO"],
                 speech_config=types.SpeechConfig(
                     voice_config=types.VoiceConfig(
                         prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Aoede")

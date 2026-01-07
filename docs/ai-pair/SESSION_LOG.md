@@ -56,3 +56,11 @@
 ### 구현 내용
 - **Native Audio 모델 지원**: `gemini-2.5-flash-native-audio-preview-12-2025` 모델 사용 시 `response_modalities=["TEXT", "AUDIO"]`로 설정하여 에러 해결.
 - **오디오 응답 처리**: `gemini_client.py` 및 `main_window.py`를 수정하여 텍스트와 오디오 응답(청크)을 구분하여 처리하도록 개선.
+
+## 2026-01-07 (Bugfix - Critical & Native Audio)
+### 수정 내용
+- **Native Audio 지원**: `gemini-2.5-flash-native-audio-preview-12-2025` 모델 지원을 위해 `response_modalities`를 `["AUDIO"]`로 설정 (텍스트도 함께 수신됨).
+- **버그 수정**:
+  - `gemini_client.py` fallback 모델명 수정.
+  - `gemini_client.py` `session.send()` 호출 방식을 `types.LiveClientRealtimeInput` 객체 사용으로 수정.
+  - `main_window.py` 설정 변경 시 클라이언트 재생성 로직 추가.
