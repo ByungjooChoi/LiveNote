@@ -18,10 +18,11 @@ class GeminiClient:
         # Ensure we use a model compatible with Live API
         # If the config model seems to be a REST model or older, fallback to a known Live model
         # or rely on what's in config if user updated it correctly.
-        # For safety in this demo, we might default to gemini-2.0-flash-exp if not set clearly.
-        if "gemini-2.0" not in self.model_name and "gemini-exp" not in self.model_name:
-             print(f"Warning: Configured model '{self.model_name}' might not support Live API. Switching to 'gemini-2.0-flash-exp'.")
-             self.model_name = "gemini-2.0-flash-exp"
+        LIVE_API_PATTERNS = ["gemini-2.0", "gemini-2.5", "gemini-exp"]
+        
+        if not any(pattern in self.model_name for pattern in LIVE_API_PATTERNS):
+             print(f"Warning: Configured model '{self.model_name}' might not support Live API. Switching to default.")
+             self.model_name = "gemini-2.5-flash-preview-native-audio-dialog"
              
         self.client = None
         self.session = None

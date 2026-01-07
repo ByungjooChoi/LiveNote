@@ -32,6 +32,11 @@
   - `src/utils/file_writer.py`: 번역 텍스트를 실시간으로 파일에 저장하는 기능 구현 (세션별 파일 생성, 타임스탬프 포함)
   - `src/ui/main_window.py`: `FileWriter`를 통합하여 번역 시작 시 세션 파일 생성, 번역 텍스트 수신 시 파일 쓰기 연동
 
+## 2026-01-07 (Bugfix)
+### 수정 내용
+- **버그 수정**: `src/translator/gemini_client.py`에서 `gemini-2.5` 모델이 Live API 지원 모델로 인식되지 않는 문제 해결.
+- **문서 수정**: `README.md`의 실행 명령어를 `python -m src.main`으로 수정하여 경로 문제 해결 안내.
+
 ## 2026-01-07 (Completion)
 ### 프로젝트 완료
 - **Phase 5 완료**: 파일 저장 기능 구현 및 검증 완료.

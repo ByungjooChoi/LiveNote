@@ -43,7 +43,7 @@ pip install -r requirements.txt
 
 ## 📖 Usage
 
-1. Start the application: `python src/main.py`
+1. Start the application (run from project root): `python -m src.main`
 2. Select audio source from dropdown
 3. Click "Start" to begin translation
 4. View real-time translations in the main window
