@@ -1,16 +1,23 @@
 import asyncio
 import os
 import traceback
+import time
 import numpy as np
 from google import genai
 from google.genai import types
 from src.config.secure_storage import SecureStorage
 from src.config.settings_manager import settings
 
+class SessionExpiredError(Exception):
+    """Raised when session needs to be refreshed."""
+    pass
+
 class GeminiClient:
     """
     Client for interacting with Google Gemini Live API (WebSocket).
     """
+    
+    SESSION_TIMEOUT = 14 * 60  # 14 minutes
     
     def __init__(self):
         self.api_key = SecureStorage.get_api_key()
@@ -28,6 +35,8 @@ class GeminiClient:
         self.client = None
         self.session = None
         self.is_connected = False
+        self.session_start_time = None
+        self._reconnecting = False
         
         if self.api_key:
             # Initialize with v1alpha for Live API access
@@ -50,13 +59,30 @@ class GeminiClient:
     async def stream_audio(self, audio_queue):
         """
         Connects to Live API and streams audio from the queue.
-        
-        Args:
-            audio_queue (asyncio.Queue): Queue containing audio chunks.
-            
-        Yields:
-            str: Translated text chunks.
+        Automatically reconnects before session timeout.
         """
+        while self.is_connected:
+            try:
+                self._reconnecting = False
+                async for item in self._stream_audio_session(audio_queue):
+                    yield item
+            except SessionExpiredError:
+                print("Session expired, reconnecting...")
+                # Add a small delay to avoid rapid looping if reconnection fails immediately
+                await asyncio.sleep(1)
+                continue
+            except Exception as e:
+                # If we manually disconnected, stop loop
+                if not self.is_connected:
+                    break
+                
+                print(f"Stream connection ended: {e}")
+                # For other errors, we might want to stop or retry.
+                # For now, let's stop to avoid infinite error loops unless it's a known transient error.
+                break
+
+    async def _stream_audio_session(self, audio_queue):
+        """Single session stream with timeout monitoring."""
         if not self.client:
             print("Client not initialized")
             return
@@ -66,7 +92,6 @@ class GeminiClient:
 
         if is_native_audio:
             # Native Audio model requires AUDIO modality, but returns both TEXT and AUDIO.
-            # Explicitly requesting ["TEXT", "AUDIO"] causes an error.
             config = types.LiveConnectConfig(
                 response_modalities=["AUDIO"],
                 speech_config=types.SpeechConfig(
@@ -90,10 +115,13 @@ class GeminiClient:
             print(f"Connecting to Live API with model: {self.model_name}...")
             async with self.client.aio.live.connect(model=self.model_name, config=config) as session:
                 self.session = session
+                self.session_start_time = time.time()
                 print("Connected to Gemini Live API")
                 
-                # Start a task to send audio
+                # Start tasks
+                # Pass session start time to monitor to avoid race conditions
                 send_task = asyncio.create_task(self._send_audio_loop(session, audio_queue))
+                timeout_task = asyncio.create_task(self._session_timeout_monitor(audio_queue))
                 
                 try:
                     while True:
@@ -106,19 +134,25 @@ class GeminiClient:
                                         yield ("audio", part.inline_data.data)
                 except asyncio.CancelledError:
                     print("Receive loop cancelled")
-                except Exception as e:
-                    print(f"Error in receive loop: {e}")
                 finally:
                     send_task.cancel()
+                    timeout_task.cancel()
                     try:
                         await send_task
+                        await timeout_task
                     except asyncio.CancelledError:
                         pass
+                    except SessionExpiredError:
+                        # Propagate session expired error to trigger reconnection
+                        raise
 
+        except SessionExpiredError:
+            raise
         except Exception as e:
-            print(f"Live API Connection Error: {e}")
-            traceback.print_exc()
-            self.is_connected = False
+            if not self._reconnecting and self.is_connected:
+                print(f"Live API Connection Error: {e}")
+                traceback.print_exc()
+            raise
 
     async def _send_audio_loop(self, session, audio_queue):
         """
@@ -128,6 +162,10 @@ class GeminiClient:
             while True:
                 item = await audio_queue.get()
                 
+                # Check for session timeout signal from monitor
+                if item is SessionExpiredError or self._reconnecting:
+                    raise SessionExpiredError("Session timeout")
+
                 # Handle tuple (data, rms) from capture.py
                 if isinstance(item, tuple):
                     audio_data = item[0]
@@ -139,24 +177,6 @@ class GeminiClient:
                     audio_data = audio_data.tobytes()
                 
                 # Send to Live API
-                # Using audio/pcm requires raw PCM data (16-bit little-endian, usually)
-                # sounddevice returns float32 by default unless configured otherwise.
-                # We need to ensure it's sent as expected.
-                # The capture.py default is float32. We should convert to int16 PCM for better compatibility 
-                # or ensure API supports float32 PCM. Usually int16 is safer.
-                
-                # Simple float32 -> int16 conversion
-                # if dtype is float32, range is -1.0 to 1.0
-                # int16 range is -32768 to 32767
-                if isinstance(audio_data, bytes) and len(audio_data) > 0:
-                     # Check if it was already bytes (unlikely if coming from numpy without conversion)
-                     pass
-                elif hasattr(item, 'dtype') or isinstance(item, tuple):
-                     # Re-access original numpy array if possible to convert
-                     arr = item[0] if isinstance(item, tuple) else item
-                     if hasattr(arr, 'dtype') and arr.dtype == np.float32:
-                         audio_data = (arr * 32767).astype(np.int16).tobytes()
-
                 await session.send(
                     input=types.LiveClientRealtimeInput(
                         media_chunks=[
@@ -166,10 +186,36 @@ class GeminiClient:
                 )
         except asyncio.CancelledError:
             pass
+        except SessionExpiredError:
+            raise
         except Exception as e:
-            print(f"Error sending audio loop: {e}")
+            if not self._reconnecting:
+                print(f"Error sending audio loop: {e}")
+
+    async def _session_timeout_monitor(self, audio_queue):
+        """Monitor session timeout and trigger reconnection."""
+        try:
+            while True:
+                await asyncio.sleep(10)  # Check every 10 seconds
+                
+                if self.session_start_time:
+                    elapsed = time.time() - self.session_start_time
+                    remaining = self.SESSION_TIMEOUT - elapsed
+                    
+                    if 0 < remaining < 60:
+                        # Could use a callback to update UI, but for now just print
+                        pass 
+                    
+                    if elapsed >= self.SESSION_TIMEOUT:
+                        print("Session timeout reached, triggering reconnection...")
+                        self._reconnecting = True
+                        # Signal send loop to raise exception
+                        await audio_queue.put(SessionExpiredError)
+                        # Also raise here to be safe (though this task just dies)
+                        raise SessionExpiredError("Session timeout")
+                        
+        except asyncio.CancelledError:
+            pass
 
     def disconnect(self):
         self.is_connected = False
-
-

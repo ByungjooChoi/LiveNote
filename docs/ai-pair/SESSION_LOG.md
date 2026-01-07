@@ -57,10 +57,11 @@
 - **Native Audio 모델 지원**: `gemini-2.5-flash-native-audio-preview-12-2025` 모델 사용 시 `response_modalities=["TEXT", "AUDIO"]`로 설정하여 에러 해결.
 - **오디오 응답 처리**: `gemini_client.py` 및 `main_window.py`를 수정하여 텍스트와 오디오 응답(청크)을 구분하여 처리하도록 개선.
 
-## 2026-01-07 (Bugfix - Critical & Native Audio)
-### 수정 내용
-- **Native Audio 지원**: `gemini-2.5-flash-native-audio-preview-12-2025` 모델 지원을 위해 `response_modalities`를 `["AUDIO"]`로 설정 (텍스트도 함께 수신됨).
-- **버그 수정**:
-  - `gemini_client.py` fallback 모델명 수정.
-  - `gemini_client.py` `session.send()` 호출 방식을 `types.LiveClientRealtimeInput` 객체 사용으로 수정.
-  - `main_window.py` 설정 변경 시 클라이언트 재생성 로직 추가.
+## 2026-01-07 (Phase 6 - Final Features)
+### 구현 내용
+- **오디오 출력 (Audio Output)**
+  - `src/audio/device_manager.py`: 출력 장치 목록 조회 기능 추가.
+  - `src/audio/playback.py`: `sounddevice` 기반 오디오 재생 모듈 구현 (볼륨 조절, 음소거 지원).
+  - `src/ui/main_window.py`: 오디오 출력 장치 선택, 볼륨 슬라이더, 음소거 버튼 UI 추가 및 연동.
+- **세션 관리 (Session Management)**
+  - `src/translator/gemini_client.py`: 15분 세션 제한을 위한 타임아웃 모니터링 및 자동 재연결 로직 구현 (`SessionExpiredError` 사용).

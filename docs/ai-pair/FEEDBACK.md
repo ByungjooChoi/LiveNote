@@ -1,356 +1,447 @@
-# 🔴 FEEDBACK - Native Audio 테스트 코드 먼저 작성
+# 🔴 FEEDBACK - Phase 6: 오디오 출력 + 세션 관리
 
 > **작성일**: 2026-01-07  
-> **상태**: 🔴 수정 필요  
+> **상태**: 🔴 구현 필요  
 > **대상**: Cline (Gemini)
 
 ---
 
-## 📚 참조 문서 (반드시 읽을 것!)
+## 📚 참조 문서
 
-다음 Google 공식 문서를 먼저 읽고 이해한 후 작업하세요:
-
-1. **마이크 스트림 예제**: https://ai.google.dev/gemini-api/docs/live?hl=ko&example=mic-stream
-2. **Live API 가이드**: https://ai.google.dev/gemini-api/docs/live-guide?hl=ko
-3. **세션 관리**: https://ai.google.dev/gemini-api/docs/live-session?hl=ko
-
-> **중요**: 문서에 따르면 TEXT와 AUDIO를 **동시에 응답**받을 수 있을 수 있음. 테스트로 확인 필요.
+- **세션 관리**: https://ai.google.dev/gemini-api/docs/live-session?hl=ko
+- **Live API 가이드**: https://ai.google.dev/gemini-api/docs/live-guide?hl=ko
 
 ---
 
-## 🎯 작업 순서
+## 🎯 구현할 기능
 
-### Phase 1: 테스트 코드 작성 (먼저!)
+### Feature 1: 오디오 출력 장치 선택 + 볼륨 조절
 
-앱 코드를 수정하기 전에, **독립적인 테스트 스크립트**를 먼저 작성해서 응답 구조를 확인하세요.
+**목적**: Gemini Native Audio 모델이 반환하는 음성 응답을 선택한 출력 장치로 재생
 
-**파일 생성**: `tests/test_live_api.py`
+**UI 변경**:
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ Audio Source: [▼ 스테레오 믹스]                                      │
+│ Audio Output: [▼ 32UF10 - NVIDIA]  Volume: [━━━━○━━━] 50%  [🔇 Mute]│
+│                                                                     │
+│ [Start Translation]                                          [⚙️]   │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│   Translation will appear here...                                   │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+#### 1-1. 출력 장치 조회 메서드 추가
+
+**파일**: `src/audio/device_manager.py`
 
 ```python
-"""
-Gemini Live API 테스트 스크립트
-목적: Native Audio 모델의 응답 구조 확인
-"""
-import asyncio
-import os
-import numpy as np
 import sounddevice as sd
-from google import genai
-from google.genai import types
 
-# Load API key from environment
-API_KEY = os.environ.get("GEMINI_API_KEY")
-MODEL_NAME = "gemini-2.5-flash-native-audio-preview-12-2025"
+class DeviceManager:
+    # ... existing methods ...
+    
+    @staticmethod
+    def get_output_devices():
+        """Get list of audio output devices."""
+        devices = []
+        for i, device in enumerate(sd.query_devices()):
+            if device['max_output_channels'] > 0:
+                devices.append({
+                    'id': i,
+                    'name': device['name'],
+                    'channels': device['max_output_channels'],
+                    'default_samplerate': device['default_samplerate']
+                })
+        return devices
+```
 
-async def test_live_api():
-    """Test Live API connection and response structure."""
-    
-    client = genai.Client(api_key=API_KEY, http_options={"api_version": "v1alpha"})
-    
-    # Test different configurations
-    configs_to_test = [
-        {
-            "name": "AUDIO only",
-            "config": types.LiveConnectConfig(
-                response_modalities=["AUDIO"],
-                speech_config=types.SpeechConfig(
-                    voice_config=types.VoiceConfig(
-                        prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Aoede")
-                    )
-                ),
-                system_instruction=types.Content(
-                    parts=[types.Part(text="Say 'Hello, this is a test' in Korean.")]
-                )
-            )
-        },
-        {
-            "name": "TEXT only",
-            "config": types.LiveConnectConfig(
-                response_modalities=["TEXT"],
-                system_instruction=types.Content(
-                    parts=[types.Part(text="Say 'Hello, this is a test' in Korean.")]
-                )
-            )
-        },
-        {
-            "name": "TEXT and AUDIO",
-            "config": types.LiveConnectConfig(
-                response_modalities=["TEXT", "AUDIO"],
-                speech_config=types.SpeechConfig(
-                    voice_config=types.VoiceConfig(
-                        prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Aoede")
-                    )
-                ),
-                system_instruction=types.Content(
-                    parts=[types.Part(text="Say 'Hello, this is a test' in Korean.")]
-                )
-            )
-        }
-    ]
-    
-    for test_config in configs_to_test:
-        print(f"\n{'='*60}")
-        print(f"Testing: {test_config['name']}")
-        print(f"{'='*60}")
-        
-        try:
-            async with client.aio.live.connect(model=MODEL_NAME, config=test_config['config']) as session:
-                print("✅ Connected successfully!")
-                
-                # Send a simple text message to trigger response
-                await session.send(
-                    input=types.LiveClientContent(
-                        turns=[types.Content(
-                            parts=[types.Part(text="Please respond now.")]
-                        )],
-                        turn_complete=True
-                    )
-                )
-                
-                # Receive and analyze responses
-                response_count = 0
-                async for response in session.receive():
-                    response_count += 1
-                    print(f"\n--- Response #{response_count} ---")
-                    print(f"Type: {type(response)}")
-                    
-                    if response.server_content:
-                        sc = response.server_content
-                        print(f"server_content attributes: {[a for a in dir(sc) if not a.startswith('_')]}")
-                        
-                        # Check for model_turn
-                        if sc.model_turn:
-                            print(f"  model_turn.parts count: {len(sc.model_turn.parts)}")
-                            for i, part in enumerate(sc.model_turn.parts):
-                                print(f"    Part {i}: {type(part)}")
-                                if part.text:
-                                    print(f"      TEXT: {part.text[:100]}...")
-                                if part.inline_data:
-                                    print(f"      AUDIO: {part.inline_data.mime_type}, {len(part.inline_data.data)} bytes")
-                        
-                        # Check for transcription
-                        if hasattr(sc, 'output_transcription') and sc.output_transcription:
-                            print(f"  output_transcription: {sc.output_transcription}")
-                        if hasattr(sc, 'input_transcription') and sc.input_transcription:
-                            print(f"  input_transcription: {sc.input_transcription}")
-                        
-                        # Check turn_complete
-                        if hasattr(sc, 'turn_complete') and sc.turn_complete:
-                            print("  turn_complete: True")
-                            break
-                    
-                    if response_count > 20:  # Safety limit
-                        print("Reached response limit")
-                        break
-                        
-        except Exception as e:
-            print(f"❌ Error: {e}")
-            import traceback
-            traceback.print_exc()
-        
-        await asyncio.sleep(1)  # Wait between tests
+---
 
-async def test_with_audio_input():
-    """Test with actual microphone input."""
-    print("\n" + "="*60)
-    print("Testing with microphone input")
-    print("="*60)
+#### 1-2. 오디오 재생 모듈 생성
+
+**파일**: `src/audio/playback.py` (새로 생성)
+
+```python
+import sounddevice as sd
+import numpy as np
+import asyncio
+from typing import Optional
+
+class AudioPlayback:
+    """Plays audio data through selected output device."""
     
-    client = genai.Client(api_key=API_KEY, http_options={"api_version": "v1alpha"})
+    def __init__(self, device_id: Optional[int] = None, sample_rate: int = 24000):
+        self.device_id = device_id
+        self.sample_rate = sample_rate
+        self.volume = 0.5  # 0.0 to 1.0
+        self.muted = False
+        self._audio_queue = asyncio.Queue()
+        self._playback_task = None
     
-    config = types.LiveConnectConfig(
-        response_modalities=["AUDIO"],  # or ["TEXT", "AUDIO"] if supported
-        speech_config=types.SpeechConfig(
-            voice_config=types.VoiceConfig(
-                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Aoede")
-            )
-        ),
-        system_instruction=types.Content(
-            parts=[types.Part(text="You are a real-time interpreter. Translate English speech to Korean.")]
-        )
-    )
+    def set_device(self, device_id: int):
+        """Set output device."""
+        self.device_id = device_id
     
-    try:
-        async with client.aio.live.connect(model=MODEL_NAME, config=config) as session:
-            print("✅ Connected! Speak into your microphone...")
-            print("Press Ctrl+C to stop")
-            
-            # Audio capture settings
-            SAMPLE_RATE = 16000
-            CHUNK_SIZE = 1024
-            
-            audio_queue = asyncio.Queue()
-            
-            def audio_callback(indata, frames, time, status):
-                if status:
-                    print(f"Audio status: {status}")
-                # Convert float32 to int16
-                audio_int16 = (indata * 32767).astype(np.int16)
-                asyncio.get_event_loop().call_soon_threadsafe(
-                    audio_queue.put_nowait, audio_int16.tobytes()
-                )
-            
-            # Start audio capture
-            stream = sd.InputStream(
-                samplerate=SAMPLE_RATE,
-                channels=1,
-                dtype='float32',
-                blocksize=CHUNK_SIZE,
-                callback=audio_callback
-            )
-            stream.start()
-            
-            # Tasks
-            async def send_audio():
-                while True:
-                    audio_data = await audio_queue.get()
-                    await session.send(
-                        input=types.LiveClientRealtimeInput(
-                            media_chunks=[types.Blob(data=audio_data, mime_type="audio/pcm")]
-                        )
-                    )
-            
-            async def receive_responses():
-                async for response in session.receive():
-                    if response.server_content:
-                        sc = response.server_content
-                        if sc.model_turn:
-                            for part in sc.model_turn.parts:
-                                if part.text:
-                                    print(f"[TEXT] {part.text}")
-                                if part.inline_data:
-                                    print(f"[AUDIO] {len(part.inline_data.data)} bytes")
-                        if hasattr(sc, 'output_transcription') and sc.output_transcription:
-                            print(f"[TRANSCRIPTION] {sc.output_transcription}")
-            
-            send_task = asyncio.create_task(send_audio())
-            receive_task = asyncio.create_task(receive_responses())
-            
+    def set_volume(self, volume: float):
+        """Set volume (0.0 to 1.0)."""
+        self.volume = max(0.0, min(1.0, volume))
+    
+    def set_muted(self, muted: bool):
+        """Set mute state."""
+        self.muted = muted
+    
+    def toggle_mute(self) -> bool:
+        """Toggle mute and return new state."""
+        self.muted = not self.muted
+        return self.muted
+    
+    async def start(self):
+        """Start playback loop."""
+        self._playback_task = asyncio.create_task(self._playback_loop())
+    
+    async def stop(self):
+        """Stop playback."""
+        if self._playback_task:
+            self._playback_task.cancel()
             try:
-                await asyncio.gather(send_task, receive_task)
+                await self._playback_task
             except asyncio.CancelledError:
                 pass
-            finally:
-                stream.stop()
+    
+    async def queue_audio(self, audio_data: bytes):
+        """Add audio data to playback queue."""
+        await self._audio_queue.put(audio_data)
+    
+    async def _playback_loop(self):
+        """Continuously play queued audio."""
+        try:
+            while True:
+                audio_data = await self._audio_queue.get()
                 
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        import traceback
-        traceback.print_exc()
-
-if __name__ == "__main__":
-    print("Gemini Live API Test Script")
-    print(f"API Key: {'✅ Set' if API_KEY else '❌ Missing'}")
-    print(f"Model: {MODEL_NAME}")
-    
-    if not API_KEY:
-        print("Set GEMINI_API_KEY environment variable first!")
-        exit(1)
-    
-    # Run tests
-    asyncio.run(test_live_api())
-    
-    # Uncomment to test with microphone
-    # asyncio.run(test_with_audio_input())
+                if self.muted or self.volume == 0:
+                    continue  # Skip playback but consume queue
+                
+                try:
+                    # Convert bytes to numpy array (assuming 16-bit PCM from Gemini)
+                    audio_array = np.frombuffer(audio_data, dtype=np.int16)
+                    # Normalize and apply volume
+                    audio_float = audio_array.astype(np.float32) / 32768.0 * self.volume
+                    
+                    # Play audio (blocking but short chunks)
+                    sd.play(audio_float, self.sample_rate, device=self.device_id)
+                    sd.wait()  # Wait for playback to finish
+                    
+                except Exception as e:
+                    print(f"Playback error: {e}")
+                    
+        except asyncio.CancelledError:
+            pass
 ```
 
 ---
 
-### Phase 2: 테스트 결과 분석
+#### 1-3. UI에 출력 장치 선택 + 볼륨 조절 추가
 
-테스트 스크립트 실행 후 다음을 확인:
+**파일**: `src/ui/main_window.py`
 
-1. **어떤 config가 작동하는지**:
-   - `["AUDIO"]` only
-   - `["TEXT"]` only  
-   - `["TEXT", "AUDIO"]` 둘 다
+**추가할 import**:
+```python
+from PyQt6.QtWidgets import QSlider, QComboBox
+from src.audio.playback import AudioPlayback
+from src.audio.device_manager import DeviceManager
+```
 
-2. **응답 구조**:
-   - `response.server_content.model_turn.parts`에 뭐가 있는지
-   - `output_transcription`이 있는지
-   - 텍스트와 오디오가 어떻게 분리되는지
+**init에 추가**:
+```python
+self.audio_playback = AudioPlayback()
+```
 
-3. **SESSION_LOG.md에 결과 기록**:
-```markdown
-## Live API Test Results
-- Config tested: ...
-- Working config: ...
-- Response structure:
-  - text: ...
-  - audio: ...
-  - transcription: ...
+**init_ui()에 추가** (top_layout 아래에):
+```python
+# Output Device Row
+output_layout = QHBoxLayout()
+
+output_label = QLabel("Audio Output:")
+output_label.setStyleSheet("color: #AAAAAA;")
+output_layout.addWidget(output_label)
+
+self.output_selector = QComboBox()
+self.output_selector.setStyleSheet("background-color: #3E3E3E; color: white; padding: 5px;")
+self._populate_output_devices()
+self.output_selector.currentIndexChanged.connect(self._on_output_device_changed)
+output_layout.addWidget(self.output_selector, 1)
+
+volume_label = QLabel("Volume:")
+volume_label.setStyleSheet("color: #AAAAAA;")
+output_layout.addWidget(volume_label)
+
+self.volume_slider = QSlider(Qt.Orientation.Horizontal)
+self.volume_slider.setRange(0, 100)
+self.volume_slider.setValue(50)
+self.volume_slider.setFixedWidth(100)
+self.volume_slider.valueChanged.connect(self._on_volume_changed)
+output_layout.addWidget(self.volume_slider)
+
+self.volume_value_label = QLabel("50%")
+self.volume_value_label.setFixedWidth(40)
+output_layout.addWidget(self.volume_value_label)
+
+self.mute_btn = QPushButton("🔊")
+self.mute_btn.setFixedWidth(30)
+self.mute_btn.setStyleSheet("background-color: #3E3E3E; border-radius: 4px;")
+self.mute_btn.clicked.connect(self._toggle_mute)
+output_layout.addWidget(self.mute_btn)
+
+layout.addLayout(output_layout)
+```
+
+**새 메서드 추가**:
+```python
+def _populate_output_devices(self):
+    """Populate output device dropdown."""
+    self.output_selector.clear()
+    devices = DeviceManager.get_output_devices()
+    for device in devices:
+        self.output_selector.addItem(device['name'], device['id'])
+
+def _on_output_device_changed(self, index):
+    """Handle output device change."""
+    device_id = self.output_selector.currentData()
+    if device_id is not None:
+        self.audio_playback.set_device(device_id)
+
+def _on_volume_changed(self, value):
+    """Handle volume slider change."""
+    self.volume_value_label.setText(f"{value}%")
+    self.audio_playback.set_volume(value / 100.0)
+
+def _toggle_mute(self):
+    """Toggle mute state."""
+    muted = self.audio_playback.toggle_mute()
+    self.mute_btn.setText("🔇" if muted else "🔊")
+```
+
+**process_audio_stream() 수정**:
+```python
+elif item_type == "audio":
+    # Play audio through selected output device
+    await self.audio_playback.queue_audio(data)
+```
+
+**start_translation() 수정** (await self.audio_capture.start() 다음에):
+```python
+# Start audio playback
+await self.audio_playback.start()
+```
+
+**stop_translation() 수정**:
+```python
+# Stop audio playback
+await self.audio_playback.stop()
 ```
 
 ---
 
-### Phase 3: 세션 관리 추가
+### Feature 2: 세션 관리 (15분 제한 해결)
 
-문서에 따르면 **세션이 15분으로 제한**됨. 세션 관리 로직 필요:
+**목적**: Live API 세션이 15분에 만료되므로, 장시간 미팅(30분~1시간)을 지원하기 위해 자동 재연결
 
-**`src/translator/gemini_client.py`에 추가**:
+**참조**: https://ai.google.dev/gemini-api/docs/live-session?hl=ko
+
+---
+
+#### 2-1. 세션 관리 로직 추가
+
+**파일**: `src/translator/gemini_client.py`
 
 ```python
+import time
+
 class GeminiClient:
-    SESSION_TIMEOUT = 14 * 60  # 14분 (여유 1분)
+    SESSION_TIMEOUT = 14 * 60  # 14분 (15분 제한 전 여유)
     
     def __init__(self):
         # ... existing code ...
         self.session_start_time = None
+        self._reconnecting = False
     
-    async def _check_session_timeout(self):
-        """Check if session needs to be refreshed."""
-        if self.session_start_time:
-            elapsed = time.time() - self.session_start_time
-            if elapsed > self.SESSION_TIMEOUT:
-                print("Session timeout approaching, reconnecting...")
-                await self._reconnect()
+    async def stream_audio(self, audio_queue):
+        """
+        Connects to Live API and streams audio from the queue.
+        Automatically reconnects before session timeout.
+        """
+        while self.is_connected:
+            try:
+                async for item in self._stream_audio_session(audio_queue):
+                    yield item
+            except SessionExpiredError:
+                print("Session expired, reconnecting...")
+                await asyncio.sleep(0.5)
+                continue
+            except Exception as e:
+                if not self._reconnecting:
+                    print(f"Stream error: {e}")
+                    raise
     
-    async def _reconnect(self):
-        """Reconnect to Live API."""
-        # Implement reconnection logic
-        pass
+    async def _stream_audio_session(self, audio_queue):
+        """Single session stream with timeout monitoring."""
+        if not self.client:
+            print("Client not initialized")
+            return
+
+        # ... config setup (existing code) ...
+
+        try:
+            print(f"Connecting to Live API with model: {self.model_name}...")
+            async with self.client.aio.live.connect(model=self.model_name, config=config) as session:
+                self.session = session
+                self.session_start_time = time.time()
+                print("Connected to Gemini Live API")
+                
+                # Start tasks
+                send_task = asyncio.create_task(self._send_audio_loop(session, audio_queue))
+                timeout_task = asyncio.create_task(self._session_timeout_monitor())
+                
+                try:
+                    while True:
+                        async for response in session.receive():
+                            if response.server_content and response.server_content.model_turn:
+                                for part in response.server_content.model_turn.parts:
+                                    if part.text:
+                                        yield ("text", part.text)
+                                    elif part.inline_data and part.inline_data.mime_type.startswith("audio/"):
+                                        yield ("audio", part.inline_data.data)
+                except asyncio.CancelledError:
+                    print("Receive loop cancelled")
+                finally:
+                    send_task.cancel()
+                    timeout_task.cancel()
+                    try:
+                        await send_task
+                        await timeout_task
+                    except asyncio.CancelledError:
+                        pass
+
+        except Exception as e:
+            print(f"Live API Connection Error: {e}")
+            traceback.print_exc()
+            raise
+    
+    async def _session_timeout_monitor(self):
+        """Monitor session timeout and trigger reconnection."""
+        try:
+            while True:
+                await asyncio.sleep(30)  # Check every 30 seconds
+                
+                if self.session_start_time:
+                    elapsed = time.time() - self.session_start_time
+                    remaining = self.SESSION_TIMEOUT - elapsed
+                    
+                    if remaining < 60:  # Less than 1 minute remaining
+                        print(f"Session timeout in {remaining:.0f}s, preparing reconnection...")
+                    
+                    if elapsed >= self.SESSION_TIMEOUT:
+                        print("Session timeout reached, triggering reconnection...")
+                        self._reconnecting = True
+                        raise SessionExpiredError("Session timeout")
+                        
+        except asyncio.CancelledError:
+            pass
+
+class SessionExpiredError(Exception):
+    """Raised when session needs to be refreshed."""
+    pass
 ```
 
 ---
 
-### Phase 4: 앱 코드 수정
+#### 2-2. 세션 상태 UI 표시 (선택)
 
-테스트 결과를 바탕으로 앱 코드 수정.
+**파일**: `src/ui/main_window.py`
 
----
+status_bar에 세션 남은 시간 표시:
 
-## 📌 수정 체크리스트
+```python
+# init에 추가
+self.session_timer = QTimer()
+self.session_timer.timeout.connect(self._update_session_status)
 
-- [ ] `tests/test_live_api.py` 생성 및 실행
-- [ ] 테스트 결과를 `SESSION_LOG.md`에 기록
-- [ ] 작동하는 config 확인 후 `gemini_client.py` 수정
-- [ ] (필요시) 세션 관리 로직 추가
-- [ ] (선택) 오디오 출력 + 볼륨 조절 UI 추가
+# start_translation()에 추가
+self.session_timer.start(10000)  # Update every 10 seconds
 
----
+# stop_translation()에 추가
+self.session_timer.stop()
 
-## 🔍 테스트 실행 방법
-
-```bash
-# 환경 변수 설정 (PowerShell)
-$env:GEMINI_API_KEY = "your-api-key"
-
-# 테스트 실행
-python tests/test_live_api.py
+# 새 메서드
+def _update_session_status(self):
+    """Update session time remaining in status bar."""
+    if self.gemini_client and self.gemini_client.session_start_time:
+        elapsed = time.time() - self.gemini_client.session_start_time
+        remaining = (14 * 60) - elapsed  # 14 minutes
+        
+        if remaining > 0:
+            minutes = int(remaining // 60)
+            seconds = int(remaining % 60)
+            self.status_bar.showMessage(f"Translating... (Session: {minutes}:{seconds:02d} remaining)")
+        else:
+            self.status_bar.showMessage("Translating... (Reconnecting...)")
 ```
+
+---
+
+## 📌 구현 체크리스트
+
+### Feature 1: 오디오 출력 + 볼륨 조절
+- [ ] `device_manager.py`: `get_output_devices()` 메서드 추가
+- [ ] `audio/playback.py`: 새 파일 생성 - 오디오 재생 클래스
+- [ ] `main_window.py`: 출력 장치 드롭다운 추가
+- [ ] `main_window.py`: 볼륨 슬라이더 추가
+- [ ] `main_window.py`: 뮤트 버튼 추가
+- [ ] `main_window.py`: process_audio_stream()에서 오디오 재생
+
+### Feature 2: 세션 관리
+- [ ] `gemini_client.py`: `SessionExpiredError` 예외 클래스 추가
+- [ ] `gemini_client.py`: `_session_timeout_monitor()` 메서드 추가
+- [ ] `gemini_client.py`: `stream_audio()`에 자동 재연결 로직 추가
+- [ ] (선택) `main_window.py`: 세션 남은 시간 status bar 표시
+
+---
+
+## 🔍 테스트 방법
+
+### 오디오 출력 테스트
+1. 앱 실행: `python -m src.main`
+2. Audio Output 드롭다운에서 출력 장치 선택 (예: 32UF10)
+3. 볼륨 슬라이더 조절
+4. Start Translation → 영어 말하기 → 한국어 음성 출력 확인
+5. 뮤트 버튼 클릭 → 음성 출력 안 됨 확인
+
+### 세션 관리 테스트
+1. Start Translation
+2. 14분 이상 대기 (또는 테스트용으로 SESSION_TIMEOUT을 60초로 설정)
+3. 콘솔에서 "Session timeout reached, triggering reconnection..." 메시지 확인
+4. 자동 재연결 후 번역 계속 작동 확인
 
 ---
 
 ## 📝 완료 보고
 
-테스트 결과와 함께 다음을 `SESSION_LOG.md`에 기록:
+구현 완료 후 `SESSION_LOG.md`에 기록:
 
 ```markdown
-## Live API Investigation Results
-- Date: YYYY-MM-DD
-- Test configs tried: ...
-- Working config: ...
-- Response structure observed: ...
-- Session timeout handling: needed/not needed
-- Next steps: ...
+## Session: Phase 6 - Audio Output & Session Management
+- Added: Audio output device selector
+- Added: Volume slider + mute button
+- Added: Auto-reconnection for 15-minute session limit
+- Tested: [테스트 결과]
+```
+
+```bash
+git add -A
+git commit -m "feat: audio output control and session management"
 ```

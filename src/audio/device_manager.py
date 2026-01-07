@@ -37,6 +37,35 @@ class DeviceManager:
         return devices
 
     @staticmethod
+    def get_output_devices():
+        """
+        Retrieves a list of available audio output devices.
+        
+        Returns:
+            list: A list of dictionaries, each containing device information.
+        """
+        devices = []
+        try:
+            sd_devices = sd.query_devices()
+            
+            for i, device in enumerate(sd_devices):
+                # Filter for output devices (max_output_channels > 0)
+                if device['max_output_channels'] > 0:
+                    device_info = {
+                        'id': i,
+                        'name': device['name'],
+                        'channels': device['max_output_channels'],
+                        'sample_rate': device['default_samplerate'],
+                        'hostapi': device['hostapi']
+                    }
+                    devices.append(device_info)
+                    
+        except Exception as e:
+            print(f"Error querying audio devices: {e}")
+            
+        return devices
+
+    @staticmethod
     def print_input_devices():
         """
         Prints the list of available input devices to the console.

@@ -1,7 +1,7 @@
 import asyncio
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-                             QTextEdit, QPushButton, QLabel, QStatusBar)
-from PyQt6.QtCore import Qt
+                             QTextEdit, QPushButton, QLabel, QStatusBar, QSlider, QComboBox)
+from PyQt6.QtCore import Qt, QTimer
 from qasync import asyncSlot
 
 from src.ui.settings_dialog import SettingsDialog
@@ -11,6 +11,8 @@ from src.translator.gemini_client import GeminiClient
 from src.config.secure_storage import SecureStorage
 from src.utils.file_writer import FileWriter
 from src.config.settings_manager import settings
+from src.audio.playback import AudioPlayback
+from src.audio.device_manager import DeviceManager
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -24,6 +26,7 @@ class MainWindow(QMainWindow):
         self.gemini_client = GeminiClient()
         self.file_writer = FileWriter()
         self.process_task = None
+        self.audio_playback = AudioPlayback()
         
         self.init_ui()
         
@@ -36,29 +39,69 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central_widget)
         layout = QVBoxLayout(central_widget)
         
-        # Top Bar
-        top_layout = QHBoxLayout()
-        
+        # 1. Input Source
         self.audio_selector = AudioSelector()
-        top_layout.addWidget(self.audio_selector, 1)
+        layout.addWidget(self.audio_selector)
+
+        # 2. Output Device & Volume
+        output_layout = QHBoxLayout()
+
+        output_label = QLabel("Audio Output:")
+        output_label.setStyleSheet("color: #AAAAAA;")
+        output_layout.addWidget(output_label)
+
+        self.output_selector = QComboBox()
+        self.output_selector.setStyleSheet("background-color: #3E3E3E; color: white; padding: 5px;")
+        # Populate later
+        self.output_selector.currentIndexChanged.connect(self._on_output_device_changed)
+        output_layout.addWidget(self.output_selector, 1)
+
+        volume_label = QLabel("Volume:")
+        volume_label.setStyleSheet("color: #AAAAAA;")
+        output_layout.addWidget(volume_label)
+
+        self.volume_slider = QSlider(Qt.Orientation.Horizontal)
+        self.volume_slider.setRange(0, 100)
+        self.volume_slider.setValue(50)
+        self.volume_slider.setFixedWidth(100)
+        self.volume_slider.valueChanged.connect(self._on_volume_changed)
+        output_layout.addWidget(self.volume_slider)
+
+        self.volume_value_label = QLabel("50%")
+        self.volume_value_label.setFixedWidth(40)
+        output_layout.addWidget(self.volume_value_label)
+
+        self.mute_btn = QPushButton("🔊")
+        self.mute_btn.setFixedWidth(30)
+        self.mute_btn.setStyleSheet("background-color: #3E3E3E; border-radius: 4px;")
+        self.mute_btn.clicked.connect(self._toggle_mute)
+        output_layout.addWidget(self.mute_btn)
+
+        layout.addLayout(output_layout)
+        
+        # 3. Control Buttons
+        btn_layout = QHBoxLayout()
         
         self.start_btn = QPushButton("Start Translation")
         self.start_btn.setStyleSheet("""
-            QPushButton { background-color: #007ACC; color: white; padding: 8px 15px; border-radius: 4px; border: none; font-weight: bold; }
+            QPushButton { background-color: #007ACC; color: white; padding: 10px 20px; border-radius: 4px; border: none; font-weight: bold; font-size: 14px; }
             QPushButton:hover { background-color: #0098FF; }
             QPushButton:checked { background-color: #FF5555; }
         """)
         self.start_btn.setCheckable(True)
         self.start_btn.clicked.connect(self.toggle_translation)
-        top_layout.addWidget(self.start_btn)
+        btn_layout.addWidget(self.start_btn, 1)
         
         self.settings_btn = QPushButton("⚙️")
-        self.settings_btn.setFixedWidth(40)
-        self.settings_btn.setStyleSheet("background-color: #3E3E3E; border-radius: 4px; border: none;")
+        self.settings_btn.setFixedSize(40, 40)
+        self.settings_btn.setStyleSheet("background-color: #3E3E3E; border-radius: 4px; border: none; font-size: 18px;")
         self.settings_btn.clicked.connect(self.open_settings)
-        top_layout.addWidget(self.settings_btn)
+        btn_layout.addWidget(self.settings_btn)
         
-        layout.addLayout(top_layout)
+        layout.addLayout(btn_layout)
+        
+        # Populate output devices after UI setup
+        self._populate_output_devices()
         
         # Text Area
         self.text_area = QTextEdit()
@@ -74,6 +117,29 @@ class MainWindow(QMainWindow):
         self.status_bar.setStyleSheet("background-color: #007ACC; color: white;")
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Ready")
+
+    def _populate_output_devices(self):
+        """Populate output device dropdown."""
+        self.output_selector.clear()
+        devices = DeviceManager.get_output_devices()
+        for device in devices:
+            self.output_selector.addItem(device['name'], device['id'])
+
+    def _on_output_device_changed(self, index):
+        """Handle output device change."""
+        device_id = self.output_selector.currentData()
+        if device_id is not None:
+            self.audio_playback.set_device(device_id)
+
+    def _on_volume_changed(self, value):
+        """Handle volume slider change."""
+        self.volume_value_label.setText(f"{value}%")
+        self.audio_playback.set_volume(value / 100.0)
+
+    def _toggle_mute(self):
+        """Toggle mute state."""
+        muted = self.audio_playback.toggle_mute()
+        self.mute_btn.setText("🔇" if muted else "🔊")
 
     def open_settings(self):
         dialog = SettingsDialog(self)
@@ -107,6 +173,9 @@ class MainWindow(QMainWindow):
             self.audio_capture = AudioCapture(device_id=device_id)
             await self.audio_capture.start()
 
+            # Start Audio Playback
+            await self.audio_playback.start()
+
             # Start File Session
             if settings.get("output", "auto_save", True):
                 self.file_writer.start_session()
@@ -132,6 +201,8 @@ class MainWindow(QMainWindow):
         if self.audio_capture:
             self.audio_capture.stop()
             self.audio_capture = None
+
+        await self.audio_playback.stop()
 
         self.file_writer.close_session()
             
@@ -165,8 +236,7 @@ class MainWindow(QMainWindow):
                     if item_type == "text":
                         text_to_display = data
                     elif item_type == "audio":
-                        # Audio playback placeholder
-                        # print(f"Received audio chunk: {len(data)} bytes")
+                        await self.audio_playback.queue_audio(data)
                         continue
                 else:
                     # Backward compatibility for text-only yield
