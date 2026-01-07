@@ -1,4 +1,4 @@
-import google.generativeai as genai
+from google import genai
 from src.config.secure_storage import SecureStorage
 
 class ModelFetcher:
@@ -26,19 +26,26 @@ class ModelFetcher:
         if not api_key:
             # Return default fallback models if no API key is set
             return [
-                {"name": "models/gemini-2.5-flash-preview-native-audio-dialog", "displayName": "Gemini 2.5 Flash (Default)"},
-                {"name": "models/gemini-2.0-flash-live-001", "displayName": "Gemini 2.0 Flash Live"},
+                {"name": "gemini-2.0-flash-exp", "displayName": "Gemini 2.0 Flash Live (Exp)"},
+                {"name": "gemini-1.5-flash-latest", "displayName": "Gemini 1.5 Flash"},
             ]
 
         try:
-            genai.configure(api_key=api_key)
+            client = genai.Client(api_key=api_key)
             models = []
-            for m in genai.list_models():
-                # Basic filtering for Gemini models
-                if 'gemini' in m.name.lower() and 'generateContent' in m.supported_generation_methods:
+            
+            # List models using the new SDK
+            for m in client.models.list():
+                # Filtering logic: check if it's a gemini model
+                # New SDK model object usually has .name and .display_name
+                name = getattr(m, 'name', '')
+                display_name = getattr(m, 'display_name', name)
+                
+                # Basic filtering
+                if 'gemini' in name.lower():
                     models.append({
-                        "name": m.name,
-                        "displayName": m.display_name
+                        "name": name,
+                        "displayName": display_name
                     })
             
             if models:
@@ -49,7 +56,7 @@ class ModelFetcher:
             print(f"Error fetching models: {e}")
             # Return cached or default models on error
             return ModelFetcher._cached_models if ModelFetcher._cached_models else [
-                {"name": "models/gemini-2.5-flash-preview-native-audio-dialog", "displayName": "Gemini 2.5 Flash (Offline/Error)"}
+                 {"name": "gemini-2.0-flash-exp", "displayName": "Gemini 2.0 Flash Live (Offline/Error)"}
             ]
 
 if __name__ == "__main__":
