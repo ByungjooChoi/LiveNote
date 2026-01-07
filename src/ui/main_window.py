@@ -78,7 +78,9 @@ class MainWindow(QMainWindow):
     def open_settings(self):
         dialog = SettingsDialog(self)
         if dialog.exec():
-            self.status_bar.showMessage("Settings saved.")
+            # Reinitialize GeminiClient with new settings
+            self.gemini_client = GeminiClient()
+            self.status_bar.showMessage("Settings saved. Client reinitialized.")
 
     @asyncSlot()
     async def toggle_translation(self):

@@ -63,11 +63,6 @@ class GeminiClient:
 
         config = types.LiveConnectConfig(
             response_modalities=["TEXT"],
-            speech_config=types.SpeechConfig(
-                voice_config=types.VoiceConfig(
-                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Aoede")
-                )
-            ),
             system_instruction=types.Content(
                 parts=[types.Part(text="You are a real-time interpreter. Translate English speech to Korean immediately as you hear it. Provide translations in a natural, conversational Korean style.")]
             )
@@ -142,14 +137,13 @@ class GeminiClient:
                      if hasattr(arr, 'dtype') and arr.dtype == np.float32:
                          audio_data = (arr * 32767).astype(np.int16).tobytes()
 
-                await session.send({
-                    "realtime_input": {
-                        "media_chunks": [{
-                            "mime_type": "audio/pcm",
-                            "data": audio_data
-                        }]
-                    }
-                })
+                await session.send(
+                    input=types.LiveClientRealtimeInput(
+                        media_chunks=[
+                            types.Blob(data=audio_data, mime_type="audio/pcm")
+                        ]
+                    )
+                )
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -157,4 +151,5 @@ class GeminiClient:
 
     def disconnect(self):
         self.is_connected = False
+
 

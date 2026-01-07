@@ -47,7 +47,10 @@
 - **모델명 수정**: `gemini-2.5-flash-native-audio-preview-12-2025`로 올바른 모델명 적용.
 - **모델 목록 개선**: `model_fetcher.py`에 Live API 지원 모델 상수(`LIVE_API_MODELS`)를 추가하고, API 키가 없거나 조회 결과에 없을 때 강제로 추가되도록 수정.
 
-## 2026-01-07 (Bugfix - Audio Format)
+## 2026-01-07 (Bugfix - Final)
 ### 수정 내용
-- **Live API Config 수정**: `google.genai.types.LiveConnectConfig`를 사용하여 `response_modalities`와 `speech_config`를 명시적으로 설정.
-- **모델 변경**: `gemini-2.5` Native Audio 모델 연결 문제로 인해 `gemini-2.0-flash-exp`로 모델 변경.
+- **Live API 오디오 이슈 해결**: `gemini-2.5` Native Audio 모델에서 발생하는 `Cannot extract voices` 에러 해결을 위해, 안정적인 `gemini-2.0-flash-exp` 모델로 변경하고 `google.genai.types`를 사용한 설정으로 전환했습니다.
+- **버그 수정**:
+  - `gemini_client.py` fallback 모델명 수정.
+  - `gemini_client.py` `session.send()` 호출 방식을 `types.LiveClientRealtimeInput` 객체 사용으로 수정.
+  - `main_window.py` 설정 변경 시 클라이언트 재생성 로직 추가.
