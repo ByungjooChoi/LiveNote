@@ -1,4 +1,4 @@
-# 🔴 FEEDBACK - Phase 6: 오디오 출력 + 세션 관리
+# 🔴 FEEDBACK - Phase 7: 디버깅 & UX 개선
 
 > **작성일**: 2026-01-07  
 > **상태**: 🔴 구현 필요  
@@ -6,426 +6,312 @@
 
 ---
 
-## 📚 참조 문서
+## 🎯 문제점
 
-- **세션 관리**: https://ai.google.dev/gemini-api/docs/live-session?hl=ko
-- **Live API 가이드**: https://ai.google.dev/gemini-api/docs/live-guide?hl=ko
-
----
-
-## 🎯 구현할 기능
-
-### Feature 1: 오디오 출력 장치 선택 + 볼륨 조절
-
-**목적**: Gemini Native Audio 모델이 반환하는 음성 응답을 선택한 출력 장치로 재생
-
-**UI 변경**:
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│ Audio Source: [▼ 스테레오 믹스]                                      │
-│ Audio Output: [▼ 32UF10 - NVIDIA]  Volume: [━━━━○━━━] 50%  [🔇 Mute]│
-│                                                                     │
-│ [Start Translation]                                          [⚙️]   │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│   Translation will appear here...                                   │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
-```
+번역 결과가 나오지 않을 때 원인을 파악하기 어려움:
+1. 사운드 소스를 잘못 선택했는지?
+2. 오디오가 캡처는 되는데 API로 전송이 안 되는지?
+3. API로 전송은 했는데 응답이 안 오는지?
 
 ---
 
-#### 1-1. 출력 장치 조회 메서드 추가
+## 📋 구현할 기능
 
-**파일**: `src/audio/device_manager.py`
+### Feature 1: 오디오 레벨 미터 (VU Meter)
+
+**목적**: 입력 오디오가 실제로 들어오는지 시각적으로 확인
+
+**UI**:
+```
+Audio Source: [▼ 스테레오 믹스]  [████████░░░░░░░░] 52dB
+```
+
+**구현 방법**:
+1. `capture.py`에서 이미 RMS를 계산하고 있음 (VAD용)
+2. RMS 값을 UI로 전달하여 프로그레스바로 표시
+3. 소리가 없으면 0%, 소리가 크면 100%
+
+---
+
+### Feature 2: 상태 인디케이터
+
+**목적**: 현재 어느 단계에서 문제가 발생하는지 파악
+
+**UI**:
+```
+Status: 🎤 Capturing → 📤 Sending → 📥 Receiving → ✅ Translating
+```
+
+**상태 종류**:
+- `⏸️ Ready` - 대기 중
+- `🎤 Capturing` - 오디오 캡처 중 (레벨 표시)
+- `📤 Sending` - API로 전송 중
+- `📥 Receiving` - 응답 대기 중
+- `✅ Translating` - 번역 결과 수신 중
+- `⚠️ No Audio` - 오디오 입력 없음 (5초 이상 무음)
+- `❌ Error` - 에러 발생
+
+---
+
+### Feature 3: 실시간 오디오 미리보기 (Audio Preview)
+
+**목적**: 사운드 소스 선택 시 해당 소스에서 오디오가 들어오는지 즉시 확인
+
+**동작**:
+1. 사운드 소스 드롭다운 옆에 "Preview" 버튼 추가
+2. Preview 클릭 → 해당 소스에서 2초간 오디오 캡처 → 레벨 미터 표시
+3. 오디오가 감지되면 ✅, 없으면 ❌ 표시
+
+---
+
+### Feature 4: 자동 소스 감지 (선택)
+
+**목적**: 사용자가 말하거나 시스템 소리가 나면 자동으로 번역 시작
+
+**동작**:
+- Start Translation 클릭 후 5초간 무음이면 경고 표시
+- "No audio detected. Please check your audio source."
+
+---
+
+## 🔧 구현 상세
+
+### 1-1. capture.py 수정 - RMS 콜백 추가
+
+**파일**: `src/audio/capture.py`
 
 ```python
-import sounddevice as sd
-
-class DeviceManager:
-    # ... existing methods ...
+class AudioCapture:
+    def __init__(self, device_id=None, sample_rate=16000, chunk_size=1024, on_level_update=None):
+        # ... existing code ...
+        self.on_level_update = on_level_update  # Callback for audio level updates
     
-    @staticmethod
-    def get_output_devices():
-        """Get list of audio output devices."""
-        devices = []
-        for i, device in enumerate(sd.query_devices()):
-            if device['max_output_channels'] > 0:
-                devices.append({
-                    'id': i,
-                    'name': device['name'],
-                    'channels': device['max_output_channels'],
-                    'default_samplerate': device['default_samplerate']
-                })
-        return devices
+    def _audio_callback(self, indata, frames, time, status):
+        # ... existing code ...
+        rms = np.sqrt(np.mean(indata**2))
+        db = 20 * np.log10(rms + 1e-10)  # Convert to dB
+        
+        # Call level update callback
+        if self.on_level_update:
+            # Normalize to 0-100 range (assuming -60dB to 0dB range)
+            level = max(0, min(100, (db + 60) * 100 / 60))
+            self.on_level_update(level)
+        
+        # ... rest of existing code ...
 ```
 
 ---
 
-#### 1-2. 오디오 재생 모듈 생성
-
-**파일**: `src/audio/playback.py` (새로 생성)
+### 1-2. main_window.py - 레벨 미터 UI 추가
 
 ```python
-import sounddevice as sd
-import numpy as np
-import asyncio
-from typing import Optional
+from PyQt6.QtWidgets import QProgressBar
 
-class AudioPlayback:
-    """Plays audio data through selected output device."""
+# In init_ui(), after audio_selector:
+self.level_meter = QProgressBar()
+self.level_meter.setRange(0, 100)
+self.level_meter.setValue(0)
+self.level_meter.setTextVisible(False)
+self.level_meter.setFixedHeight(10)
+self.level_meter.setStyleSheet("""
+    QProgressBar { background-color: #2D2D2D; border: none; border-radius: 5px; }
+    QProgressBar::chunk { background-color: #00FF00; border-radius: 5px; }
+""")
+
+# Add to input layout
+input_layout.addWidget(self.level_meter)
+```
+
+---
+
+### 1-3. 상태 인디케이터 추가
+
+```python
+# In init_ui():
+self.status_indicator = QLabel("⏸️ Ready")
+self.status_indicator.setStyleSheet("color: #AAAAAA; font-size: 12px;")
+
+# Methods to update status:
+def _update_status(self, status_code, message=None):
+    status_map = {
+        "ready": "⏸️ Ready",
+        "capturing": "🎤 Capturing",
+        "sending": "📤 Sending",
+        "receiving": "📥 Receiving",
+        "translating": "✅ Translating",
+        "no_audio": "⚠️ No Audio",
+        "error": "❌ Error"
+    }
     
-    def __init__(self, device_id: Optional[int] = None, sample_rate: int = 24000):
-        self.device_id = device_id
-        self.sample_rate = sample_rate
-        self.volume = 0.5  # 0.0 to 1.0
-        self.muted = False
-        self._audio_queue = asyncio.Queue()
-        self._playback_task = None
+    text = status_map.get(status_code, status_code)
+    if message:
+        text += f" - {message}"
     
-    def set_device(self, device_id: int):
-        """Set output device."""
-        self.device_id = device_id
+    self.status_indicator.setText(text)
     
-    def set_volume(self, volume: float):
-        """Set volume (0.0 to 1.0)."""
-        self.volume = max(0.0, min(1.0, volume))
+    # Update color based on status
+    colors = {
+        "ready": "#AAAAAA",
+        "capturing": "#00AAFF",
+        "sending": "#FFAA00",
+        "receiving": "#00FFAA",
+        "translating": "#00FF00",
+        "no_audio": "#FFAA00",
+        "error": "#FF5555"
+    }
+    self.status_indicator.setStyleSheet(f"color: {colors.get(status_code, '#FFFFFF')}; font-size: 12px;")
+```
+
+---
+
+### 1-4. gemini_client.py - 상태 콜백 추가
+
+```python
+class GeminiClient:
+    def __init__(self, on_status_change=None):
+        # ... existing code ...
+        self.on_status_change = on_status_change
     
-    def set_muted(self, muted: bool):
-        """Set mute state."""
-        self.muted = muted
+    def _emit_status(self, status, message=None):
+        if self.on_status_change:
+            self.on_status_change(status, message)
     
-    def toggle_mute(self) -> bool:
-        """Toggle mute and return new state."""
-        self.muted = not self.muted
-        return self.muted
-    
-    async def start(self):
-        """Start playback loop."""
-        self._playback_task = asyncio.create_task(self._playback_loop())
-    
-    async def stop(self):
-        """Stop playback."""
-        if self._playback_task:
-            self._playback_task.cancel()
-            try:
-                await self._playback_task
-            except asyncio.CancelledError:
-                pass
-    
-    async def queue_audio(self, audio_data: bytes):
-        """Add audio data to playback queue."""
-        await self._audio_queue.put(audio_data)
-    
-    async def _playback_loop(self):
-        """Continuously play queued audio."""
+    async def _send_audio_loop(self, session, audio_queue):
         try:
             while True:
-                audio_data = await self._audio_queue.get()
+                item = await audio_queue.get()
+                # ... existing code ...
                 
-                if self.muted or self.volume == 0:
-                    continue  # Skip playback but consume queue
+                self._emit_status("sending")  # 전송 중
+                await session.send(...)
                 
-                try:
-                    # Convert bytes to numpy array (assuming 16-bit PCM from Gemini)
-                    audio_array = np.frombuffer(audio_data, dtype=np.int16)
-                    # Normalize and apply volume
-                    audio_float = audio_array.astype(np.float32) / 32768.0 * self.volume
-                    
-                    # Play audio (blocking but short chunks)
-                    sd.play(audio_float, self.sample_rate, device=self.device_id)
-                    sd.wait()  # Wait for playback to finish
-                    
-                except Exception as e:
-                    print(f"Playback error: {e}")
-                    
-        except asyncio.CancelledError:
-            pass
-```
-
----
-
-#### 1-3. UI에 출력 장치 선택 + 볼륨 조절 추가
-
-**파일**: `src/ui/main_window.py`
-
-**추가할 import**:
-```python
-from PyQt6.QtWidgets import QSlider, QComboBox
-from src.audio.playback import AudioPlayback
-from src.audio.device_manager import DeviceManager
-```
-
-**init에 추가**:
-```python
-self.audio_playback = AudioPlayback()
-```
-
-**init_ui()에 추가** (top_layout 아래에):
-```python
-# Output Device Row
-output_layout = QHBoxLayout()
-
-output_label = QLabel("Audio Output:")
-output_label.setStyleSheet("color: #AAAAAA;")
-output_layout.addWidget(output_label)
-
-self.output_selector = QComboBox()
-self.output_selector.setStyleSheet("background-color: #3E3E3E; color: white; padding: 5px;")
-self._populate_output_devices()
-self.output_selector.currentIndexChanged.connect(self._on_output_device_changed)
-output_layout.addWidget(self.output_selector, 1)
-
-volume_label = QLabel("Volume:")
-volume_label.setStyleSheet("color: #AAAAAA;")
-output_layout.addWidget(volume_label)
-
-self.volume_slider = QSlider(Qt.Orientation.Horizontal)
-self.volume_slider.setRange(0, 100)
-self.volume_slider.setValue(50)
-self.volume_slider.setFixedWidth(100)
-self.volume_slider.valueChanged.connect(self._on_volume_changed)
-output_layout.addWidget(self.volume_slider)
-
-self.volume_value_label = QLabel("50%")
-self.volume_value_label.setFixedWidth(40)
-output_layout.addWidget(self.volume_value_label)
-
-self.mute_btn = QPushButton("🔊")
-self.mute_btn.setFixedWidth(30)
-self.mute_btn.setStyleSheet("background-color: #3E3E3E; border-radius: 4px;")
-self.mute_btn.clicked.connect(self._toggle_mute)
-output_layout.addWidget(self.mute_btn)
-
-layout.addLayout(output_layout)
-```
-
-**새 메서드 추가**:
-```python
-def _populate_output_devices(self):
-    """Populate output device dropdown."""
-    self.output_selector.clear()
-    devices = DeviceManager.get_output_devices()
-    for device in devices:
-        self.output_selector.addItem(device['name'], device['id'])
-
-def _on_output_device_changed(self, index):
-    """Handle output device change."""
-    device_id = self.output_selector.currentData()
-    if device_id is not None:
-        self.audio_playback.set_device(device_id)
-
-def _on_volume_changed(self, value):
-    """Handle volume slider change."""
-    self.volume_value_label.setText(f"{value}%")
-    self.audio_playback.set_volume(value / 100.0)
-
-def _toggle_mute(self):
-    """Toggle mute state."""
-    muted = self.audio_playback.toggle_mute()
-    self.mute_btn.setText("🔇" if muted else "🔊")
-```
-
-**process_audio_stream() 수정**:
-```python
-elif item_type == "audio":
-    # Play audio through selected output device
-    await self.audio_playback.queue_audio(data)
-```
-
-**start_translation() 수정** (await self.audio_capture.start() 다음에):
-```python
-# Start audio playback
-await self.audio_playback.start()
-```
-
-**stop_translation() 수정**:
-```python
-# Stop audio playback
-await self.audio_playback.stop()
-```
-
----
-
-### Feature 2: 세션 관리 (15분 제한 해결)
-
-**목적**: Live API 세션이 15분에 만료되므로, 장시간 미팅(30분~1시간)을 지원하기 위해 자동 재연결
-
-**참조**: https://ai.google.dev/gemini-api/docs/live-session?hl=ko
-
----
-
-#### 2-1. 세션 관리 로직 추가
-
-**파일**: `src/translator/gemini_client.py`
-
-```python
-import time
-
-class GeminiClient:
-    SESSION_TIMEOUT = 14 * 60  # 14분 (15분 제한 전 여유)
+        except Exception as e:
+            self._emit_status("error", str(e))
     
+    # In receive loop:
+    async for response in session.receive():
+        self._emit_status("receiving")  # 수신 중
+        if response.server_content and response.server_content.model_turn:
+            self._emit_status("translating")  # 번역 결과 수신
+            # ... yield text/audio ...
+```
+
+---
+
+### 1-5. 무음 감지 경고
+
+```python
+# In main_window.py:
+class MainWindow:
     def __init__(self):
         # ... existing code ...
-        self.session_start_time = None
-        self._reconnecting = False
+        self.last_audio_time = None
+        self.silence_check_timer = QTimer()
+        self.silence_check_timer.timeout.connect(self._check_silence)
     
-    async def stream_audio(self, audio_queue):
-        """
-        Connects to Live API and streams audio from the queue.
-        Automatically reconnects before session timeout.
-        """
-        while self.is_connected:
-            try:
-                async for item in self._stream_audio_session(audio_queue):
-                    yield item
-            except SessionExpiredError:
-                print("Session expired, reconnecting...")
-                await asyncio.sleep(0.5)
-                continue
-            except Exception as e:
-                if not self._reconnecting:
-                    print(f"Stream error: {e}")
-                    raise
+    def _on_audio_level_update(self, level):
+        """Called when audio level changes."""
+        self.level_meter.setValue(int(level))
+        
+        # Update last audio time if level is significant
+        if level > 5:  # Threshold
+            self.last_audio_time = time.time()
+            self._update_status("capturing")
     
-    async def _stream_audio_session(self, audio_queue):
-        """Single session stream with timeout monitoring."""
-        if not self.client:
-            print("Client not initialized")
-            return
-
-        # ... config setup (existing code) ...
-
-        try:
-            print(f"Connecting to Live API with model: {self.model_name}...")
-            async with self.client.aio.live.connect(model=self.model_name, config=config) as session:
-                self.session = session
-                self.session_start_time = time.time()
-                print("Connected to Gemini Live API")
-                
-                # Start tasks
-                send_task = asyncio.create_task(self._send_audio_loop(session, audio_queue))
-                timeout_task = asyncio.create_task(self._session_timeout_monitor())
-                
-                try:
-                    while True:
-                        async for response in session.receive():
-                            if response.server_content and response.server_content.model_turn:
-                                for part in response.server_content.model_turn.parts:
-                                    if part.text:
-                                        yield ("text", part.text)
-                                    elif part.inline_data and part.inline_data.mime_type.startswith("audio/"):
-                                        yield ("audio", part.inline_data.data)
-                except asyncio.CancelledError:
-                    print("Receive loop cancelled")
-                finally:
-                    send_task.cancel()
-                    timeout_task.cancel()
-                    try:
-                        await send_task
-                        await timeout_task
-                    except asyncio.CancelledError:
-                        pass
-
-        except Exception as e:
-            print(f"Live API Connection Error: {e}")
-            traceback.print_exc()
-            raise
+    def _check_silence(self):
+        """Check if no audio for too long."""
+        if self.last_audio_time and self.is_running:
+            silence_duration = time.time() - self.last_audio_time
+            if silence_duration > 5:  # 5 seconds of silence
+                self._update_status("no_audio", "Check your audio source")
     
-    async def _session_timeout_monitor(self):
-        """Monitor session timeout and trigger reconnection."""
-        try:
-            while True:
-                await asyncio.sleep(30)  # Check every 30 seconds
-                
-                if self.session_start_time:
-                    elapsed = time.time() - self.session_start_time
-                    remaining = self.SESSION_TIMEOUT - elapsed
-                    
-                    if remaining < 60:  # Less than 1 minute remaining
-                        print(f"Session timeout in {remaining:.0f}s, preparing reconnection...")
-                    
-                    if elapsed >= self.SESSION_TIMEOUT:
-                        print("Session timeout reached, triggering reconnection...")
-                        self._reconnecting = True
-                        raise SessionExpiredError("Session timeout")
-                        
-        except asyncio.CancelledError:
-            pass
-
-class SessionExpiredError(Exception):
-    """Raised when session needs to be refreshed."""
-    pass
+    async def start_translation(self):
+        # ... existing code ...
+        self.last_audio_time = time.time()
+        self.silence_check_timer.start(1000)  # Check every second
+    
+    async def stop_translation(self):
+        # ... existing code ...
+        self.silence_check_timer.stop()
 ```
 
 ---
 
-#### 2-2. 세션 상태 UI 표시 (선택)
-
-**파일**: `src/ui/main_window.py`
-
-status_bar에 세션 남은 시간 표시:
+### 1-6. Audio Preview 버튼 (선택)
 
 ```python
-# init에 추가
-self.session_timer = QTimer()
-self.session_timer.timeout.connect(self._update_session_status)
+# In init_ui(), next to audio_selector:
+self.preview_btn = QPushButton("🔊 Preview")
+self.preview_btn.setFixedWidth(80)
+self.preview_btn.clicked.connect(self._preview_audio_source)
 
-# start_translation()에 추가
-self.session_timer.start(10000)  # Update every 10 seconds
-
-# stop_translation()에 추가
-self.session_timer.stop()
-
-# 새 메서드
-def _update_session_status(self):
-    """Update session time remaining in status bar."""
-    if self.gemini_client and self.gemini_client.session_start_time:
-        elapsed = time.time() - self.gemini_client.session_start_time
-        remaining = (14 * 60) - elapsed  # 14 minutes
-        
-        if remaining > 0:
-            minutes = int(remaining // 60)
-            seconds = int(remaining % 60)
-            self.status_bar.showMessage(f"Translating... (Session: {minutes}:{seconds:02d} remaining)")
-        else:
-            self.status_bar.showMessage("Translating... (Reconnecting...)")
+async def _preview_audio_source(self):
+    """Preview the selected audio source for 2 seconds."""
+    device_id = self.audio_selector.get_selected_device_id()
+    if device_id is None:
+        return
+    
+    self.preview_btn.setEnabled(False)
+    self.preview_btn.setText("Testing...")
+    
+    max_level = 0
+    
+    def on_level(level):
+        nonlocal max_level
+        max_level = max(max_level, level)
+        self.level_meter.setValue(int(level))
+    
+    # Create temporary capture
+    temp_capture = AudioCapture(device_id=device_id, on_level_update=on_level)
+    await temp_capture.start()
+    
+    await asyncio.sleep(2)  # Capture for 2 seconds
+    
+    temp_capture.stop()
+    
+    # Show result
+    if max_level > 10:
+        self.preview_btn.setText("✅ Detected")
+    else:
+        self.preview_btn.setText("❌ No Audio")
+    
+    await asyncio.sleep(1)
+    self.preview_btn.setText("🔊 Preview")
+    self.preview_btn.setEnabled(True)
 ```
 
 ---
 
 ## 📌 구현 체크리스트
 
-### Feature 1: 오디오 출력 + 볼륨 조절
-- [ ] `device_manager.py`: `get_output_devices()` 메서드 추가
-- [ ] `audio/playback.py`: 새 파일 생성 - 오디오 재생 클래스
-- [ ] `main_window.py`: 출력 장치 드롭다운 추가
-- [ ] `main_window.py`: 볼륨 슬라이더 추가
-- [ ] `main_window.py`: 뮤트 버튼 추가
-- [ ] `main_window.py`: process_audio_stream()에서 오디오 재생
+### 필수
+- [ ] `capture.py`: `on_level_update` 콜백 추가
+- [ ] `main_window.py`: 레벨 미터 (QProgressBar) 추가
+- [ ] `main_window.py`: 상태 인디케이터 추가
+- [ ] `main_window.py`: 무음 감지 경고 추가
 
-### Feature 2: 세션 관리
-- [ ] `gemini_client.py`: `SessionExpiredError` 예외 클래스 추가
-- [ ] `gemini_client.py`: `_session_timeout_monitor()` 메서드 추가
-- [ ] `gemini_client.py`: `stream_audio()`에 자동 재연결 로직 추가
-- [ ] (선택) `main_window.py`: 세션 남은 시간 status bar 표시
+### 선택
+- [ ] `main_window.py`: Audio Preview 버튼
+- [ ] `gemini_client.py`: 상태 콜백 추가
 
 ---
 
-## 🔍 테스트 방법
+## 🔍 예상 UI
 
-### 오디오 출력 테스트
-1. 앱 실행: `python -m src.main`
-2. Audio Output 드롭다운에서 출력 장치 선택 (예: 32UF10)
-3. 볼륨 슬라이더 조절
-4. Start Translation → 영어 말하기 → 한국어 음성 출력 확인
-5. 뮤트 버튼 클릭 → 음성 출력 안 됨 확인
-
-### 세션 관리 테스트
-1. Start Translation
-2. 14분 이상 대기 (또는 테스트용으로 SESSION_TIMEOUT을 60초로 설정)
-3. 콘솔에서 "Session timeout reached, triggering reconnection..." 메시지 확인
-4. 자동 재연결 후 번역 계속 작동 확인
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ Audio Source: [▼ 스테레오 믹스]  [████████░░░░░░░░] [🔊 Preview]    │
+│ Audio Output: [▼ 32UF10 - NVIDIA]  [━━━○━] 50%  [🔊]               │
+│                                                                     │
+│ Status: 🎤 Capturing                                                │
+│                                                                     │
+│ [Start Translation]                                          [⚙️]   │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│   안녕하세요, 이것은 테스트입니다.                                    │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
@@ -434,14 +320,15 @@ def _update_session_status(self):
 구현 완료 후 `SESSION_LOG.md`에 기록:
 
 ```markdown
-## Session: Phase 6 - Audio Output & Session Management
-- Added: Audio output device selector
-- Added: Volume slider + mute button
-- Added: Auto-reconnection for 15-minute session limit
+## Session: Phase 7 - Debugging & UX
+- Added: Audio level meter
+- Added: Status indicator
+- Added: Silence detection warning
+- Added: Audio preview button (optional)
 - Tested: [테스트 결과]
 ```
 
 ```bash
 git add -A
-git commit -m "feat: audio output control and session management"
+git commit -m "feat: audio level meter and status indicators for debugging"
 ```

@@ -1,6 +1,7 @@
 import asyncio
+import time
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-                             QTextEdit, QPushButton, QLabel, QStatusBar, QSlider, QComboBox)
+                             QTextEdit, QPushButton, QLabel, QStatusBar, QSlider, QComboBox, QProgressBar)
 from PyQt6.QtCore import Qt, QTimer
 from qasync import asyncSlot
 
@@ -28,6 +29,10 @@ class MainWindow(QMainWindow):
         self.process_task = None
         self.audio_playback = AudioPlayback()
         
+        self.last_audio_time = None
+        self.silence_check_timer = QTimer()
+        self.silence_check_timer.timeout.connect(self._check_silence)
+        
         self.init_ui()
         
         # Check API Key on startup
@@ -39,9 +44,32 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central_widget)
         layout = QVBoxLayout(central_widget)
         
-        # 1. Input Source
+        # 1. Input Source & Level Meter
+        input_layout = QHBoxLayout()
+        # AudioSelector includes label and combo
         self.audio_selector = AudioSelector()
-        layout.addWidget(self.audio_selector)
+        input_layout.addWidget(self.audio_selector)
+        
+        # Level Meter
+        self.level_meter = QProgressBar()
+        self.level_meter.setRange(0, 100)
+        self.level_meter.setValue(0)
+        self.level_meter.setTextVisible(False)
+        self.level_meter.setFixedHeight(10)
+        self.level_meter.setStyleSheet("""
+            QProgressBar { background-color: #2D2D2D; border: none; border-radius: 5px; }
+            QProgressBar::chunk { background-color: #00FF00; border-radius: 5px; }
+        """)
+        input_layout.addWidget(self.level_meter)
+        
+        # Preview Button
+        self.preview_btn = QPushButton("🔊 Preview")
+        self.preview_btn.setFixedWidth(80)
+        self.preview_btn.setStyleSheet("background-color: #3E3E3E; border-radius: 4px;")
+        self.preview_btn.clicked.connect(self._preview_audio_source)
+        input_layout.addWidget(self.preview_btn)
+        
+        layout.addLayout(input_layout)
 
         # 2. Output Device & Volume
         output_layout = QHBoxLayout()
@@ -79,7 +107,12 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(output_layout)
         
-        # 3. Control Buttons
+        # 3. Status Indicator
+        self.status_indicator = QLabel("⏸️ Ready")
+        self.status_indicator.setStyleSheet("color: #AAAAAA; font-size: 14px; font-weight: bold; margin: 5px 0;")
+        layout.addWidget(self.status_indicator)
+        
+        # 4. Control Buttons
         btn_layout = QHBoxLayout()
         
         self.start_btn = QPushButton("Start Translation")
@@ -100,7 +133,7 @@ class MainWindow(QMainWindow):
         
         layout.addLayout(btn_layout)
         
-        # Populate output devices after UI setup
+        # Populate output devices
         self._populate_output_devices()
         
         # Text Area
@@ -119,32 +152,106 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage("Ready")
 
     def _populate_output_devices(self):
-        """Populate output device dropdown."""
         self.output_selector.clear()
         devices = DeviceManager.get_output_devices()
         for device in devices:
             self.output_selector.addItem(device['name'], device['id'])
 
     def _on_output_device_changed(self, index):
-        """Handle output device change."""
         device_id = self.output_selector.currentData()
         if device_id is not None:
             self.audio_playback.set_device(device_id)
 
     def _on_volume_changed(self, value):
-        """Handle volume slider change."""
         self.volume_value_label.setText(f"{value}%")
         self.audio_playback.set_volume(value / 100.0)
 
     def _toggle_mute(self):
-        """Toggle mute state."""
         muted = self.audio_playback.toggle_mute()
         self.mute_btn.setText("🔇" if muted else "🔊")
+
+    def _update_status(self, status_code, message=None):
+        status_map = {
+            "ready": "⏸️ Ready",
+            "capturing": "🎤 Capturing",
+            "sending": "📤 Sending",
+            "receiving": "📥 Receiving",
+            "translating": "✅ Translating",
+            "no_audio": "⚠️ No Audio (Check Mic)",
+            "error": "❌ Error"
+        }
+        
+        text = status_map.get(status_code, status_code)
+        if message:
+            text += f" - {message}"
+        
+        self.status_indicator.setText(text)
+        
+        colors = {
+            "ready": "#AAAAAA",
+            "capturing": "#00AAFF",
+            "sending": "#FFAA00",
+            "receiving": "#00FFAA",
+            "translating": "#00FF00",
+            "no_audio": "#FFAA00",
+            "error": "#FF5555"
+        }
+        self.status_indicator.setStyleSheet(f"color: {colors.get(status_code, '#FFFFFF')}; font-size: 14px; font-weight: bold; margin: 5px 0;")
+
+    def _on_audio_level_update(self, level):
+        self.level_meter.setValue(int(level))
+        if level > 5:
+            self.last_audio_time = time.time()
+            # If we were in 'no_audio' state, revert to capturing/translating
+            if "No Audio" in self.status_indicator.text():
+                self._update_status("capturing")
+
+    def _check_silence(self):
+        if self.last_audio_time and self.is_running:
+            silence_duration = time.time() - self.last_audio_time
+            if silence_duration > 5:
+                self._update_status("no_audio")
+
+    @asyncSlot()
+    async def _preview_audio_source(self):
+        device_id = self.audio_selector.get_selected_device_id()
+        if device_id is None:
+            return
+        
+        self.preview_btn.setEnabled(False)
+        self.preview_btn.setText("Testing...")
+        
+        max_level = 0
+        
+        def on_level(level):
+            nonlocal max_level
+            max_level = max(max_level, level)
+            self.level_meter.setValue(int(level))
+        
+        try:
+            temp_capture = AudioCapture(device_id=device_id, on_level_update=on_level)
+            await temp_capture.start()
+            
+            await asyncio.sleep(2)
+            
+            temp_capture.stop()
+            
+            if max_level > 10:
+                self.preview_btn.setText("✅ OK")
+            else:
+                self.preview_btn.setText("❌ Silent")
+        except Exception as e:
+            self.preview_btn.setText("❌ Error")
+            print(f"Preview error: {e}")
+        
+        await asyncio.sleep(1)
+        self.preview_btn.setText("🔊 Preview")
+        self.preview_btn.setEnabled(True)
+        self.level_meter.setValue(0)
 
     def open_settings(self):
         dialog = SettingsDialog(self)
         if dialog.exec():
-            # Reinitialize GeminiClient with new settings
             self.gemini_client = GeminiClient()
             self.status_bar.showMessage("Settings saved. Client reinitialized.")
 
@@ -163,40 +270,41 @@ class MainWindow(QMainWindow):
             return
 
         self.start_btn.setText("Stop Translation")
-        self.start_btn.setStyleSheet("background-color: #FF5555; color: white; padding: 8px 15px; border-radius: 4px; border: none; font-weight: bold;")
+        self.start_btn.setStyleSheet("background-color: #FF5555; color: white; padding: 10px 20px; border-radius: 4px; border: none; font-weight: bold; font-size: 14px;")
         self.text_area.clear()
         self.status_bar.showMessage("Connecting...")
+        self._update_status("ready", "Connecting...")
         
         try:
-            # Initialize Audio Capture
-            # Note: capture.py creates its own queue
-            self.audio_capture = AudioCapture(device_id=device_id)
+            self.audio_capture = AudioCapture(device_id=device_id, on_level_update=self._on_audio_level_update)
             await self.audio_capture.start()
 
-            # Start Audio Playback
             await self.audio_playback.start()
 
-            # Start File Session
             if settings.get("output", "auto_save", True):
                 self.file_writer.start_session()
             
-            # Connect Gemini
             await self.gemini_client.connect()
             
-            # Start Processing Loop (Connects capture queue to gemini stream)
             self.process_task = asyncio.create_task(self.process_audio_stream())
             
             self.status_bar.showMessage("Translating...")
+            self._update_status("capturing")
             self.is_running = True
+            
+            self.last_audio_time = time.time()
+            self.silence_check_timer.start(1000)
             
         except Exception as e:
             print(f"Start Error: {e}")
             self.status_bar.showMessage(f"Error: {e}")
+            self._update_status("error", str(e))
             await self.stop_translation()
 
     async def stop_translation(self):
         self.is_running = False
         self.status_bar.showMessage("Stopping...")
+        self.silence_check_timer.stop()
         
         if self.audio_capture:
             self.audio_capture.stop()
@@ -220,15 +328,19 @@ class MainWindow(QMainWindow):
         self.start_btn.setText("Start Translation")
         self.start_btn.setChecked(False)
         self.start_btn.setStyleSheet("""
-            QPushButton { background-color: #007ACC; color: white; padding: 8px 15px; border-radius: 4px; border: none; font-weight: bold; }
+            QPushButton { background-color: #007ACC; color: white; padding: 10px 20px; border-radius: 4px; border: none; font-weight: bold; font-size: 14px; }
             QPushButton:hover { background-color: #0098FF; }
         """)
         self.status_bar.showMessage("Stopped")
+        self._update_status("ready")
+        self.level_meter.setValue(0)
 
     async def process_audio_stream(self):
         try:
-            # gemini_client.stream_audio takes the queue and yields (type, data) tuple or text
             async for item in self.gemini_client.stream_audio(self.audio_capture.queue):
+                # Update status to receiving/translating
+                self._update_status("translating")
+                
                 text_to_display = ""
                 
                 if isinstance(item, tuple):
@@ -239,21 +351,18 @@ class MainWindow(QMainWindow):
                         await self.audio_playback.queue_audio(data)
                         continue
                 else:
-                    # Backward compatibility for text-only yield
                     text_to_display = item
 
-                # Skip empty text
                 if not text_to_display or not text_to_display.strip():
                     continue
                     
-                # Ensure UI update happens on main thread (qasync handles this generally, but appending is safe)
                 self.text_area.moveCursor(self.text_area.textCursor().MoveOperation.End)
-                self.text_area.insertPlainText(text_to_display + " ") # Add space or newline
+                self.text_area.insertPlainText(text_to_display + " ")
                 self.text_area.moveCursor(self.text_area.textCursor().MoveOperation.End)
                 
-                # Write to file
                 self.file_writer.write_line(text_to_display)
                 
         except Exception as e:
             print(f"Stream processing error: {e}")
             self.status_bar.showMessage(f"Stream Error: {e}")
+            self._update_status("error", str(e))

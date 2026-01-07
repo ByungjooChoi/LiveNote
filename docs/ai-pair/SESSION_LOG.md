@@ -65,3 +65,12 @@
   - `src/ui/main_window.py`: 오디오 출력 장치 선택, 볼륨 슬라이더, 음소거 버튼 UI 추가 및 연동.
 - **세션 관리 (Session Management)**
   - `src/translator/gemini_client.py`: 15분 세션 제한을 위한 타임아웃 모니터링 및 자동 재연결 로직 구현 (`SessionExpiredError` 사용).
+
+## 2026-01-07 (Phase 7 - UI/UX Improvement)
+### 구현 내용
+- **UI 개선**:
+  - `src/ui/main_window.py`: 오디오 레벨 미터, 상태 인디케이터, 오디오 미리보기 버튼 추가.
+  - `src/audio/capture.py`: 오디오 레벨(dB) 계산 및 콜백 기능 추가.
+- **UX 기능**:
+  - 무음 감지 경고 로직 추가 (5초 이상 무음 시 상태 표시).
+  - 실시간 상태 업데이트 (Capturing, Sending, Receiving 등).

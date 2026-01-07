@@ -7,12 +7,13 @@ class AudioCapture:
     Captures real-time audio from a selected input device.
     """
     
-    def __init__(self, device_id, sample_rate=16000, channels=1, buffer_size=1024, silence_threshold=0.01):
+    def __init__(self, device_id, sample_rate=16000, channels=1, buffer_size=1024, silence_threshold=0.01, on_level_update=None):
         self.device_id = device_id
         self.sample_rate = sample_rate
         self.channels = channels
         self.buffer_size = buffer_size
         self.silence_threshold = silence_threshold
+        self.on_level_update = on_level_update
         self.queue = asyncio.Queue()
         self.stream = None
         self.is_running = False
@@ -36,6 +37,14 @@ class AudioCapture:
         
         # Calculate audio level (RMS) for VAD or UI visualization
         rms = np.sqrt(np.mean(audio_data**2))
+        
+        # Call level update callback if provided
+        if self.on_level_update:
+            # Convert to dB for better visualization range
+            db = 20 * np.log10(rms + 1e-10)
+            # Normalize to 0-100 range (assuming -60dB to 0dB range)
+            level = max(0, min(100, int((db + 60) * 100 / 60)))
+            self.on_level_update(level)
         
         # Simple VAD: Only put in queue if above threshold
         if rms >= self.silence_threshold:
