@@ -61,12 +61,28 @@ class GeminiClient:
             print("Client not initialized")
             return
 
-        config = types.LiveConnectConfig(
-            response_modalities=["TEXT"],
-            system_instruction=types.Content(
-                parts=[types.Part(text="You are a real-time interpreter. Translate English speech to Korean immediately as you hear it. Provide translations in a natural, conversational Korean style.")]
+        # Check if using Native Audio model
+        is_native_audio = "native-audio" in self.model_name
+
+        if is_native_audio:
+            config = types.LiveConnectConfig(
+                response_modalities=["TEXT", "AUDIO"],
+                speech_config=types.SpeechConfig(
+                    voice_config=types.VoiceConfig(
+                        prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Aoede")
+                    )
+                ),
+                system_instruction=types.Content(
+                    parts=[types.Part(text="You are a real-time interpreter. Listen to English speech and respond with Korean translation in both text and speech. Speak naturally in Korean.")]
+                )
             )
-        )
+        else:
+            config = types.LiveConnectConfig(
+                response_modalities=["TEXT"],
+                system_instruction=types.Content(
+                    parts=[types.Part(text="You are a real-time interpreter. Translate English speech to Korean immediately as you hear it. Provide translations in a natural, conversational Korean style.")]
+                )
+            )
 
         try:
             print(f"Connecting to Live API with model: {self.model_name}...")
@@ -83,7 +99,9 @@ class GeminiClient:
                             if response.server_content and response.server_content.model_turn:
                                 for part in response.server_content.model_turn.parts:
                                     if part.text:
-                                        yield part.text
+                                        yield ("text", part.text)
+                                    elif part.inline_data and part.inline_data.mime_type.startswith("audio/"):
+                                        yield ("audio", part.inline_data.data)
                 except asyncio.CancelledError:
                     print("Receive loop cancelled")
                 except Exception as e:

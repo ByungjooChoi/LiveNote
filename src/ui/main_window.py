@@ -156,19 +156,33 @@ class MainWindow(QMainWindow):
 
     async def process_audio_stream(self):
         try:
-            # gemini_client.stream_audio takes the queue and yields text
-            async for text in self.gemini_client.stream_audio(self.audio_capture.queue):
+            # gemini_client.stream_audio takes the queue and yields (type, data) tuple or text
+            async for item in self.gemini_client.stream_audio(self.audio_capture.queue):
+                text_to_display = ""
+                
+                if isinstance(item, tuple):
+                    item_type, data = item
+                    if item_type == "text":
+                        text_to_display = data
+                    elif item_type == "audio":
+                        # Audio playback placeholder
+                        # print(f"Received audio chunk: {len(data)} bytes")
+                        continue
+                else:
+                    # Backward compatibility for text-only yield
+                    text_to_display = item
+
                 # Skip empty text
-                if not text or not text.strip():
+                if not text_to_display or not text_to_display.strip():
                     continue
                     
                 # Ensure UI update happens on main thread (qasync handles this generally, but appending is safe)
                 self.text_area.moveCursor(self.text_area.textCursor().MoveOperation.End)
-                self.text_area.insertPlainText(text + " ") # Add space or newline
+                self.text_area.insertPlainText(text_to_display + " ") # Add space or newline
                 self.text_area.moveCursor(self.text_area.textCursor().MoveOperation.End)
                 
                 # Write to file
-                self.file_writer.write_line(text)
+                self.file_writer.write_line(text_to_display)
                 
         except Exception as e:
             print(f"Stream processing error: {e}")

@@ -1,4 +1,4 @@
-# 🔴 FEEDBACK - 긴급 수정 필요
+# 🔴 FEEDBACK - Native Audio 모델 지원 추가
 
 > **작성일**: 2026-01-07  
 > **상태**: 🔴 수정 필요  
@@ -6,145 +6,205 @@
 
 ---
 
-## 📋 코드 리뷰 결과
+## 📋 에러 분석
 
-### ✅ 잘 된 부분
-- `config.yaml` - 올바른 모델명 설정: `gemini-2.5-flash-native-audio-preview-12-2025`
-- `model_fetcher.py` - LIVE_API_MODELS에 올바른 모델 포함
-- `gemini_client.py` Line 64-74 - `types.LiveConnectConfig` 올바르게 사용, `speech_config` 추가
+### 에러 메시지
+```
+Cannot extract voices from a non-audio request
+```
+
+### 원인
+- `gemini-2.5-flash-native-audio-preview-12-2025`는 **Native Audio** 모델
+- 이 모델은 **음성 출력을 반드시 포함**해야 함
+- 현재 `response_modalities=["TEXT"]`만 설정되어 있어서 에러 발생
+
+### Sound Source 문제가 아님
+- 로그에서 `Audio capture started on device 0` 확인 → 오디오 캡처는 정상
+- 문제는 Gemini API 연결 설정 (`LiveConnectConfig`)
 
 ---
 
 ## 🔴 수정해야 할 사항
 
-### Issue 1: Fallback 모델명 오류
+### Issue 1: Native Audio 모델 지원
 **파일**: `src/translator/gemini_client.py`  
-**라인**: 26
+**라인**: 64-69
 
 **현재 코드**:
 ```python
-self.model_name = "gemini-2.0-flash-exp"
-```
-
-**문제점**: fallback 모델이 여전히 2.0 버전임
-
-**수정할 코드**:
-```python
-self.model_name = "gemini-2.5-flash-native-audio-preview-12-2025"
-```
-
----
-
-### Issue 2: session.send() 호출 방식 오류 (Critical!)
-**파일**: `src/translator/gemini_client.py`  
-**라인**: 145-152
-
-**에러 메시지**: 
-```
-AsyncSession.send() takes 1 positional argument but 2 were given
-```
-
-**현재 코드 (잘못됨)**:
-```python
-await session.send({
-    "realtime_input": {
-        "media_chunks": [{
-            "mime_type": "audio/pcm",
-            "data": audio_data
-        }]
-    }
-})
-```
-
-**문제점**: `google-genai` SDK의 `session.send()`는 dict를 positional argument로 받지 않음. `input=` 키워드 인자 또는 `types` 객체를 사용해야 함.
-
-**수정할 코드**:
-```python
-await session.send(
-    input=types.LiveClientRealtimeInput(
-        media_chunks=[
-            types.Blob(data=audio_data, mime_type="audio/pcm")
-        ]
+config = types.LiveConnectConfig(
+    response_modalities=["TEXT"],
+    system_instruction=types.Content(
+        parts=[types.Part(text="You are a real-time interpreter...")]
     )
 )
 ```
 
-> **참고**: `types.LiveClientRealtimeInput`과 `types.Blob`을 사용. 만약 import 에러가 발생하면 `google.genai.types`에서 사용 가능한 클래스를 확인할 것.
+**수정할 코드**:
+```python
+# Check if using Native Audio model
+is_native_audio = "native-audio" in self.model_name
+
+if is_native_audio:
+    # Native Audio model - request both TEXT and AUDIO
+    config = types.LiveConnectConfig(
+        response_modalities=["TEXT", "AUDIO"],  # 둘 다 요청!
+        speech_config=types.SpeechConfig(
+            voice_config=types.VoiceConfig(
+                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Aoede")
+            )
+        ),
+        system_instruction=types.Content(
+            parts=[types.Part(text="You are a real-time interpreter. Listen to English speech and respond with Korean translation in both text and speech. Speak naturally in Korean.")]
+        )
+    )
+else:
+    # Standard model - TEXT only
+    config = types.LiveConnectConfig(
+        response_modalities=["TEXT"],
+        system_instruction=types.Content(
+            parts=[types.Part(text="You are a real-time interpreter. Translate English speech to Korean immediately as you hear it. Provide translations in a natural, conversational Korean style.")]
+        )
+    )
+```
+
+> **참고**: `["TEXT", "AUDIO"]`로 설정하면 텍스트와 음성 응답을 모두 받을 수 있습니다. 만약 이것도 에러가 발생하면 `["AUDIO"]`만 설정하고, 음성 응답에 포함된 transcription을 추출해야 합니다.
 
 ---
 
-### Issue 3: Settings 변경이 적용되지 않음
-**파일**: `src/ui/main_window.py`  
-**라인**: 24, 78-81
-
-**문제점**: 
-- `GeminiClient`가 앱 시작 시 `__init__()`에서 한 번만 초기화됨 (Line 24)
-- Settings Dialog에서 모델을 변경해도 이미 생성된 `GeminiClient.model_name`은 업데이트되지 않음
+### Issue 2: 음성 응답 처리 추가
+**파일**: `src/translator/gemini_client.py`  
+**라인**: 82-86 (receive loop)
 
 **현재 코드**:
 ```python
-# Line 24
-self.gemini_client = GeminiClient()
-
-# Line 78-81
-def open_settings(self):
-    dialog = SettingsDialog(self)
-    if dialog.exec():
-        self.status_bar.showMessage("Settings saved.")
+async for response in session.receive():
+    if response.server_content and response.server_content.model_turn:
+        for part in response.server_content.model_turn.parts:
+            if part.text:
+                yield part.text
 ```
 
-**수정 방법**: Settings 저장 후 `GeminiClient`를 재생성
+**수정할 코드** (TEXT + AUDIO 둘 다 처리):
+```python
+async for response in session.receive():
+    if response.server_content and response.server_content.model_turn:
+        for part in response.server_content.model_turn.parts:
+            # Handle text response
+            if part.text:
+                yield ("text", part.text)
+            # Handle audio response (Native Audio model)
+            elif part.inline_data and part.inline_data.mime_type.startswith("audio/"):
+                yield ("audio", part.inline_data.data)
+```
+
+---
+
+### Issue 3: MainWindow에서 음성 출력 처리
+**파일**: `src/ui/main_window.py`  
+**라인**: 157-171 (process_audio_stream)
+
+**수정 방향**:
+- `stream_audio()`가 이제 `(type, data)` 튜플을 반환
+- `type == "text"`이면 텍스트 표시
+- `type == "audio"`이면 스피커로 재생 (선택사항)
 
 **수정할 코드**:
 ```python
-def open_settings(self):
-    dialog = SettingsDialog(self)
-    if dialog.exec():
-        # Reinitialize GeminiClient with new settings
-        self.gemini_client = GeminiClient()
-        self.status_bar.showMessage("Settings saved. Client reinitialized.")
+async def process_audio_stream(self):
+    try:
+        async for item in self.gemini_client.stream_audio(self.audio_capture.queue):
+            if isinstance(item, tuple):
+                item_type, data = item
+                
+                if item_type == "text":
+                    if not data or not data.strip():
+                        continue
+                    self.text_area.moveCursor(self.text_area.textCursor().MoveOperation.End)
+                    self.text_area.insertPlainText(data + " ")
+                    self.text_area.moveCursor(self.text_area.textCursor().MoveOperation.End)
+                    self.file_writer.write_line(data)
+                    
+                elif item_type == "audio":
+                    # Optional: Play audio through speakers
+                    # For now, just log that we received audio
+                    print(f"Received audio chunk: {len(data)} bytes")
+                    # TODO: Implement audio playback using sounddevice or pyaudio
+            else:
+                # Backward compatibility for text-only response
+                text = item
+                if not text or not text.strip():
+                    continue
+                self.text_area.moveCursor(self.text_area.textCursor().MoveOperation.End)
+                self.text_area.insertPlainText(text + " ")
+                self.text_area.moveCursor(self.text_area.textCursor().MoveOperation.End)
+                self.file_writer.write_line(text)
+                
+    except Exception as e:
+        print(f"Stream processing error: {e}")
+        self.status_bar.showMessage(f"Stream Error: {e}")
+```
+
+---
+
+### Issue 4 (선택): 음성 재생 기능 추가
+**파일**: `src/audio/playback.py` (새로 생성)
+
+음성 출력을 실제로 재생하려면 새 모듈 추가:
+
+```python
+import sounddevice as sd
+import numpy as np
+
+class AudioPlayback:
+    """Plays audio data through speakers."""
+    
+    def __init__(self, sample_rate=24000):
+        self.sample_rate = sample_rate
+    
+    def play(self, audio_data: bytes):
+        """Play PCM audio data."""
+        try:
+            # Convert bytes to numpy array (assuming 16-bit PCM)
+            audio_array = np.frombuffer(audio_data, dtype=np.int16)
+            # Normalize to float32 for sounddevice
+            audio_float = audio_array.astype(np.float32) / 32768.0
+            sd.play(audio_float, self.sample_rate)
+        except Exception as e:
+            print(f"Audio playback error: {e}")
 ```
 
 ---
 
 ## 📌 수정 체크리스트
 
-- [ ] `gemini_client.py` Line 26: fallback 모델을 `gemini-2.5-flash-native-audio-preview-12-2025`로 변경
-- [ ] `gemini_client.py` Line 145-152: `session.send()`를 `types.LiveClientRealtimeInput` 사용하도록 수정
-- [ ] `main_window.py` Line 78-81: Settings 저장 후 `GeminiClient` 재생성 로직 추가
+- [ ] `gemini_client.py`: Native Audio 모델 감지 및 `response_modalities=["AUDIO"]` 설정
+- [ ] `gemini_client.py`: `speech_config` 추가 (Native Audio일 때만)
+- [ ] `gemini_client.py`: 응답에서 audio parts 처리
+- [ ] `main_window.py`: `(type, data)` 튜플 처리
+- [ ] (선택) `audio/playback.py`: 음성 재생 모듈 추가
 
 ---
 
 ## 🔍 테스트 방법
 
-수정 후 다음을 확인:
-
 1. **앱 실행**: `python -m src.main`
-2. **Settings에서 모델 변경 테스트**: 
-   - 톱니바퀴(⚙️) 클릭 → 모델 드롭다운에서 다른 모델 선택 → Save
-   - "Settings saved. Client reinitialized." 메시지 확인
-3. **번역 시작**:
-   - 오디오 장치 선택 → Start Translation
-   - 콘솔에서 `Connecting to Live API with model: gemini-2.5-flash-native-audio-preview-12-2025...` 확인
-   - `AsyncSession.send()` 에러가 발생하지 않아야 함
-   - 영어 음성 입력 → 한국어 번역 출력
+2. **모델 선택**: Settings → `gemini-2.5-flash-native-audio-preview-12-2025` 선택 → Save
+3. **번역 시작**: Start Translation
+4. **확인할 것**:
+   - `Cannot extract voices` 에러가 발생하지 않아야 함
+   - 콘솔에 `Received audio chunk: XXX bytes` 메시지 출력 (음성 응답 수신 확인)
+   - 텍스트 영역에 번역 결과 표시 (Native Audio는 text 없이 audio만 반환할 수 있음)
 
 ---
 
-## 📝 완료 보고
+## 📝 참고 사항
 
-수정이 완료되면 `docs/ai-pair/SESSION_LOG.md`에 다음 내용을 기록:
+**Native Audio 모델 vs 일반 모델:**
 
-```markdown
-## Session: Bug Fix - session.send() and Settings Reload
-- Fixed fallback model name
-- Fixed session.send() to use types.LiveClientRealtimeInput
-- Added GeminiClient reinitialization after settings change
-- Tested: [테스트 결과]
-```
+| 모델 | response_modalities | 출력 |
+|------|---------------------|------|
+| `gemini-2.0-flash-exp` | `["TEXT"]` | 텍스트만 |
+| `gemini-2.5-flash-native-audio-preview` | `["AUDIO"]` | 음성 (+ 텍스트 transcription 포함 가능) |
 
-그리고 git commit:
-```bash
-git add -A
-git commit -m "fix: session.send() API call and settings reload"
-```
+**중요**: Native Audio 모델은 TEXT와 AUDIO를 동시에 출력하지 않을 수 있음. 음성으로 응답하고, 해당 음성의 transcription을 별도로 제공할 수 있음.
