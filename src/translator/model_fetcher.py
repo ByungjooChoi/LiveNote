@@ -7,6 +7,13 @@ class ModelFetcher:
     """
     
     _cached_models = []
+    
+    # Live API compatible models (may not appear in models.list())
+    # See: https://ai.google.dev/gemini-api/docs/models#gemini-2.5-flash-live
+    LIVE_API_MODELS = [
+        {"name": "gemini-2.5-flash-native-audio-preview-12-2025", "displayName": "Gemini 2.5 Flash Native Audio (Dec 2025)"},
+        {"name": "gemini-2.0-flash-exp", "displayName": "Gemini 2.0 Flash Live (Exp)"},
+    ]
 
     @staticmethod
     def get_models(force_refresh=False):
@@ -24,9 +31,8 @@ class ModelFetcher:
 
         api_key = SecureStorage.get_api_key()
         if not api_key:
-            # Return default fallback models if no API key is set
-            return [
-                {"name": "gemini-2.0-flash-exp", "displayName": "Gemini 2.0 Flash Live (Exp)"},
+            # Return Live API models + fallback when no API key
+            return ModelFetcher.LIVE_API_MODELS + [
                 {"name": "gemini-1.5-flash-latest", "displayName": "Gemini 1.5 Flash"},
             ]
 
@@ -37,7 +43,6 @@ class ModelFetcher:
             # List models using the new SDK
             for m in client.models.list():
                 # Filtering logic: check if it's a gemini model
-                # New SDK model object usually has .name and .display_name
                 name = getattr(m, 'name', '')
                 display_name = getattr(m, 'display_name', name)
                 
@@ -48,6 +53,11 @@ class ModelFetcher:
                         "displayName": display_name
                     })
             
+            # Ensure Live API models are always available (may not be in models.list())
+            for live_model in ModelFetcher.LIVE_API_MODELS:
+                if not any(m['name'] == live_model['name'] for m in models):
+                    models.insert(0, live_model)
+            
             if models:
                 ModelFetcher._cached_models = models
             return models
@@ -55,9 +65,7 @@ class ModelFetcher:
         except Exception as e:
             print(f"Error fetching models: {e}")
             # Return cached or default models on error
-            return ModelFetcher._cached_models if ModelFetcher._cached_models else [
-                 {"name": "gemini-2.0-flash-exp", "displayName": "Gemini 2.0 Flash Live (Offline/Error)"}
-            ]
+            return ModelFetcher._cached_models if ModelFetcher._cached_models else ModelFetcher.LIVE_API_MODELS
 
 if __name__ == "__main__":
     print(ModelFetcher.get_models(force_refresh=True))

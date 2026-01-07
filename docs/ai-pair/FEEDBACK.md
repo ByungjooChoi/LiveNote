@@ -2,50 +2,107 @@
 
 **리뷰어**: Senior Architect (Claude)
 **최종 리뷰 일시**: 2026-01-07
-**대상 커밋**: `629b552` (Phase 5 + 리뷰 개선)
+**대상 커밋**: `b005f25` (모델 검증 로직 수정 후)
 
 ---
 
-## 🔴 긴급 버그 수정 필요: 모델 검증 로직 오류
+## 🔴 긴급 수정 필요: 모델명 및 드롭다운 문제
 
-### 문제 설명
+### 문제 1: 잘못된 모델명 사용
 
-[`src/translator/gemini_client.py`](../../src/translator/gemini_client.py) Line 22-24의 모델 검증 로직이 `gemini-2.5` 모델을 인식하지 못합니다:
+Google 공식 문서 확인 결과, 현재 사용 중인 모델명이 잘못되었습니다.
 
-**현재 코드:**
-```python
-if "gemini-2.0" not in self.model_name and "gemini-exp" not in self.model_name:
-     print(f"Warning: Configured model '{self.model_name}' might not support Live API. Switching to 'gemini-2.0-flash-exp'.")
-     self.model_name = "gemini-2.0-flash-exp"
+**참고**: https://ai.google.dev/gemini-api/docs/models#gemini-2.5-flash-live
+
+| 위치 | 현재 (잘못됨) | 올바른 모델명 |
+|------|--------------|--------------|
+| `config.yaml` | `gemini-2.5-flash-preview-native-audio-dialog` | `gemini-2.5-flash-native-audio-preview-12-2025` |
+| `gemini_client.py` (fallback) | 〃 | 〃 |
+
+### 문제 2: 모델 드롭다운에 2.5 모델 없음
+
+`model_fetcher.py`의 fallback 모델 목록에 Live API 모델이 없습니다.
+
+**원인 분석**:
+- Google API는 **API 키 없이는 모델 목록 조회 불가** (403 PERMISSION_DENIED)
+- API 호출이 실패하면 fallback 목록을 사용
+- 현재 fallback에는 2.5 모델이 없음
+
+---
+
+### 수정 지시 1: config.yaml
+
+**파일**: `config.yaml` Line 9
+
+```yaml
+# 변경 전
+model: "gemini-2.5-flash-preview-native-audio-dialog"
+
+# 변경 후
+model: "gemini-2.5-flash-native-audio-preview-12-2025"
 ```
 
-**문제:**
-- `gemini-2.5-flash-preview-native-audio-dialog` 모델은 "gemini-2.0"도 "gemini-exp"도 포함하지 않음
-- 결과: 원하는 모델 대신 `gemini-2.0-flash-exp`로 강제 전환됨 ❌
+---
 
-### 수정 지시
+### 수정 지시 2: gemini_client.py
 
-**수정 위치:** `src/translator/gemini_client.py` Line 22-24
+**파일**: `src/translator/gemini_client.py` Line 25
 
-**수정 방향:**
 ```python
-# Live API 지원 모델 패턴을 확장
-LIVE_API_PATTERNS = ["gemini-2.0", "gemini-2.5", "gemini-exp"]
+# 변경 전
+self.model_name = "gemini-2.5-flash-preview-native-audio-dialog"
 
-if not any(pattern in self.model_name for pattern in LIVE_API_PATTERNS):
-    print(f"Warning: Configured model '{self.model_name}' might not support Live API. Switching to default.")
-    self.model_name = "gemini-2.5-flash-preview-native-audio-dialog"  # 기본 모델도 2.5로 변경
+# 변경 후
+self.model_name = "gemini-2.5-flash-native-audio-preview-12-2025"
 ```
 
-또는 간단히:
+---
+
+### 수정 지시 3: model_fetcher.py
+
+**파일**: `src/translator/model_fetcher.py`
+
+**3-1. Live API 모델 상수 추가** (클래스 내부, `_cached_models` 아래):
 ```python
-if "gemini-2.0" not in self.model_name and "gemini-2.5" not in self.model_name and "gemini-exp" not in self.model_name:
+# Live API compatible models (may not appear in models.list())
+# See: https://ai.google.dev/gemini-api/docs/models#gemini-2.5-flash-live
+LIVE_API_MODELS = [
+    {"name": "gemini-2.5-flash-native-audio-preview-12-2025", "displayName": "Gemini 2.5 Flash Native Audio (Dec 2025)"},
+    {"name": "gemini-2.0-flash-exp", "displayName": "Gemini 2.0 Flash Live (Exp)"},
+]
 ```
+
+**3-2. API 키 없을 때 fallback 수정** (Line 28-31):
+```python
+if not api_key:
+    # Return Live API models + fallback when no API key
+    return ModelFetcher.LIVE_API_MODELS + [
+        {"name": "gemini-1.5-flash-latest", "displayName": "Gemini 1.5 Flash"},
+    ]
+```
+
+**3-3. API 결과에 Live API 모델 병합** (Line 56 이후에 추가):
+```python
+# Ensure Live API models are always available (may not be in models.list())
+for live_model in ModelFetcher.LIVE_API_MODELS:
+    if not any(m['name'] == live_model['name'] for m in models):
+        models.insert(0, live_model)
+```
+
+**3-4. 에러 발생 시 fallback 수정** (Line 63-64):
+```python
+return ModelFetcher._cached_models if ModelFetcher._cached_models else ModelFetcher.LIVE_API_MODELS
+```
+
+---
 
 ### 우선순위: 🔴 Critical
 
-이 버그는 사용자가 원하는 `gemini-2.5-flash-preview-native-audio-dialog` 모델을 사용할 수 없게 만듭니다.
-**즉시 수정이 필요합니다.**
+이 문제들로 인해:
+1. 잘못된 모델명으로 API 호출이 실패할 수 있음
+2. 드롭다운에서 원하는 모델을 선택할 수 없음
+
+**모든 수정 완료 후 앱을 다시 실행하여 테스트해주세요.**
 
 ---
 

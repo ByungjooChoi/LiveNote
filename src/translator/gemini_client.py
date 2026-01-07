@@ -22,7 +22,7 @@ class GeminiClient:
         
         if not any(pattern in self.model_name for pattern in LIVE_API_PATTERNS):
              print(f"Warning: Configured model '{self.model_name}' might not support Live API. Switching to default.")
-             self.model_name = "gemini-2.5-flash-preview-native-audio-dialog"
+             self.model_name = "gemini-2.5-flash-native-audio-preview-12-2025"
              
         self.client = None
         self.session = None

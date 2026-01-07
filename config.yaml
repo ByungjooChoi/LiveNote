@@ -6,7 +6,7 @@ audio:
 translation:
   # Base model: Gemini 2.5 Flash (Native Audio supported)
   # Actual model list is fetched dynamically by model_fetcher.py
-  model: "gemini-2.5-flash-preview-native-audio-dialog"
+  model: "gemini-2.5-flash-native-audio-preview-12-2025"
   language_from: "en"
   language_to: "ko"
   streaming: true

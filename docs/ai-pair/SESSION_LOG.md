@@ -41,3 +41,8 @@
 ### 프로젝트 완료
 - **Phase 5 완료**: 파일 저장 기능 구현 및 검증 완료.
 - **핵심 기능 구현 완료**: 오디오 캡처, Gemini Live API 번역, UI, 파일 저장 등 모든 주요 기능이 구현됨.
+
+## 2026-01-07 (Hotfix)
+### 수정 내용
+- **모델명 수정**: `gemini-2.5-flash-native-audio-preview-12-2025`로 올바른 모델명 적용.
+- **모델 목록 개선**: `model_fetcher.py`에 Live API 지원 모델 상수(`LIVE_API_MODELS`)를 추가하고, API 키가 없거나 조회 결과에 없을 때 강제로 추가되도록 수정.
