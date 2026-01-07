@@ -3,6 +3,7 @@ import os
 import traceback
 import numpy as np
 from google import genai
+from google.genai import types
 from src.config.secure_storage import SecureStorage
 from src.config.settings_manager import settings
 
@@ -22,7 +23,7 @@ class GeminiClient:
         
         if not any(pattern in self.model_name for pattern in LIVE_API_PATTERNS):
              print(f"Warning: Configured model '{self.model_name}' might not support Live API. Switching to default.")
-             self.model_name = "gemini-2.5-flash-native-audio-preview-12-2025"
+             self.model_name = "gemini-2.0-flash-exp"
              
         self.client = None
         self.session = None
@@ -60,16 +61,17 @@ class GeminiClient:
             print("Client not initialized")
             return
 
-        config = {
-            "generation_config": {
-                "response_modalities": ["TEXT"]  # We only want text translation back
-            },
-            "system_instruction": {
-                "parts": [
-                    {"text": "You are a real-time interpreter. Translate English speech to Korean immediately as you hear it. Provide translations in a natural, conversational Korean style."}
-                ]
-            }
-        }
+        config = types.LiveConnectConfig(
+            response_modalities=["TEXT"],
+            speech_config=types.SpeechConfig(
+                voice_config=types.VoiceConfig(
+                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Aoede")
+                )
+            ),
+            system_instruction=types.Content(
+                parts=[types.Part(text="You are a real-time interpreter. Translate English speech to Korean immediately as you hear it. Provide translations in a natural, conversational Korean style.")]
+            )
+        )
 
         try:
             print(f"Connecting to Live API with model: {self.model_name}...")
@@ -155,3 +157,4 @@ class GeminiClient:
 
     def disconnect(self):
         self.is_connected = False
+

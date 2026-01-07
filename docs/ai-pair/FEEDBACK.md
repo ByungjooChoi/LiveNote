@@ -96,13 +96,66 @@ return ModelFetcher._cached_models if ModelFetcher._cached_models else ModelFetc
 
 ---
 
+---
+
+### 수정 지시 4: gemini_client.py - Live API Config 형식 수정
+
+**문제**: Live API 연결 시 다음 에러 발생:
+```
+Cannot extract voices from a non-audio request.
+```
+
+**원인**: Native Audio 모델은 `types` 객체를 사용한 config가 필요할 수 있음.
+
+**파일**: `src/translator/gemini_client.py`
+
+**4-1. import 추가** (Line 5 이후):
+```python
+from google.genai import types
+```
+
+**4-2. config 형식 변경** (Line 63-72 대체):
+```python
+config = types.LiveConnectConfig(
+    response_modalities=["TEXT"],
+    system_instruction=types.Content(
+        parts=[types.Part(text="You are a real-time interpreter. Translate English speech to Korean immediately as you hear it. Provide translations in a natural, conversational Korean style.")]
+    )
+)
+```
+
+**4-3. 만약 위 수정으로도 안 되면**, Native Audio 모델에 speech_config 추가:
+```python
+config = types.LiveConnectConfig(
+    response_modalities=["TEXT"],
+    speech_config=types.SpeechConfig(
+        voice_config=types.VoiceConfig(
+            prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Aoede")
+        )
+    ),
+    system_instruction=types.Content(
+        parts=[types.Part(text="You are a real-time interpreter. Translate English speech to Korean immediately as you hear it. Provide translations in a natural, conversational Korean style.")]
+    )
+)
+```
+
+**4-4. 또는 일반 Live API 모델 사용** (가장 안전한 방법):
+- config.yaml의 모델을 `gemini-2.0-flash-exp`로 변경
+- 이 모델은 dict config로도 동작함
+
+---
+
 ### 우선순위: 🔴 Critical
 
 이 문제들로 인해:
 1. 잘못된 모델명으로 API 호출이 실패할 수 있음
 2. 드롭다운에서 원하는 모델을 선택할 수 없음
+3. Live API 연결 실패
 
-**모든 수정 완료 후 앱을 다시 실행하여 테스트해주세요.**
+**순서대로 수정 후 테스트:**
+1. 먼저 수정 지시 4-2 적용 (types 객체 사용)
+2. 안 되면 4-3 적용 (speech_config 추가)
+3. 그래도 안 되면 4-4 적용 (gemini-2.0-flash-exp 모델 사용)
 
 ---
 

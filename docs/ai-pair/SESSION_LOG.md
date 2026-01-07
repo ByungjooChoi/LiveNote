@@ -46,3 +46,8 @@
 ### 수정 내용
 - **모델명 수정**: `gemini-2.5-flash-native-audio-preview-12-2025`로 올바른 모델명 적용.
 - **모델 목록 개선**: `model_fetcher.py`에 Live API 지원 모델 상수(`LIVE_API_MODELS`)를 추가하고, API 키가 없거나 조회 결과에 없을 때 강제로 추가되도록 수정.
+
+## 2026-01-07 (Bugfix - Audio Format)
+### 수정 내용
+- **Live API Config 수정**: `google.genai.types.LiveConnectConfig`를 사용하여 `response_modalities`와 `speech_config`를 명시적으로 설정.
+- **모델 변경**: `gemini-2.5` Native Audio 모델 연결 문제로 인해 `gemini-2.0-flash-exp`로 모델 변경.

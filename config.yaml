@@ -1,17 +1,13 @@
 audio:
-  sample_rate: 16000  # Optimized for Gemini
-  channels: 1         # Mono
-  buffer_size: 1024   # Low latency buffer
-
-translation:
-  # Base model: Gemini 2.5 Flash (Native Audio supported)
-  # Actual model list is fetched dynamically by model_fetcher.py
-  model: "gemini-2.5-flash-native-audio-preview-12-2025"
-  language_from: "en"
-  language_to: "ko"
-  streaming: true
-
+  buffer_size: 1024
+  channels: 1
+  sample_rate: 16000
 output:
   auto_save: true
-  save_directory: "output"
-  filename_format: "transcript_%Y%m%d_%H%M%S.txt"
+  filename_format: transcript_%Y%m%d_%H%M%S.txt
+  save_directory: output
+translation:
+  language_from: en
+  language_to: ko
+  model: gemini-2.0-flash-exp
+  streaming: true
