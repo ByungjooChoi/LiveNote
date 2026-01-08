@@ -74,3 +74,10 @@
 - **UX 기능**:
   - 무음 감지 경고 로직 추가 (5초 이상 무음 시 상태 표시).
   - 실시간 상태 업데이트 (Capturing, Sending, Receiving 등).
+
+## 2026-01-08 (Bugfix & UI Improvement)
+### 수정 내용
+- **스레드 안전성 확보 (Bug 0)**: `capture.py`에서 UI 업데이트 콜백(`on_level_update`)을 `loop.call_soon_threadsafe()`로 호출하도록 수정하여 Qt 스레드 경고 해결.
+- **상태 인디케이터 개선 (Bug 1)**: `Translating` 상태가 실제 텍스트 수신 시에만 표시되도록 수정.
+- **디버깅 로그 강화 (Bug 0.5)**: `capture.py`에 오디오 콜백 호출 횟수 및 큐잉 상태 로그 추가.
+- **UI/UX 개선**: `main_window.py`에 오디오 레벨 미터, 프리뷰 버튼, 상태 인디케이터 추가 및 UI 레이아웃 개선.

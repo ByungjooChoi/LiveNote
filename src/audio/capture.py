@@ -44,12 +44,25 @@ class AudioCapture:
             db = 20 * np.log10(rms + 1e-10)
             # Normalize to 0-100 range (assuming -60dB to 0dB range)
             level = max(0, min(100, int((db + 60) * 100 / 60)))
-            self.on_level_update(level)
+            # Must call on main thread for PyQt UI updates
+            self.loop.call_soon_threadsafe(self.on_level_update, level)
         
+        # Add debug counter
+        if not hasattr(self, '_debug_count'):
+            self._debug_count = 0
+            self._queue_count = 0
+
+        self._debug_count += 1
+
         # Simple VAD: Only put in queue if above threshold
         if rms >= self.silence_threshold:
+            self._queue_count += 1
             # Thread-safe queue put
             self.loop.call_soon_threadsafe(self.queue.put_nowait, (audio_data, rms))
+        
+        # Log every 100 callbacks to monitor audio flow
+        if self._debug_count % 100 == 0:
+            print(f"🎤 Audio callback: {self._debug_count} calls, {self._queue_count} queued, last RMS: {rms:.4f}")
 
     async def start(self):
         """

@@ -338,8 +338,7 @@ class MainWindow(QMainWindow):
     async def process_audio_stream(self):
         try:
             async for item in self.gemini_client.stream_audio(self.audio_capture.queue):
-                # Update status to receiving/translating
-                self._update_status("translating")
+                # Only update status when we get text or audio
                 
                 text_to_display = ""
                 
@@ -347,11 +346,14 @@ class MainWindow(QMainWindow):
                     item_type, data = item
                     if item_type == "text":
                         text_to_display = data
+                        self._update_status("translating")
                     elif item_type == "audio":
+                        # self._update_status("receiving") # Maybe flash receiving?
                         await self.audio_playback.queue_audio(data)
                         continue
                 else:
                     text_to_display = item
+                    self._update_status("translating")
 
                 if not text_to_display or not text_to_display.strip():
                     continue
