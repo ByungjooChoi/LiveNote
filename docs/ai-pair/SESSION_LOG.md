@@ -98,3 +98,8 @@
 ### 구현 내용
 - **VAD (Voice Activity Detection) 개선**: 1.5초 동안 오디오 입력이 없으면(`asyncio.TimeoutError` 활용) `turn_complete=True` 신호를 전송하여 API가 응답을 생성하도록 유도.
 - **API 호출 최적화**: deprecated된 `session.send()` 대신 `session.send_realtime_input()`을 사용하도록 변경.
+
+## 2026-01-08 (Bugfix - VAD & API)
+### 수정 내용
+- **Turn Complete Logic Fix**: 오디오 전송 없이 `turn_complete`만 보내는 것을 방지하기 위해 `has_sent_audio` 플래그 추가.
+- **API Call Fix**: `session.send_client_content(turns=[], ...)` 호출 시 `invalid argument` 에러 해결을 위해 `turns=None`으로 수정.

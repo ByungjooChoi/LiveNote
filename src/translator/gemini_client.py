@@ -178,6 +178,7 @@ class GeminiClient:
         send_count = 0
         last_audio_time = time.time()
         SILENCE_TIMEOUT = 1.5  # 1.5 seconds silence to trigger response
+        has_sent_audio = False
 
         try:
             while True:
@@ -186,11 +187,12 @@ class GeminiClient:
                     item = await asyncio.wait_for(audio_queue.get(), timeout=0.1)
                 except asyncio.TimeoutError:
                     # Check for silence timeout
-                    if time.time() - last_audio_time >= SILENCE_TIMEOUT:
+                    if has_sent_audio and time.time() - last_audio_time >= SILENCE_TIMEOUT:
                         print(f"Silence detected ({SILENCE_TIMEOUT}s), sending turn_complete")
                         # Send turn_complete signal
-                        await session.send_client_content(turns=[], turn_complete=True)
+                        await session.send_client_content(turns=None, turn_complete=True)
                         last_audio_time = time.time() # Reset timer to avoid spamming
+                        has_sent_audio = False
                     continue
 
                 # Check for session timeout signal from monitor
@@ -225,6 +227,7 @@ class GeminiClient:
                 )
                 
                 last_audio_time = time.time()
+                has_sent_audio = True
 
         except asyncio.CancelledError:
             print(f"Send loop cancelled. Total sent: {send_count}")
