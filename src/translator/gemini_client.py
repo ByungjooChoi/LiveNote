@@ -176,10 +176,23 @@ class GeminiClient:
         Continuously takes audio from queue and sends to session.
         """
         send_count = 0
+        last_audio_time = time.time()
+        SILENCE_TIMEOUT = 1.5  # 1.5 seconds silence to trigger response
+
         try:
             while True:
-                item = await audio_queue.get()
-                
+                try:
+                    # Non-blocking get with timeout to detect silence
+                    item = await asyncio.wait_for(audio_queue.get(), timeout=0.1)
+                except asyncio.TimeoutError:
+                    # Check for silence timeout
+                    if time.time() - last_audio_time >= SILENCE_TIMEOUT:
+                        print(f"Silence detected ({SILENCE_TIMEOUT}s), sending turn_complete")
+                        # Send turn_complete signal
+                        await session.send_client_content(turns=[], turn_complete=True)
+                        last_audio_time = time.time() # Reset timer to avoid spamming
+                    continue
+
                 # Check for session timeout signal from monitor
                 if item is SessionExpiredError or self._reconnecting:
                     raise SessionExpiredError("Session timeout")
@@ -204,14 +217,15 @@ class GeminiClient:
                 if send_count % 10 == 0:
                     print(f"Sent {send_count} audio chunks to API ({len(audio_data)} bytes each)")
 
-                # Send to Live API
-                await session.send(
-                    input=types.LiveClientRealtimeInput(
-                        media_chunks=[
-                            types.Blob(data=audio_data, mime_type="audio/pcm")
-                        ]
-                    )
+                # Send to Live API using new method
+                await session.send_realtime_input(
+                    media_chunks=[
+                        types.Blob(data=audio_data, mime_type="audio/pcm")
+                    ]
                 )
+                
+                last_audio_time = time.time()
+
         except asyncio.CancelledError:
             print(f"Send loop cancelled. Total sent: {send_count}")
             pass

@@ -93,3 +93,8 @@
 ### 수정 내용
 - **Audio Format Correction**: `_send_audio_loop()`에서 `float32` 오디오 데이터를 `int16`으로 변환하는 로직을 추가하여 Gemini API 요구사항 충족 (4096 -> 2048 bytes).
 - **Debug Logging**: API 응답 디버깅을 위해 `_stream_audio_session()`에 `[RAW]` 응답 로그 추가.
+
+## 2026-01-08 (Optimization - VAD & API)
+### 구현 내용
+- **VAD (Voice Activity Detection) 개선**: 1.5초 동안 오디오 입력이 없으면(`asyncio.TimeoutError` 활용) `turn_complete=True` 신호를 전송하여 API가 응답을 생성하도록 유도.
+- **API 호출 최적화**: deprecated된 `session.send()` 대신 `session.send_realtime_input()`을 사용하도록 변경.
