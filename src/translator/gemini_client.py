@@ -221,9 +221,7 @@ class GeminiClient:
 
                 # Send to Live API using new method
                 await session.send_realtime_input(
-                    media_chunks=[
-                        types.Blob(data=audio_data, mime_type="audio/pcm")
-                    ]
+                    media=types.Blob(data=audio_data, mime_type="audio/pcm")
                 )
                 
                 last_audio_time = time.time()
