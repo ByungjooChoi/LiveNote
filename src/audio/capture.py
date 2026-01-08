@@ -62,7 +62,7 @@ class AudioCapture:
         
         # Log every 100 callbacks to monitor audio flow
         if self._debug_count % 100 == 0:
-            print(f"🎤 Audio callback: {self._debug_count} calls, {self._queue_count} queued, last RMS: {rms:.4f}")
+            print(f"Audio callback: {self._debug_count} calls, {self._queue_count} queued, last RMS: {rms:.4f}")
 
     async def start(self):
         """

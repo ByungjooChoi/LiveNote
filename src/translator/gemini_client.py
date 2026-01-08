@@ -124,16 +124,29 @@ class GeminiClient:
                 timeout_task = asyncio.create_task(self._session_timeout_monitor(audio_queue))
                 
                 try:
+                    response_count = 0
                     while True:
                          async for response in session.receive():
-                            if response.server_content and response.server_content.model_turn:
-                                for part in response.server_content.model_turn.parts:
-                                    if part.text:
-                                        yield ("text", part.text)
-                                    elif part.inline_data and part.inline_data.mime_type.startswith("audio/"):
-                                        yield ("audio", part.inline_data.data)
+                            response_count += 1
+                            print(f"Response #{response_count} received")
+                            
+                            if response.server_content:
+                                if response.server_content.model_turn:
+                                    parts = response.server_content.model_turn.parts
+                                    print(f"   Parts count: {len(parts)}")
+                                    for i, part in enumerate(parts):
+                                        if part.text:
+                                            print(f"   [TEXT] Part {i}: {part.text[:100]}...")
+                                            yield ("text", part.text)
+                                        elif part.inline_data and part.inline_data.mime_type.startswith("audio/"):
+                                            print(f"   [AUDIO] Part {i}: {len(part.inline_data.data)} bytes")
+                                            yield ("audio", part.inline_data.data)
+                                else:
+                                    print(f"   No model_turn in response")
+                            else:
+                                print(f"   No server_content in response")
                 except asyncio.CancelledError:
-                    print("Receive loop cancelled")
+                    print(f"Receive loop cancelled. Total responses: {response_count}")
                 finally:
                     send_task.cancel()
                     timeout_task.cancel()
@@ -158,6 +171,7 @@ class GeminiClient:
         """
         Continuously takes audio from queue and sends to session.
         """
+        send_count = 0
         try:
             while True:
                 item = await audio_queue.get()
@@ -176,6 +190,11 @@ class GeminiClient:
                 if hasattr(audio_data, 'tobytes'):
                     audio_data = audio_data.tobytes()
                 
+                # Log send count every 10 chunks
+                send_count += 1
+                if send_count % 10 == 0:
+                    print(f"Sent {send_count} audio chunks to API ({len(audio_data)} bytes each)")
+
                 # Send to Live API
                 await session.send(
                     input=types.LiveClientRealtimeInput(
@@ -185,6 +204,7 @@ class GeminiClient:
                     )
                 )
         except asyncio.CancelledError:
+            print(f"Send loop cancelled. Total sent: {send_count}")
             pass
         except SessionExpiredError:
             raise
