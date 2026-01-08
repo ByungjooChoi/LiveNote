@@ -88,3 +88,8 @@
   - `gemini_client.py`: 오디오 전송 카운트 및 응답 수신 로그 추가.
   - `capture.py`: 오디오 캡처 상태 로그 추가.
 - **인코딩 문제 해결**: Windows 콘솔 호환성을 위해 로그 메시지에서 이모지 제거.
+
+## 2026-01-08 (Bugfix - Audio Format)
+### 수정 내용
+- **Audio Format Correction**: `_send_audio_loop()`에서 `float32` 오디오 데이터를 `int16`으로 변환하는 로직을 추가하여 Gemini API 요구사항 충족 (4096 -> 2048 bytes).
+- **Debug Logging**: API 응답 디버깅을 위해 `_stream_audio_session()`에 `[RAW]` 응답 로그 추가.

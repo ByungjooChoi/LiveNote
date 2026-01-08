@@ -30,7 +30,7 @@ class GeminiClient:
         
         if not any(pattern in self.model_name for pattern in LIVE_API_PATTERNS):
              print(f"Warning: Configured model '{self.model_name}' might not support Live API. Switching to default.")
-             self.model_name = "gemini-2.0-flash-exp"
+             self.model_name = "gemini-2.5-flash-native-audio-preview-12-2025"
              
         self.client = None
         self.session = None
@@ -92,6 +92,7 @@ class GeminiClient:
 
         if is_native_audio:
             # Native Audio model requires AUDIO modality, but returns both TEXT and AUDIO.
+            # Explicitly requesting ["TEXT", "AUDIO"] causes an error.
             config = types.LiveConnectConfig(
                 response_modalities=["AUDIO"],
                 speech_config=types.SpeechConfig(
@@ -129,6 +130,9 @@ class GeminiClient:
                          async for response in session.receive():
                             response_count += 1
                             print(f"Response #{response_count} received")
+                            
+                            # Log full response for debugging - see what API returns
+                            print(f"   [RAW] {response}")
                             
                             if response.server_content:
                                 if response.server_content.model_turn:
@@ -188,6 +192,11 @@ class GeminiClient:
 
                 # Convert numpy array to bytes
                 if hasattr(audio_data, 'tobytes'):
+                    # CRITICAL: Convert float32 to int16 for Gemini Live API
+                    # Gemini expects 16-bit signed PCM audio, not float32!
+                    if hasattr(audio_data, 'dtype') and audio_data.dtype == np.float32:
+                         # Scale float32 (-1.0 to 1.0) to int16 (-32768 to 32767)
+                         audio_data = (audio_data * 32767).astype(np.int16)
                     audio_data = audio_data.tobytes()
                 
                 # Log send count every 10 chunks
