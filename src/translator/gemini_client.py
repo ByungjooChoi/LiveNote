@@ -101,14 +101,36 @@ class GeminiClient:
                     )
                 ),
                 system_instruction=types.Content(
-                    parts=[types.Part(text="You are a real-time interpreter. Listen to English speech and respond with Korean translation in both text and speech. Speak naturally in Korean.")]
+                    parts=[types.Part(text="""You are a real-time English to Korean interpreter.
+
+IMPORTANT RULES:
+1. Translate English speech to natural Korean immediately
+2. Do NOT explain what you're doing - just translate
+3. If you hear silence or unclear audio, say "..." in Korean
+4. Keep translations concise and natural
+
+Example:
+- English: "Hello, how are you?"
+- Korean: "안녕하세요, 잘 지내세요?"
+""")]
                 )
             )
         else:
             config = types.LiveConnectConfig(
                 response_modalities=["TEXT"],
                 system_instruction=types.Content(
-                    parts=[types.Part(text="You are a real-time interpreter. Translate English speech to Korean immediately as you hear it. Provide translations in a natural, conversational Korean style.")]
+                    parts=[types.Part(text="""You are a real-time English to Korean interpreter.
+
+IMPORTANT RULES:
+1. Translate English speech to natural Korean immediately
+2. Do NOT explain what you're doing - just translate
+3. If you hear silence or unclear audio, say "..." in Korean
+4. Keep translations concise and natural
+
+Example:
+- English: "Hello, how are you?"
+- Korean: "안녕하세요, 잘 지내세요?"
+""")]
                 )
             )
 
@@ -140,6 +162,10 @@ class GeminiClient:
                                     print(f"   Parts count: {len(parts)}")
                                     for i, part in enumerate(parts):
                                         if part.text:
+                                            # Skip "thought" responses - these are internal model thinking, not translation
+                                            if hasattr(part, 'thought') and part.thought:
+                                                print(f"   [THOUGHT] Part {i}: {part.text[:100]}... (skipped)")
+                                                continue
                                             print(f"   [TEXT] Part {i}: {part.text[:100]}...")
                                             yield ("text", part.text)
                                         elif part.inline_data and part.inline_data.mime_type.startswith("audio/"):

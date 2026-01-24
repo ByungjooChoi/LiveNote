@@ -103,3 +103,10 @@
 ### 수정 내용
 - **Turn Complete Logic Fix**: 오디오 전송 없이 `turn_complete`만 보내는 것을 방지하기 위해 `has_sent_audio` 플래그 추가.
 - **API Call Fix**: `session.send_client_content(turns=[], ...)` 호출 시 `invalid argument` 에러 해결을 위해 `turns=None`으로 수정.
+
+## 2026-01-24 (Feature - Feedback Implementation)
+### 구현 내용
+- **Thought 필터링 (gemini_client.py)**: API 응답에서 `thought=True`인 경우 번역 결과로 처리하지 않고 건너뛰도록 수정. (번역 품질 향상)
+- **시스템 프롬프트 개선 (gemini_client.py)**: 번역 지시사항을 명확하게 개선하여 "thought" 생성을 줄이고 자연스러운 한국어 번역 유도.
+- **디바이스 로그 추가 (capture.py)**: 오디오 캡처 시작 시 사용 중인 장치의 상세 정보(이름, 샘플레이트 등)를 출력하여 디버깅 용이성 확보.
+- **문서 업데이트**: `FEEDBACK.md` 체크리스트 업데이트.

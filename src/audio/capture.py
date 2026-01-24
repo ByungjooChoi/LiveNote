@@ -85,6 +85,16 @@ class AudioCapture:
             self.stream.start()
             self.is_running = True
             print(f"Audio capture started on device {self.device_id}")
+            
+            # Log device info for debugging
+            try:
+                device_info = sd.query_devices(self.device_id, 'input')
+                print(f"Using audio device: {device_info['name']}")
+                print(f"  - Default sample rate: {device_info['default_samplerate']}")
+                print(f"  - Max input channels: {device_info['max_input_channels']}")
+            except Exception as e:
+                print(f"Could not query device info: {e}")
+
         except Exception as e:
             print(f"Failed to start audio capture: {e}")
             raise

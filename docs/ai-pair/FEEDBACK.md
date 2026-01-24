@@ -110,9 +110,9 @@ Example:
 ## 📌 수정 체크리스트
 
 ### 필수
-- [ ] `gemini_client.py`: `thought=True` 응답 필터링 추가
-- [ ] `capture.py`: 오디오 장치 정보 로그 추가
-- [ ] `gemini_client.py`: 시스템 프롬프트 개선
+- [x] `gemini_client.py`: `thought=True` 응답 필터링 추가
+- [x] `capture.py`: 오디오 장치 정보 로그 추가
+- [x] `gemini_client.py`: 시스템 프롬프트 개선
 
 ### 사용자 확인 필요
 - [ ] 올바른 마이크 장치 선택 확인 (UI에서 장치 변경 테스트)
