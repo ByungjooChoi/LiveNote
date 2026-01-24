@@ -190,7 +190,12 @@ class GeminiClient:
                     if has_sent_audio and time.time() - last_audio_time >= SILENCE_TIMEOUT:
                         print(f"Silence detected ({SILENCE_TIMEOUT}s), sending turn_complete")
                         # Send turn_complete signal
-                        await session.send_client_content(turns=None, turn_complete=True)
+                        await session.send(
+                            input=types.LiveClientContent(
+                                turns=[types.Content(parts=[types.Part(text="")])],
+                                turn_complete=True
+                            )
+                        )
                         last_audio_time = time.time() # Reset timer to avoid spamming
                         has_sent_audio = False
                     continue

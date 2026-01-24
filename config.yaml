@@ -9,5 +9,5 @@ output:
 translation:
   language_from: en
   language_to: ko
-  model: gemini-2.5-flash-native-audio-preview-12-2025
+  model: gemini-2.0-flash-exp
   streaming: true

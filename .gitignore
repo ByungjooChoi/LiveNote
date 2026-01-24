@@ -1,3 +1,4 @@
+
 # Python
 __pycache__/
 *.py[cod]
@@ -19,36 +20,42 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+MANIFEST
 
 # Virtual Environment
 venv/
-ENV/
 env/
-.venv/
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
-
-# Environment Variables
-.env
-.env.local
-
-# Output files
-output/
-*.log
-
-# OS
-.DS_Store
-Thumbs.db
+ENV/
 
 # PyInstaller
 *.manifest
 *.spec
 
-# Secrets
-*.key
-*.pem
+# Logs
+*.log
+
+# Unit Test / Coverage
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# IDE
+.vscode/
+.idea/
+
+# Environment Variables
+.env
+
+# Project specific
+output/
+livenote-web.zip
