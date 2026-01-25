@@ -1,15 +1,19 @@
 import asyncio
 import numpy as np
 import sounddevice as sd
+from scipy import signal
+
+# Target sample rate for Gemini API (same as livenote-web)
+TARGET_SAMPLE_RATE = 16000
 
 class AudioCapture:
     """
     Captures real-time audio from a selected input device.
+    Resamples to 16kHz for Gemini API (same as livenote-web).
     """
-    
-    def __init__(self, device_id, sample_rate=16000, channels=1, buffer_size=1024, silence_threshold=0.01, on_level_update=None):
+
+    def __init__(self, device_id, sample_rate=16000, channels=1, buffer_size=1024, silence_threshold=0.005, on_level_update=None):
         self.device_id = device_id
-        self.sample_rate = sample_rate
         self.channels = channels
         self.buffer_size = buffer_size
         self.silence_threshold = silence_threshold
@@ -17,7 +21,14 @@ class AudioCapture:
         self.queue = asyncio.Queue()
         self.stream = None
         self.is_running = False
-        # Get the running loop or create a new one if not exists (though typically running in async context)
+
+        # Always output 16kHz (same as livenote-web)
+        self.sample_rate = TARGET_SAMPLE_RATE
+
+        # Native device rate - set on start()
+        self._native_sample_rate = None
+        self._resample_ratio = 1.0
+
         try:
             self.loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -27,73 +38,77 @@ class AudioCapture:
     def _callback(self, indata, frames, time, status):
         """
         Callback function for sounddevice InputStream.
-        Puts captured audio data into the asyncio queue.
+        Resamples audio to 16kHz and puts into the asyncio queue.
         """
         if status:
             print(f"Audio status: {status}")
-        
-        # Copy data to avoid buffer issues
-        audio_data = indata.copy()
-        
-        # Calculate audio level (RMS) for VAD or UI visualization
+
+        # Copy and flatten
+        audio_data = indata.copy().flatten()
+
+        # Resample to 16kHz if needed (like livenote-web does in browser)
+        if self._resample_ratio != 1.0:
+            # Use scipy.signal.resample for high-quality resampling
+            target_length = int(len(audio_data) / self._resample_ratio)
+            audio_data = signal.resample(audio_data, target_length).astype(np.float32)
+
+        # Calculate RMS
         rms = np.sqrt(np.mean(audio_data**2))
-        
-        # Call level update callback if provided
+
+        # Update level meter
         if self.on_level_update:
-            # Convert to dB for better visualization range
             db = 20 * np.log10(rms + 1e-10)
-            # Normalize to 0-100 range (assuming -60dB to 0dB range)
             level = max(0, min(100, int((db + 60) * 100 / 60)))
-            # Must call on main thread for PyQt UI updates
             self.loop.call_soon_threadsafe(self.on_level_update, level)
-        
-        # Add debug counter
+
+        # Debug counter
         if not hasattr(self, '_debug_count'):
             self._debug_count = 0
             self._queue_count = 0
 
         self._debug_count += 1
 
-        # Simple VAD: Only put in queue if above threshold
-        if rms >= self.silence_threshold:
-            self._queue_count += 1
-            # Thread-safe queue put
-            self.loop.call_soon_threadsafe(self.queue.put_nowait, (audio_data, rms))
-        
-        # Log every 100 callbacks to monitor audio flow
+        # Send ALL audio - let API handle VAD (like official example does)
+        # Official pyaudio example doesn't do any VAD filtering
+        self._queue_count += 1
+        self.loop.call_soon_threadsafe(self.queue.put_nowait, (audio_data, rms))
+
         if self._debug_count % 100 == 0:
-            print(f"Audio callback: {self._debug_count} calls, {self._queue_count} queued, last RMS: {rms:.4f}")
+            print(f"Audio callback: {self._debug_count} calls, {self._queue_count} queued, RMS: {rms:.4f}")
 
     async def start(self):
         """
         Starts the audio capture stream.
+        Captures at native rate and resamples to 16kHz (same as livenote-web).
         """
         if self.is_running:
             return
 
-        # Ensure we have the correct loop if start is called in a different context
         self.loop = asyncio.get_running_loop()
 
         try:
+            # Get device's native sample rate
+            device_info = sd.query_devices(self.device_id, 'input')
+            self._native_sample_rate = int(device_info['default_samplerate'])
+            self._resample_ratio = self._native_sample_rate / TARGET_SAMPLE_RATE
+
+            print(f"Using audio device: {device_info['name']}")
+            print(f"  - Native sample rate: {self._native_sample_rate} Hz")
+            print(f"  - Output sample rate: {TARGET_SAMPLE_RATE} Hz (resampled)")
+            print(f"  - Resample ratio: {self._resample_ratio:.2f}")
+            print(f"  - Max input channels: {device_info['max_input_channels']}")
+
+            # Capture at native rate, resample in callback
             self.stream = sd.InputStream(
                 device=self.device_id,
                 channels=self.channels,
-                samplerate=self.sample_rate,
+                samplerate=self._native_sample_rate,
                 blocksize=self.buffer_size,
                 callback=self._callback
             )
             self.stream.start()
             self.is_running = True
             print(f"Audio capture started on device {self.device_id}")
-            
-            # Log device info for debugging
-            try:
-                device_info = sd.query_devices(self.device_id, 'input')
-                print(f"Using audio device: {device_info['name']}")
-                print(f"  - Default sample rate: {device_info['default_samplerate']}")
-                print(f"  - Max input channels: {device_info['max_input_channels']}")
-            except Exception as e:
-                print(f"Could not query device info: {e}")
 
         except Exception as e:
             print(f"Failed to start audio capture: {e}")

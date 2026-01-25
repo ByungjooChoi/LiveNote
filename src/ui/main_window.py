@@ -337,34 +337,56 @@ class MainWindow(QMainWindow):
 
     async def process_audio_stream(self):
         try:
-            async for item in self.gemini_client.stream_audio(self.audio_capture.queue):
+            text_count = 0
+            audio_count = 0
+
+            # Pass actual sample rate from capture device to API
+            sample_rate = self.audio_capture.sample_rate or 16000
+            async for item in self.gemini_client.stream_audio(self.audio_capture.queue, sample_rate=sample_rate):
                 # Only update status when we get text or audio
-                
+
                 text_to_display = ""
-                
+
                 if isinstance(item, tuple):
                     item_type, data = item
                     if item_type == "text":
                         text_to_display = data
+                        text_count += 1
+                        print(f"[UI] Received text #{text_count}: '{data}'")
                         self._update_status("translating")
                     elif item_type == "audio":
-                        # self._update_status("receiving") # Maybe flash receiving?
+                        audio_count += 1
+                        if audio_count % 10 == 0:
+                            print(f"[UI] Received audio #{audio_count}: {len(data)} bytes")
                         await self.audio_playback.queue_audio(data)
                         continue
                 else:
-                    text_to_display = item
+                    text_to_display = str(item)
+                    text_count += 1
+                    print(f"[UI] Received raw text #{text_count}: '{item}'")
                     self._update_status("translating")
 
                 if not text_to_display or not text_to_display.strip():
+                    print(f"[UI] Skipping empty text")
                     continue
-                    
+
+                # Display in UI
+                print(f"[UI] Displaying: '{text_to_display}'")
                 self.text_area.moveCursor(self.text_area.textCursor().MoveOperation.End)
                 self.text_area.insertPlainText(text_to_display + " ")
                 self.text_area.moveCursor(self.text_area.textCursor().MoveOperation.End)
-                
+
+                # Save to file
                 self.file_writer.write_line(text_to_display)
-                
+
+            print(f"[UI] Stream ended. Total text: {text_count}, audio: {audio_count}")
+
+        except asyncio.CancelledError:
+            print(f"[UI] Stream cancelled")
+            raise
         except Exception as e:
-            print(f"Stream processing error: {e}")
+            print(f"[UI] Stream processing error: {e}")
+            import traceback
+            traceback.print_exc()
             self.status_bar.showMessage(f"Stream Error: {e}")
             self._update_status("error", str(e))

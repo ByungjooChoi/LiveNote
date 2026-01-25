@@ -1,0 +1,7 @@
+{
+  "name": "LiveNote Web",
+  "description": "Real-time English to Korean voice translator using Gemini Live API with Native Audio.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}

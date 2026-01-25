@@ -67,7 +67,8 @@ LiveNote/
 
 ## 📋 Development
 
-See [docs/ai-pair/HANDOFF.md](docs/ai-pair/HANDOFF.md) for detailed implementation guide.
+See [CLAUDE.md](CLAUDE.md) for project context and implementation details.
+See [docs/REFERENCE.md](docs/REFERENCE.md) for Gemini Live API reference.
 
 ## 📄 License
 

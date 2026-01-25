@@ -1,10 +1,8 @@
 import asyncio
-import os
 import traceback
 import time
 import numpy as np
 from google import genai
-from google.genai import types
 from src.config.secure_storage import SecureStorage
 from src.config.settings_manager import settings
 
@@ -12,54 +10,84 @@ class SessionExpiredError(Exception):
     """Raised when session needs to be refreshed."""
     pass
 
+# Constants - same as official example
+SEND_SAMPLE_RATE = 16000
+RECEIVE_SAMPLE_RATE = 24000
+
+# Model and config - based on official Gemini cookbook example
+MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
+SYSTEM_INSTRUCTION = """You are a real-time SIMULTANEOUS interpreter translating English to Korean.
+
+CRITICAL RULES:
+1. Translate AS YOU HEAR - do NOT wait for complete sentences
+2. Start translating after hearing just a few words
+3. Use short, natural Korean phrases
+4. If you miss something, skip it and continue with current speech
+5. Never explain or comment - ONLY output Korean translation
+6. Respond as quickly as possible, even with partial translations
+"""
+
+CONFIG = {
+    "system_instruction": SYSTEM_INSTRUCTION,
+    "response_modalities": ["AUDIO"],
+    "speech_config": {
+        "voice_config": {
+            "prebuilt_voice_config": {"voice_name": "Kore"}
+        }
+    },
+    # Realtime input config for continuous streaming / simultaneous interpretation
+    "realtime_input_config": {
+        "automatic_activity_detection": {
+            "disabled": False,
+            # Lower threshold = more sensitive = responds faster
+            "start_of_speech_sensitivity": "START_OF_SPEECH_SENSITIVITY_HIGH",
+            "end_of_speech_sensitivity": "END_OF_SPEECH_SENSITIVITY_HIGH",
+        }
+    },
+}
+
+
 class GeminiClient:
     """
     Client for interacting with Google Gemini Live API (WebSocket).
+    Based on official Google Gemini cookbook example.
     """
-    
+
     SESSION_TIMEOUT = 14 * 60  # 14 minutes
-    
+
     def __init__(self):
         self.api_key = SecureStorage.get_api_key()
         self.model_name = settings.get("translation", "model")
-        
-        # Ensure we use a model compatible with Live API
-        # If the config model seems to be a REST model or older, fallback to a known Live model
-        # or rely on what's in config if user updated it correctly.
-        LIVE_API_PATTERNS = ["gemini-2.0", "gemini-2.5", "gemini-exp"]
-        
-        if not any(pattern in self.model_name for pattern in LIVE_API_PATTERNS):
-             print(f"Warning: Configured model '{self.model_name}' might not support Live API. Switching to default.")
-             self.model_name = "gemini-2.5-flash-native-audio-preview-12-2025"
-             
+
+        # Use native audio model
+        if "native-audio" not in self.model_name:
+            self.model_name = MODEL
+
         self.client = None
         self.session = None
         self.is_connected = False
         self.session_start_time = None
         self._reconnecting = False
-        
+
         if self.api_key:
-            # Initialize with v1alpha for Live API access
+            # Initialize with v1alpha for Live API access (same as official example)
             self.client = genai.Client(api_key=self.api_key, http_options={"api_version": "v1alpha"})
 
     async def connect(self):
-        """
-        Prepares the client. Actual connection happens in the stream context.
-        """
+        """Prepares the client."""
         if not self.api_key:
             self.api_key = SecureStorage.get_api_key()
             if self.api_key:
-                 self.client = genai.Client(api_key=self.api_key, http_options={"api_version": "v1alpha"})
+                self.client = genai.Client(api_key=self.api_key, http_options={"api_version": "v1alpha"})
             else:
                 raise ValueError("API Key is missing")
-        
+
         self.is_connected = True
         print(f"Gemini Client initialized for model: {self.model_name}")
 
-    async def stream_audio(self, audio_queue):
+    async def stream_audio(self, audio_queue, sample_rate=16000):
         """
         Connects to Live API and streams audio from the queue.
-        Automatically reconnects before session timeout.
         """
         while self.is_connected:
             try:
@@ -68,126 +96,71 @@ class GeminiClient:
                     yield item
             except SessionExpiredError:
                 print("Session expired, reconnecting...")
-                # Add a small delay to avoid rapid looping if reconnection fails immediately
                 await asyncio.sleep(1)
                 continue
             except Exception as e:
-                # If we manually disconnected, stop loop
                 if not self.is_connected:
                     break
-                
                 print(f"Stream connection ended: {e}")
-                # For other errors, we might want to stop or retry.
-                # For now, let's stop to avoid infinite error loops unless it's a known transient error.
                 break
 
     async def _stream_audio_session(self, audio_queue):
-        """Single session stream with timeout monitoring."""
+        """Single session stream - based on official example."""
         if not self.client:
             print("Client not initialized")
             return
 
-        # Check if using Native Audio model
-        is_native_audio = "native-audio" in self.model_name
-
-        if is_native_audio:
-            # Native Audio model requires AUDIO modality, but returns both TEXT and AUDIO.
-            # Explicitly requesting ["TEXT", "AUDIO"] causes an error.
-            config = types.LiveConnectConfig(
-                response_modalities=["AUDIO"],
-                speech_config=types.SpeechConfig(
-                    voice_config=types.VoiceConfig(
-                        prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Aoede")
-                    )
-                ),
-                system_instruction=types.Content(
-                    parts=[types.Part(text="""You are a real-time English to Korean interpreter.
-
-IMPORTANT RULES:
-1. Translate English speech to natural Korean immediately
-2. Do NOT explain what you're doing - just translate
-3. If you hear silence or unclear audio, say "..." in Korean
-4. Keep translations concise and natural
-
-Example:
-- English: "Hello, how are you?"
-- Korean: "안녕하세요, 잘 지내세요?"
-""")]
-                )
-            )
-        else:
-            config = types.LiveConnectConfig(
-                response_modalities=["TEXT"],
-                system_instruction=types.Content(
-                    parts=[types.Part(text="""You are a real-time English to Korean interpreter.
-
-IMPORTANT RULES:
-1. Translate English speech to natural Korean immediately
-2. Do NOT explain what you're doing - just translate
-3. If you hear silence or unclear audio, say "..." in Korean
-4. Keep translations concise and natural
-
-Example:
-- English: "Hello, how are you?"
-- Korean: "안녕하세요, 잘 지내세요?"
-""")]
-                )
-            )
-
         try:
             print(f"Connecting to Live API with model: {self.model_name}...")
-            async with self.client.aio.live.connect(model=self.model_name, config=config) as session:
+            async with self.client.aio.live.connect(model=self.model_name, config=CONFIG) as session:
                 self.session = session
                 self.session_start_time = time.time()
                 print("Connected to Gemini Live API")
-                
-                # Start tasks
-                # Pass session start time to monitor to avoid race conditions
-                send_task = asyncio.create_task(self._send_audio_loop(session, audio_queue))
-                timeout_task = asyncio.create_task(self._session_timeout_monitor(audio_queue))
-                
+
+                # Create queues for internal communication
+                out_queue = asyncio.Queue(maxsize=5)
+
+                # Start tasks - same pattern as official example
+                send_task = asyncio.create_task(self._send_realtime(session, out_queue))
+                listen_task = asyncio.create_task(self._listen_audio(audio_queue, out_queue))
+
                 try:
+                    # Receive loop - based on official example
+                    print("Starting receive loop...")
                     response_count = 0
                     while True:
-                         async for response in session.receive():
+                        turn = session.receive()
+                        print(f"Waiting for responses...")
+                        async for response in turn:
                             response_count += 1
-                            print(f"Response #{response_count} received")
-                            
-                            # Log full response for debugging - see what API returns
-                            print(f"   [RAW] {response}")
-                            
-                            if response.server_content:
-                                if response.server_content.model_turn:
-                                    parts = response.server_content.model_turn.parts
-                                    print(f"   Parts count: {len(parts)}")
-                                    for i, part in enumerate(parts):
-                                        if part.text:
-                                            # Skip "thought" responses - these are internal model thinking, not translation
-                                            if hasattr(part, 'thought') and part.thought:
-                                                print(f"   [THOUGHT] Part {i}: {part.text[:100]}... (skipped)")
-                                                continue
-                                            print(f"   [TEXT] Part {i}: {part.text[:100]}...")
-                                            yield ("text", part.text)
-                                        elif part.inline_data and part.inline_data.mime_type.startswith("audio/"):
-                                            print(f"   [AUDIO] Part {i}: {len(part.inline_data.data)} bytes")
-                                            yield ("audio", part.inline_data.data)
-                                else:
-                                    print(f"   No model_turn in response")
-                            else:
-                                print(f"   No server_content in response")
+                            print(f"Response #{response_count}: {type(response)}")
+
+                            # Debug: print raw response
+                            print(f"  Raw: data={response.data is not None}, text={response.text is not None}")
+
+                            # Handle audio data - using .data attribute like official example
+                            if data := response.data:
+                                print(f"  [AUDIO] {len(data)} bytes")
+                                yield ("audio", data)
+                                continue
+
+                            # Handle text
+                            if text := response.text:
+                                print(f"  [TEXT] {text}")
+                                yield ("text", text)
+
+                        print(f"Turn complete after {response_count} responses")
+
                 except asyncio.CancelledError:
-                    print(f"Receive loop cancelled. Total responses: {response_count}")
+                    print(f"Receive loop cancelled after {response_count} responses")
                 finally:
                     send_task.cancel()
-                    timeout_task.cancel()
+                    listen_task.cancel()
                     try:
                         await send_task
-                        await timeout_task
+                        await listen_task
                     except asyncio.CancelledError:
                         pass
-                    except SessionExpiredError:
-                        # Propagate session expired error to trigger reconnection
-                        raise
 
         except SessionExpiredError:
             raise
@@ -197,38 +170,14 @@ Example:
                 traceback.print_exc()
             raise
 
-    async def _send_audio_loop(self, session, audio_queue):
-        """
-        Continuously takes audio from queue and sends to session.
-        """
-        send_count = 0
-        last_audio_time = time.time()
-        SILENCE_TIMEOUT = 1.5  # 1.5 seconds silence to trigger response
-        has_sent_audio = False
-
+    async def _listen_audio(self, audio_queue, out_queue):
+        """Read from capture queue and put into send queue."""
         try:
             while True:
                 try:
-                    # Non-blocking get with timeout to detect silence
                     item = await asyncio.wait_for(audio_queue.get(), timeout=0.1)
                 except asyncio.TimeoutError:
-                    # Check for silence timeout
-                    if has_sent_audio and time.time() - last_audio_time >= SILENCE_TIMEOUT:
-                        print(f"Silence detected ({SILENCE_TIMEOUT}s), sending turn_complete")
-                        # Send turn_complete signal
-                        await session.send(
-                            input=types.LiveClientContent(
-                                turns=[types.Content(parts=[types.Part(text="")])],
-                                turn_complete=True
-                            )
-                        )
-                        last_audio_time = time.time() # Reset timer to avoid spamming
-                        has_sent_audio = False
                     continue
-
-                # Check for session timeout signal from monitor
-                if item is SessionExpiredError or self._reconnecting:
-                    raise SessionExpiredError("Session timeout")
 
                 # Handle tuple (data, rms) from capture.py
                 if isinstance(item, tuple):
@@ -236,61 +185,33 @@ Example:
                 else:
                     audio_data = item
 
-                # Convert numpy array to bytes
+                # Convert numpy float32 to int16 bytes (like official example uses pyaudio int16)
                 if hasattr(audio_data, 'tobytes'):
-                    # CRITICAL: Convert float32 to int16 for Gemini Live API
-                    # Gemini expects 16-bit signed PCM audio, not float32!
                     if hasattr(audio_data, 'dtype') and audio_data.dtype == np.float32:
-                         # Scale float32 (-1.0 to 1.0) to int16 (-32768 to 32767)
-                         audio_data = (audio_data * 32767).astype(np.int16)
+                        # Clamp and scale - same as livenote-web's float32ToB64PCM
+                        audio_data = np.clip(audio_data, -1.0, 1.0)
+                        audio_data = (audio_data * 32767).astype(np.int16)
                     audio_data = audio_data.tobytes()
-                
-                # Log send count every 10 chunks
-                send_count += 1
-                if send_count % 10 == 0:
-                    print(f"Sent {send_count} audio chunks to API ({len(audio_data)} bytes each)")
 
-                # Send to Live API using new method
-                await session.send_realtime_input(
-                    media=types.Blob(data=audio_data, mime_type="audio/pcm")
-                )
-                
-                last_audio_time = time.time()
-                has_sent_audio = True
+                # Put in send queue - format from official example
+                # Official example uses: {"data": data, "mime_type": "audio/pcm"}
+                await out_queue.put({"data": audio_data, "mime_type": "audio/pcm"})
 
         except asyncio.CancelledError:
-            print(f"Send loop cancelled. Total sent: {send_count}")
             pass
-        except SessionExpiredError:
-            raise
-        except Exception as e:
-            if not self._reconnecting:
-                print(f"Error sending audio loop: {e}")
 
-    async def _session_timeout_monitor(self, audio_queue):
-        """Monitor session timeout and trigger reconnection."""
+    async def _send_realtime(self, session, out_queue):
+        """Send audio to API - same as official example."""
+        send_count = 0
         try:
             while True:
-                await asyncio.sleep(10)  # Check every 10 seconds
-                
-                if self.session_start_time:
-                    elapsed = time.time() - self.session_start_time
-                    remaining = self.SESSION_TIMEOUT - elapsed
-                    
-                    if 0 < remaining < 60:
-                        # Could use a callback to update UI, but for now just print
-                        pass 
-                    
-                    if elapsed >= self.SESSION_TIMEOUT:
-                        print("Session timeout reached, triggering reconnection...")
-                        self._reconnecting = True
-                        # Signal send loop to raise exception
-                        await audio_queue.put(SessionExpiredError)
-                        # Also raise here to be safe (though this task just dies)
-                        raise SessionExpiredError("Session timeout")
-                        
+                msg = await out_queue.get()
+                await session.send_realtime_input(audio=msg)
+                send_count += 1
+                if send_count % 50 == 0:
+                    print(f"Sent {send_count} audio chunks to API")
         except asyncio.CancelledError:
-            pass
+            print(f"Send loop cancelled. Total sent: {send_count}")
 
     def disconnect(self):
         self.is_connected = False
