@@ -19,10 +19,11 @@ class SettingsManager:
                 self._config = yaml.safe_load(f)
         else:
             # Fallback to defaults if file missing
+            # Using S2ST model for real-time simultaneous translation
             self._config = {
                 "audio": {"sample_rate": 16000, "channels": 1, "buffer_size": 1024},
                 "translation": {
-                    "model": "gemini-2.5-flash-preview-native-audio-dialog",
+                    "model": "gemini-2.5-flash-s2st-exp-11-2025",
                     "language_from": "en",
                     "language_to": "ko",
                     "streaming": True

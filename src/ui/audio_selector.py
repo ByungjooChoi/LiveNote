@@ -30,11 +30,21 @@ class AudioSelector(QWidget):
     def refresh_devices(self):
         self.combo.clear()
         devices = DeviceManager.get_input_devices()
-        for device in devices:
+        blackhole_index = -1
+
+        for i, device in enumerate(devices):
             # Display name like: "Microphone (Realtek Audio)"
             name = device['name']
             device_id = device['id']
             self.combo.addItem(name, device_id)
+
+            # Track BlackHole device index for default selection
+            if 'blackhole' in name.lower():
+                blackhole_index = i
+
+        # Default to BlackHole if found
+        if blackhole_index >= 0:
+            self.combo.setCurrentIndex(blackhole_index)
             
     def get_selected_device_id(self):
         return self.combo.currentData()

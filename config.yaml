@@ -2,12 +2,28 @@ audio:
   buffer_size: 1024
   channels: 1
   sample_rate: 16000
+
 output:
   auto_save: true
   filename_format: transcript_%Y%m%d_%H%M%S.txt
   save_directory: output
+
 translation:
   language_from: en
   language_to: ko
-  model: gemini-2.5-flash-native-audio-preview-12-2025
   streaming: true
+
+  # ==========================================================================
+  # Model Selection
+  # ==========================================================================
+  # Options:
+  #   - native-audio : Real-time translation with Gemini API (default)
+  #   - s2st         : Simultaneous translation (requires Vertex AI + Google approval)
+  model: native-audio
+
+  # ==========================================================================
+  # Vertex AI Settings (only needed for s2st mode)
+  # ==========================================================================
+  use_vertex_ai: false
+  vertex_project: "elastic-sa"
+  vertex_location: "us-central1"
