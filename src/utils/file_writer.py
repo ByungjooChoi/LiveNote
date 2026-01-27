@@ -36,16 +36,22 @@ class FileWriter:
             self.current_file = None
             return None
 
-    def write_line(self, text):
-        """Writes a line of text with timestamp."""
+    def write_line(self, text, newline=True):
+        """Writes a line of text with timestamp.
+
+        Args:
+            text: Text to write
+            newline: If True, adds newline at the end (default). If False, continues on same line.
+        """
         # Skip empty or whitespace-only text
         if not text or not text.strip():
             return
-            
+
         if self.current_file and not self.current_file.closed:
             timestamp = datetime.datetime.now().strftime("%H:%M:%S")
             try:
-                self.current_file.write(f"[{timestamp}] {text}\n")
+                ending = "\n" if newline else ""
+                self.current_file.write(f"[{timestamp}] {text}{ending}")
                 # Flush ensures data is written even if app crashes
                 self.current_file.flush()
             except Exception as e:

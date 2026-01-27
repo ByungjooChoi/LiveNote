@@ -13,6 +13,10 @@ from google.genai.types import (
     AudioTranscriptionConfig,
     ProactivityConfig,
     HttpOptions,
+    RealtimeInputConfig,
+    AutomaticActivityDetection,
+    StartSensitivity,
+    EndSensitivity,
 )
 from src.config.secure_storage import SecureStorage
 from src.config.settings_manager import settings
@@ -134,6 +138,9 @@ class GeminiClient:
         self.is_connected = False
         self.session_start_time = None
         self._reconnecting = False
+
+        # Flag to pause input during model response (prevents interruption)
+        self._model_responding = False
 
         # Callbacks for transcriptions
         self.on_input_transcription = None
@@ -312,20 +319,48 @@ class GeminiClient:
             raise
 
     async def _receive_native_audio(self, session):
-        """Receive handler for native-audio mode."""
+        """Receive handler for native-audio mode with transcription support."""
         response_count = 0
         while True:
             turn = session.receive()
             async for response in turn:
                 response_count += 1
 
-                # Audio data
+                # Check for server_content (contains transcriptions)
+                if hasattr(response, 'server_content') and response.server_content:
+                    sc = response.server_content
+
+                    # Input transcription (original English)
+                    if hasattr(sc, 'input_transcription') and sc.input_transcription:
+                        if text := getattr(sc.input_transcription, 'text', None):
+                            print(f"  [INPUT] {text}")
+                            yield ("input_transcription", text)
+
+                    # Output transcription (translated Korean)
+                    if hasattr(sc, 'output_transcription') and sc.output_transcription:
+                        if text := getattr(sc.output_transcription, 'text', None):
+                            print(f"  [OUTPUT] {text}")
+                            yield ("output_transcription", text)
+
+                    # Audio from model_turn.parts
+                    if hasattr(sc, 'model_turn') and sc.model_turn:
+                        if parts := getattr(sc.model_turn, 'parts', None):
+                            for part in parts:
+                                if hasattr(part, 'inline_data') and part.inline_data:
+                                    audio_data = part.inline_data.data
+                                    if isinstance(audio_data, str):
+                                        import base64
+                                        audio_data = base64.b64decode(audio_data)
+                                    print(f"  [AUDIO] {len(audio_data)} bytes")
+                                    yield ("audio", audio_data)
+                    continue
+
+                # Fallback: direct data/text attributes
                 if data := response.data:
                     print(f"  [AUDIO] {len(data)} bytes")
                     yield ("audio", data)
                     continue
 
-                # Text response
                 if text := response.text:
                     print(f"  [TEXT] {text}")
                     yield ("text", text)
@@ -407,8 +442,9 @@ class GeminiClient:
             pass
 
     async def _send_audio(self, session, out_queue):
-        """Send audio chunks - automatic VAD handles turn detection."""
+        """Send audio chunks to the API."""
         send_count = 0
+
         try:
             while True:
                 msg = await out_queue.get()
@@ -416,8 +452,10 @@ class GeminiClient:
                 audio_blob = types.Blob(data=msg["data"], mime_type=msg["mime_type"])
                 await session.send_realtime_input(audio=audio_blob)
                 send_count += 1
+
                 if send_count % 100 == 0:
                     print(f"Sent {send_count} chunks")
+
         except asyncio.CancelledError:
             print(f"Send complete ({send_count} chunks)")
 

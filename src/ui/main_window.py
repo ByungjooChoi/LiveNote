@@ -340,44 +340,92 @@ class MainWindow(QMainWindow):
             text_count = 0
             audio_count = 0
 
+            # Accumulate transcriptions like the reference project
+            input_transcription_buffer = []
+            output_transcription_buffer = []
+            last_display_type = None  # Track what was last displayed
+
             # Pass actual sample rate from capture device to API
             sample_rate = self.audio_capture.sample_rate or 16000
             async for item in self.gemini_client.stream_audio(self.audio_capture.queue, sample_rate=sample_rate):
-                # Only update status when we get text or audio
-
-                text_to_display = ""
-
-                if isinstance(item, tuple):
-                    item_type, data = item
-                    if item_type == "text":
-                        text_to_display = data
-                        text_count += 1
-                        print(f"[UI] Received text #{text_count}: '{data}'")
-                        self._update_status("translating")
-                    elif item_type == "audio":
-                        audio_count += 1
-                        if audio_count % 10 == 0:
-                            print(f"[UI] Received audio #{audio_count}: {len(data)} bytes")
-                        await self.audio_playback.queue_audio(data)
-                        continue
-                else:
-                    text_to_display = str(item)
-                    text_count += 1
-                    print(f"[UI] Received raw text #{text_count}: '{item}'")
-                    self._update_status("translating")
-
-                if not text_to_display or not text_to_display.strip():
-                    print(f"[UI] Skipping empty text")
+                if not isinstance(item, tuple):
                     continue
 
-                # Display in UI
-                print(f"[UI] Displaying: '{text_to_display}'")
-                self.text_area.moveCursor(self.text_area.textCursor().MoveOperation.End)
-                self.text_area.insertPlainText(text_to_display + " ")
-                self.text_area.moveCursor(self.text_area.textCursor().MoveOperation.End)
+                item_type, data = item
 
-                # Save to file
-                self.file_writer.write_line(text_to_display)
+                # Handle audio
+                if item_type == "audio":
+                    audio_count += 1
+                    if audio_count % 10 == 0:
+                        print(f"[UI] Received audio #{audio_count}: {len(data)} bytes")
+                    await self.audio_playback.queue_audio(data)
+                    continue
+
+                # Handle transcriptions - accumulate without line breaks
+                if item_type == "input_transcription":
+                    if not data or not data.strip():
+                        continue
+                    text_count += 1
+                    # Don't log every word - too verbose
+
+                    # If we were showing output, start new line for input
+                    if last_display_type == "output":
+                        self.text_area.moveCursor(self.text_area.textCursor().MoveOperation.End)
+                        self.text_area.insertPlainText("\n[EN] ")
+                        input_transcription_buffer = []
+                    elif last_display_type is None or not input_transcription_buffer:
+                        # First input or new session
+                        self.text_area.moveCursor(self.text_area.textCursor().MoveOperation.End)
+                        self.text_area.insertPlainText("[EN] ")
+
+                    # Append text inline (no line break)
+                    self.text_area.moveCursor(self.text_area.textCursor().MoveOperation.End)
+                    self.text_area.insertPlainText(data)
+                    input_transcription_buffer.append(data)
+                    last_display_type = "input"
+
+                    # Save to file
+                    self.file_writer.write_line(f"[EN] {data}", newline=False)
+
+                elif item_type == "output_transcription":
+                    if not data or not data.strip():
+                        continue
+                    text_count += 1
+                    # Don't log every word - too verbose
+                    self._update_status("translating")
+
+                    # If we were showing input, start new line for output
+                    if last_display_type == "input":
+                        self.text_area.moveCursor(self.text_area.textCursor().MoveOperation.End)
+                        self.text_area.insertPlainText("\n[KO] ")
+                        output_transcription_buffer = []
+                    elif last_display_type is None or not output_transcription_buffer:
+                        # First output or new session
+                        self.text_area.moveCursor(self.text_area.textCursor().MoveOperation.End)
+                        self.text_area.insertPlainText("[KO] ")
+
+                    # Append text inline (no line break)
+                    self.text_area.moveCursor(self.text_area.textCursor().MoveOperation.End)
+                    self.text_area.insertPlainText(data)
+                    output_transcription_buffer.append(data)
+                    last_display_type = "output"
+
+                    # Save to file
+                    self.file_writer.write_line(f"[KO] {data}", newline=False)
+
+                elif item_type == "text":
+                    if not data or not data.strip():
+                        continue
+                    text_count += 1
+                    print(f"[UI] Received text #{text_count}: '{data}'")
+                    self._update_status("translating")
+
+                    # Text gets its own line
+                    self.text_area.moveCursor(self.text_area.textCursor().MoveOperation.End)
+                    self.text_area.insertPlainText(f"\n{data}")
+                    self.file_writer.write_line(data)
+
+                self.text_area.moveCursor(self.text_area.textCursor().MoveOperation.End)
 
             print(f"[UI] Stream ended. Total text: {text_count}, audio: {audio_count}")
 
