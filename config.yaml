@@ -22,6 +22,14 @@ translation:
   model: native-audio
 
   # ==========================================================================
+  # Buffering Mode (for sequential interpretation)
+  # ==========================================================================
+  # When enabled, audio is buffered before sending to API.
+  # This prevents audio loss but introduces delay.
+  buffered_mode: true
+  buffer_duration: 5.0  # seconds per buffer
+
+  # ==========================================================================
   # Vertex AI Settings (only needed for s2st mode)
   # ==========================================================================
   use_vertex_ai: false

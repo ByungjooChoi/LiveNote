@@ -20,6 +20,7 @@ from google.genai.types import (
 )
 from src.config.secure_storage import SecureStorage
 from src.config.settings_manager import settings
+from src.audio.buffer_manager import BufferedAudioManager
 
 
 class SessionExpiredError(Exception):
@@ -458,6 +459,149 @@ class GeminiClient:
 
         except asyncio.CancelledError:
             print(f"Send complete ({send_count} chunks)")
+
+    # =========================================================================
+    # Buffered Mode - Using generateContent API (folubebe style)
+    # =========================================================================
+
+    async def stream_audio_buffered(self, audio_queue, sample_rate=16000, buffer_duration=5.0):
+        """
+        Stream audio with buffering using generateContent API.
+
+        Based on folubebe/gemini_realtime_speech_to_text approach:
+        - Collect audio for buffer_duration seconds
+        - Send as single request to generateContent API
+        - Get transcription + translation
+        - Repeat
+
+        This avoids Live API's turn-based limitations.
+        """
+        import base64
+        import io
+        import wave
+
+        self.buffer_manager = BufferedAudioManager(
+            buffer_duration=buffer_duration,
+            sample_rate=sample_rate
+        )
+
+        # Gemini 2.5 Flash - good balance of speed and quality
+        # Tested: 2.0 (fastest), 2.5 (balanced), 3.0 (too slow)
+        buffered_model = "gemini-2.5-flash"
+
+        # Simple prompt for STT + Translation in one call
+        translation_prompt = """Transcribe the English audio and translate to Korean.
+
+Format:
+[EN] <transcription>
+[KO] <translation>
+
+If silence: [EN] (silence) / [KO] (무음)"""
+
+        print(f"Starting BUFFERED mode (generateContent API)...")
+        print(f"  Buffer duration: {buffer_duration}s")
+        print(f"  Model: {buffered_model}")
+
+        # Start buffer collection task
+        buffer_task = asyncio.create_task(
+            self._collect_audio_to_buffer(audio_queue)
+        )
+
+        buffer_count = 0
+
+        try:
+            while self.is_connected:
+                # Get next buffer
+                buffer = await self.buffer_manager.get_next_buffer(timeout=1.0)
+
+                if buffer is None:
+                    if not self.is_connected:
+                        break
+                    continue
+
+                buffer_count += 1
+                print(f"[BUFFER] Processing #{buffer_count}: {len(buffer)} bytes")
+
+                # Convert PCM to WAV in memory
+                wav_buffer = io.BytesIO()
+                with wave.open(wav_buffer, 'wb') as wav_file:
+                    wav_file.setnchannels(1)
+                    wav_file.setsampwidth(2)  # 16-bit
+                    wav_file.setframerate(sample_rate)
+                    wav_file.writeframes(buffer)
+
+                wav_data = wav_buffer.getvalue()
+                audio_base64 = base64.b64encode(wav_data).decode('utf-8')
+
+                # Send to generateContent API for STT + Translation
+                try:
+                    response = await asyncio.to_thread(
+                        self.client.models.generate_content,
+                        model=buffered_model,
+                        contents=[
+                            translation_prompt,
+                            types.Part.from_bytes(
+                                data=wav_data,
+                                mime_type="audio/wav"
+                            )
+                        ]
+                    )
+
+                    if response.text:
+                        text = response.text.strip()
+                        print(f"[RESPONSE] {text}")
+
+                        # Parse response
+                        for line in text.split('\n'):
+                            line = line.strip()
+                            if line.startswith('[EN]'):
+                                en_text = line[4:].strip()
+                                if en_text and en_text != '(silence)':
+                                    yield ("input_transcription", en_text)
+                            elif line.startswith('[KO]'):
+                                ko_text = line[4:].strip()
+                                if ko_text and ko_text != '(무음)':
+                                    yield ("output_transcription", ko_text)
+
+                except Exception as e:
+                    print(f"[ERROR] generateContent failed: {e}")
+                    continue
+
+        except asyncio.CancelledError:
+            pass
+        finally:
+            buffer_task.cancel()
+            try:
+                await buffer_task
+            except asyncio.CancelledError:
+                pass
+            await self.buffer_manager.shutdown()
+
+    async def _collect_audio_to_buffer(self, audio_queue):
+        """Continuously collect audio from capture queue into buffer manager."""
+        try:
+            while True:
+                try:
+                    item = await asyncio.wait_for(audio_queue.get(), timeout=0.1)
+                except asyncio.TimeoutError:
+                    continue
+
+                # Handle tuple (data, rms) from capture
+                audio_data = item[0] if isinstance(item, tuple) else item
+
+                # Convert float32 to int16 bytes
+                if hasattr(audio_data, 'tobytes'):
+                    if getattr(audio_data, 'dtype', None) == np.float32:
+                        audio_data = np.clip(audio_data, -1.0, 1.0)
+                        audio_data = (audio_data * 32767).astype(np.int16)
+                    audio_data = audio_data.tobytes()
+
+                # Add to buffer manager
+                await self.buffer_manager.add_chunk(audio_data)
+
+        except asyncio.CancelledError:
+            # Flush remaining audio on shutdown
+            await self.buffer_manager.flush()
 
     def disconnect(self):
         """Disconnect from the API."""

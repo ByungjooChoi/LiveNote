@@ -347,18 +347,39 @@ class MainWindow(QMainWindow):
 
             # Pass actual sample rate from capture device to API
             sample_rate = self.audio_capture.sample_rate or 16000
-            async for item in self.gemini_client.stream_audio(self.audio_capture.queue, sample_rate=sample_rate):
+
+            # Check if buffered mode is enabled
+            buffered_mode = settings.get("translation", "buffered_mode", False)
+            buffer_duration = settings.get("translation", "buffer_duration", 5.0)
+
+            if buffered_mode:
+                print(f"[UI] Using BUFFERED mode ({buffer_duration}s buffers)")
+                stream = self.gemini_client.stream_audio_buffered(
+                    self.audio_capture.queue,
+                    sample_rate=sample_rate,
+                    buffer_duration=buffer_duration
+                )
+            else:
+                print(f"[UI] Using REALTIME mode")
+                stream = self.gemini_client.stream_audio(
+                    self.audio_capture.queue,
+                    sample_rate=sample_rate
+                )
+
+            async for item in stream:
                 if not isinstance(item, tuple):
                     continue
 
                 item_type, data = item
 
-                # Handle audio
+                # Handle audio - skip playback in buffered mode for speed
                 if item_type == "audio":
                     audio_count += 1
                     if audio_count % 10 == 0:
                         print(f"[UI] Received audio #{audio_count}: {len(data)} bytes")
-                    await self.audio_playback.queue_audio(data)
+                    if not buffered_mode:
+                        await self.audio_playback.queue_audio(data)
+                    # In buffered mode, just count but don't play (faster turn completion)
                     continue
 
                 # Handle transcriptions - accumulate without line breaks
