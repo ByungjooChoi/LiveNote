@@ -4,7 +4,54 @@
 
 ---
 
-## [NEXT] - 2026-01-28
+## [ed765e3] - 2026-01-29
+**feat: VAD-based segmentation with thinking disabled**
+
+### 방식
+- **VAD + generateContent API** - Silero VAD로 지능적 세그멘테이션
+- 음성 감지 기반 1.5s~6s 동적 청크 → generateContent API 호출
+- Gemini 2.5 Flash **Thinking 비활성화** (`thinking_budget=0`)
+
+### 모델
+- `gemini-2.5-flash` (Thinking OFF)
+
+### 주요 변경
+- **Silero VAD 세그멘터** 추가 (`vad_segmenter.py`)
+  - 상태 머신: IDLE → PRE_SPEECH → SPEECH_ACTIVE → HESITATION → 세그먼트 emit
+  - MIN_CHUNK: 1.5s, MAX_CHUNK: 6s, SILENCE: 800ms
+- **Ghost Suffix 프롬프트** (`prompts.py`)
+  - 불완전 문장에 연결어미 (~하고, ~인데, ~해서) 적용
+  - JSON 스키마 출력 (transcript, translation, is_complete)
+- **컨텍스트 관리** (`context_manager.py`)
+  - 최근 5턴 히스토리 유지
+  - 불완전 문장 자동 병합
+  - 오디오 오버랩 0.5초 (단어 잘림 방지)
+- **API 로깅** 추가 (`logs/api/`)
+  - 요청별 레이턴시, 토큰 사용량, thinking_tokens 기록
+- **파이프라인 타이밍 분석**
+  - Producer-Consumer 시간 추적
+  - 세그먼트별 대기시간, API 시간 출력
+
+### 성능 개선
+| 항목 | 이전 (Thinking ON) | 현재 (Thinking OFF) |
+|------|-------------------|---------------------|
+| 평균 레이턴시 | 8.65s | **2.4s** |
+| 최악 레이턴시 | 33.2s | **4.6s** |
+| 큐 밀림 | 발생 (7개 backlog) | **해결** |
+| 실시간성 | ❌ | ✅ |
+
+### 알려진 이슈
+- 문장이 불완전하게 잘리는 경우 있음 (VAD가 800ms 무음에서 자름)
+- 번역 품질 개선 여지 있음 (Deep Research 예정)
+
+### Rollback 명령
+```bash
+git checkout 7f62895  # 이전 버전 (Buffered Mode)
+```
+
+---
+
+## [7f62895] - 2026-01-28
 **feat: buffered mode with generateContent API (folubebe style)**
 
 ### 방식
@@ -89,13 +136,15 @@ git checkout a9ee4b6
 
 | 상황 | 추천 버전 |
 |------|----------|
-| 안정적인 실시간 텍스트 번역 | **[NEXT]** - Buffered Mode (2.5 Flash) |
+| 실시간 텍스트 번역 (최신) | **[ed765e3]** - VAD + Thinking OFF |
+| 고정 5초 버퍼 방식 | **[7f62895]** - Buffered Mode |
 | 한국어 음성 출력 필요 | **[b3e469c]** or **[a9ee4b6]** |
 | Live API 실험 | **[b3e469c]** |
 
 ---
 
 ## 향후 계획
-- [ ] Gemini Live API + WebSocket Stateful 세션으로 전환
-- [ ] `is_sentence_complete` 플래그를 활용한 문장 경계 감지
-- [ ] VAD + Semantic Endpointing 하이브리드 적용
+- [x] VAD 기반 세그멘테이션
+- [x] Thinking 비활성화로 레이턴시 개선
+- [ ] 번역 품질 개선 (문장 경계, 프롬프트 최적화)
+- [ ] Semantic Endpointing (의미 단위 세그멘테이션)
