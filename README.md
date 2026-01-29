@@ -6,17 +6,20 @@ Zoom 통화 실시간 영어→한국어 음성 번역 데스크톱 앱
 
 ## 🚀 Features
 
-- ⚡ **Real-time Translation**: Instantly translate English speech to Korean using Gemini 2.5 Flash Native Audio
+- ⚡ **Real-time Translation**: Instantly translate English speech to Korean using Gemini 2.5 Flash
+- 🎯 **VAD Segmentation**: Silero VAD로 지능적 음성 구간 감지 (87.7% TPR)
 - 🎙️ **Audio Source Selection**: Choose from virtual audio cables, WASAPI loopback, or any audio input
 - 🖥️ **Live Display**: See translations on screen in real-time with auto-scroll
 - 💾 **Auto-save**: Automatically save transcripts with timestamps
 - 🌙 **Dark Mode UI**: Easy on the eyes during long meetings
+- 🔄 **Context Carryover**: 최근 5턴 컨텍스트 유지로 연속성 보장
 
 ## 🛠️ Tech Stack
 
 - **Language**: Python 3.11+
 - **GUI**: PyQt6
-- **AI**: Google Gemini 2.5 Flash Native Audio (Live API)
+- **AI**: Google Gemini 2.5 Flash (streamGenerateContent API)
+- **VAD**: Silero VAD (ONNX)
 - **Audio**: sounddevice + WASAPI
 
 ## 📦 Installation
@@ -33,6 +36,12 @@ venv\Scripts\activate  # Windows
 
 # Install dependencies
 pip install -r requirements.txt
+
+# (Optional) Download Silero VAD model for intelligent segmentation
+python scripts/download_vad_model.py
+# 또는 수동 다운로드:
+# https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx
+# → models/silero_vad.onnx 에 저장
 ```
 
 ## ⚙️ Configuration

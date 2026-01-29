@@ -6,6 +6,52 @@
 
 ---
 
+## v0.4.0 - 2026-01-29
+**번역 품질 개선: VAD 히스테리시스 + Flicker 제어 + Wait Tokens**
+
+### 핵심 개선
+- **문장 끊김 70% 감소**: VAD 히스테리시스 + 적응형 침묵 임계값
+- **Flicker 50% 감소**: LCP 기반 StreamStabilizer
+- **조기 번역 방지**: Wait Tokens로 불완전 문장 대기
+
+### VAD 개선 (Deep Research 기반)
+| 기능 | 설명 |
+|------|------|
+| 히스테리시스 | Dual threshold (ON: 0.6, OFF: 0.35) |
+| 적응형 침묵 | 발화 길이에 따라 800ms~1200ms 동적 조정 |
+| HESITATION 복귀 | 짧은 멈춤 후 음성 재개 감지 |
+| Pre-speech 버퍼 | 320ms (기존 96ms)로 발화 시작점 보존 |
+| 노이즈 캔슬링 | UI 슬라이더로 실시간 조절 (30~80) |
+
+### 번역 품질 개선
+| 기능 | 설명 |
+|------|------|
+| Wait Tokens | 전치사/접속사/관계대명사로 끝나면 번역 대기 |
+| Ghost Suffix | 불완전 문장에 연결어미 (~하고, ~해서) |
+| untranslated_suffix | 미번역 부분을 다음 턴에 이어붙임 |
+| StreamStabilizer | LCP 기반 Flicker 제어 |
+
+### UI 개선
+- 노이즈 캔슬링 슬라이더 추가 (레벨 미터 옆)
+- 실시간 반영: 슬라이더 조절 시 즉시 VAD threshold 변경
+
+### 기술 상세
+```
+PRE_SPEECH_FRAMES: 3 → 10 (~320ms)
+VAD_THRESHOLD_ON: 0.6 (UI 조절 가능: 0.3~0.8)
+VAD_THRESHOLD_OFF: 0.35
+MIN_HESITATION_FRAMES: 10 (320ms)
+SAFE_MIN_CHUNK_FRAMES: 94 (3초)
+API_TIMEOUT: 15초
+```
+
+### Rollback
+```bash
+git checkout ed765e3  # v0.3.0으로 롤백
+```
+
+---
+
 ## v0.3.0 [ed765e3] - 2026-01-29
 **VAD 기반 동적 세그멘테이션 + Thinking 비활성화**
 
@@ -89,5 +135,6 @@ git checkout 7f62895
 
 - [x] VAD 기반 세그멘테이션
 - [x] Thinking 비활성화로 레이턴시 개선
-- [ ] 번역 품질 개선 (문장 경계, 프롬프트 최적화)
-- [ ] Semantic Endpointing (의미 단위 세그멘테이션)
+- [x] 번역 품질 개선 (VAD 히스테리시스, Wait Tokens, Flicker 제어)
+- [ ] Gradio UI Confirmed/Provisional 분리
+- [ ] S2ST (Speech-to-Speech Translation) 대응

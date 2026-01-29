@@ -15,19 +15,31 @@ import time
 
 @dataclass
 class TranslationTurn:
-    """단일 번역 턴을 나타내는 데이터 클래스."""
+    """
+    단일 번역 턴을 나타내는 데이터 클래스.
+
+    v0.4.0 확장:
+    - confidence: 번역 신뢰도
+    - untranslated_suffix: 미번역 접미사 (다음 턴에 전달)
+    """
     transcript: str          # 영어 원문
     translation: str         # 한국어 번역
     is_complete: bool        # 문장 완성 여부
+    confidence: float = 0.5  # v0.4.0: 번역 신뢰도
+    untranslated_suffix: str = ""  # v0.4.0: 미번역 접미사
     timestamp: float = field(default_factory=time.time)  # 생성 시간
 
     def to_dict(self) -> dict:
         """딕셔너리로 변환 (프롬프트 빌더 호환)."""
-        return {
+        result = {
             'en': self.transcript,
             'kr': self.translation,
             'complete': self.is_complete
         }
+        # v0.4.0: 미번역 접미사가 있으면 포함
+        if self.untranslated_suffix:
+            result['suffix'] = self.untranslated_suffix
+        return result
 
 
 class ContextManager:
@@ -75,6 +87,9 @@ class ContextManager:
         # 불완전 문장 버퍼 (연속 불완전 문장 병합용)
         self._pending_incomplete: Optional[TranslationTurn] = None
 
+        # v0.4.0: 미번역 접미사 버퍼 (다음 턴에 붙일 suffix)
+        self._pending_suffix: str = ""
+
         # 통계
         self._total_turns = 0
         self._incomplete_count = 0
@@ -84,22 +99,41 @@ class ContextManager:
         self,
         transcript: str,
         translation: str,
-        is_complete: bool
+        is_complete: bool,
+        confidence: float = 0.5,
+        untranslated_suffix: str = ""
     ) -> None:
         """
         새 번역 턴을 추가합니다.
 
-        불완전 문장이 연속으로 오면 병합을 시도합니다.
+        v0.4.0 확장:
+        - confidence, untranslated_suffix 지원
+        - 이전 턴의 suffix를 현재 턴에 자동 붙이기
 
         Args:
             transcript: 영어 원문
             translation: 한국어 번역
             is_complete: 문장 완성 여부
+            confidence: 번역 신뢰도 (0.0-1.0)
+            untranslated_suffix: 미번역 접미사
         """
+        # v0.4.0: 이전 suffix가 있으면 transcript 앞에 붙임
+        if self._pending_suffix:
+            transcript = self._pending_suffix + " " + transcript
+            print(f"[CONTEXT] Prepended pending suffix: '{self._pending_suffix}'")
+            self._pending_suffix = ""
+
+        # v0.4.0: 새 suffix가 있으면 저장
+        if untranslated_suffix:
+            self._pending_suffix = untranslated_suffix
+            print(f"[CONTEXT] Saved pending suffix: '{untranslated_suffix}'")
+
         turn = TranslationTurn(
             transcript=transcript,
             translation=translation,
-            is_complete=is_complete
+            is_complete=is_complete,
+            confidence=confidence,
+            untranslated_suffix=untranslated_suffix
         )
 
         self._total_turns += 1
@@ -216,6 +250,7 @@ class ContextManager:
         self._history.clear()
         self._audio_overlap = None
         self._pending_incomplete = None
+        self._pending_suffix = ""  # v0.4.0
         self._total_turns = 0
         self._incomplete_count = 0
         self._merged_count = 0

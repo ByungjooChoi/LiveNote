@@ -58,21 +58,40 @@ def parse_translation_response(response_text: str) -> Optional[dict]:
     """
     Gemini 응답을 파싱합니다.
 
+    v0.4.0 확장:
+    - confidence 필드 추가 (기본값 0.5)
+    - untranslated_suffix 필드 추가 (기본값 "")
+
     Args:
         response_text: JSON 형식의 응답 텍스트
 
     Returns:
-        파싱된 딕셔너리 {'transcript': ..., 'translation': ..., 'is_complete': ...}
+        파싱된 딕셔너리 {'transcript': ..., 'translation': ..., 'is_complete': ...,
+                       'confidence': ..., 'untranslated_suffix': ...}
         또는 파싱 실패 시 None
     """
     try:
         # JSON 파싱
         result = json.loads(response_text.strip())
 
-        # 필수 필드 검증
-        if not all(k in result for k in ['transcript', 'translation', 'is_complete']):
+        # 필수 필드 검증 (기본 3개)
+        required = ['transcript', 'translation', 'is_complete']
+        if not all(k in result for k in required):
             print(f"[PARSE] Missing required fields: {result.keys()}")
             return None
+
+        # v0.4.0: 선택 필드 기본값 설정
+        result.setdefault('confidence', 0.5)
+        result.setdefault('untranslated_suffix', '')
+
+        # confidence 범위 검증
+        if not isinstance(result['confidence'], (int, float)):
+            result['confidence'] = 0.5
+        result['confidence'] = max(0.0, min(1.0, float(result['confidence'])))
+
+        # untranslated_suffix 로깅
+        if result['untranslated_suffix']:
+            print(f"[PARSE] untranslated_suffix: '{result['untranslated_suffix']}'")
 
         return result
 
@@ -137,6 +156,9 @@ class GeminiClient:
         self._request_count = 0
         self._total_latency = 0.0
         self._error_count = 0
+
+        # v0.4.0: Flicker 제어용 Stabilizer
+        self.stabilizer = StreamStabilizer(stability_threshold=0.6)
 
         # API 로그 파일
         self._api_log_file: Optional[Path] = None
@@ -318,27 +340,37 @@ class GeminiClient:
             audio_size = len(wav_data)
             prompt_preview = user_prompt[:200] if user_prompt else ""
 
-            # API 요청
+            # API 요청 (v0.4.0: 15초 타임아웃 추가)
             response_text = ""
-            response = await asyncio.to_thread(
-                self.client.models.generate_content,
-                model=self.model_name,
-                contents=[
-                    types.Content(
-                        role="user",
-                        parts=[
-                            types.Part(text=user_prompt),
-                            types.Part(
-                                inline_data=types.Blob(
-                                    data=wav_data,
-                                    mime_type="audio/wav"
-                                )
+            try:
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self.client.models.generate_content,
+                        model=self.model_name,
+                        contents=[
+                            types.Content(
+                                role="user",
+                                parts=[
+                                    types.Part(text=user_prompt),
+                                    types.Part(
+                                        inline_data=types.Blob(
+                                            data=wav_data,
+                                            mime_type="audio/wav"
+                                        )
+                                    )
+                                ]
                             )
-                        ]
-                    )
-                ],
-                config=api_config
-            )
+                        ],
+                        config=api_config
+                    ),
+                    timeout=15.0  # v0.4.0: 15초 타임아웃
+                )
+            except asyncio.TimeoutError:
+                print(f"[GEMINI] ⚠️ Request timeout after 15s (req #{self._request_count})")
+                self._error_count += 1
+                if self.on_error:
+                    self.on_error("Translation timeout (15s)")
+                return None
 
             # 응답 추출
             if response.text:
@@ -364,15 +396,38 @@ class GeminiClient:
             result = parse_translation_response(response_text)
 
             if result:
-                # 컨텍스트에 추가
+                # 컨텍스트에 추가 (v0.4.0: confidence, untranslated_suffix 포함)
                 self.context_manager.add_turn(
                     transcript=result['transcript'],
                     translation=result['translation'],
-                    is_complete=result['is_complete']
+                    is_complete=result['is_complete'],
+                    confidence=result.get('confidence', 0.5),
+                    untranslated_suffix=result.get('untranslated_suffix', '')
                 )
 
                 # 다음 청크를 위한 오버랩 저장
                 self.context_manager.set_audio_overlap(audio_data)
+
+                # v0.4.0.1: Flicker 제어 로직 수정
+                # 현재 구조(세그먼트당 1회 API 호출)에서는
+                # is_complete 기반으로 confirmed/provisional 분리
+                confidence = result.get('confidence', 0.5)
+
+                if result['is_complete']:
+                    # 완성된 문장: 전체를 confirmed로
+                    result['confirmed'] = result['translation']
+                    result['provisional'] = ""
+                else:
+                    # 불완전 문장: 전체를 provisional로 (향후 변경 가능)
+                    result['confirmed'] = ""
+                    result['provisional'] = result['translation']
+
+                result['should_update'] = True
+
+                # 로깅
+                suffix = result.get('untranslated_suffix', '')
+                print(f"[TRANSLATE] complete={result['is_complete']}, "
+                      f"conf={confidence:.2f}, suffix='{suffix}'")
 
                 # 콜백 호출
                 if self.on_transcription and result['transcript']:
@@ -503,6 +558,7 @@ class GeminiClient:
     def reset_context(self) -> None:
         """컨텍스트를 초기화합니다."""
         self.context_manager.reset()
+        self.stabilizer.reset()  # v0.4.0: Flicker 제어 상태도 리셋
         print("[GEMINI] Context reset")
 
     def get_stats(self) -> dict:
@@ -511,7 +567,157 @@ class GeminiClient:
             "request_count": self._request_count,
             "error_count": self._error_count,
             "avg_latency": self._total_latency / max(1, self._request_count),
-            "context_stats": self.context_manager.get_stats()
+            "context_stats": self.context_manager.get_stats(),
+            "stabilizer_stats": self.stabilizer.get_stats()  # v0.4.0
+        }
+
+
+# =============================================================================
+# StreamStabilizer - Flicker 제어 (v0.4.0)
+# =============================================================================
+
+class StreamStabilizer:
+    """
+    스트리밍 출력 안정화 (Flicker 제어).
+
+    v0.4.0 개선사항:
+    - LCP(최장 공통 접두사) 기반 stability score 계산
+    - 단어 경계 기준 안정 텍스트 확정
+    - confirmed/provisional 분리 출력
+
+    Based on: Deep Research - stability_score = 0.8*prefix_ratio + 0.2*confidence
+    """
+
+    def __init__(self, stability_threshold: float = 0.6):
+        """
+        Stabilizer 초기화.
+
+        Args:
+            stability_threshold: stability_score 임계값 (기본 0.6)
+        """
+        self.stability_threshold = stability_threshold
+        self.last_output = ""
+        self.confirmed_text = ""
+        self._update_count = 0
+        self._skip_count = 0
+
+    def should_update(
+        self,
+        new_text: str,
+        confidence: float = 0.5
+    ) -> tuple[bool, str, str]:
+        """
+        출력 업데이트 여부 판단.
+
+        Args:
+            new_text: 새로운 번역 텍스트
+            confidence: 번역 신뢰도 (0.0-1.0)
+
+        Returns:
+            (should_update, confirmed_part, provisional_part)
+            - should_update: 업데이트 여부
+            - confirmed_part: 확정된 텍스트 (안정적)
+            - provisional_part: 임시 텍스트 (변경 가능)
+        """
+        if not new_text:
+            return False, self.confirmed_text, ""
+
+        if not self.last_output:
+            # 첫 출력: 전체를 provisional로 처리
+            self.last_output = new_text
+            self._update_count += 1
+            return True, "", new_text
+
+        # LCP (최장 공통 접두사) 계산 - 단어 단위
+        common_prefix = self._get_word_boundary_lcp(self.last_output, new_text)
+        prefix_ratio = len(common_prefix) / max(len(new_text), 1)
+
+        # Stability score = 0.8 * prefix_ratio + 0.2 * confidence
+        stability_score = 0.8 * prefix_ratio + 0.2 * confidence
+
+        if stability_score >= self.stability_threshold:
+            # 안정적: confirmed 업데이트
+            self.confirmed_text = common_prefix
+            provisional = new_text[len(common_prefix):].lstrip()
+            self.last_output = new_text
+            self._update_count += 1
+
+            print(f"[STABILIZER] score={stability_score:.2f} ✓ "
+                  f"confirmed='{self.confirmed_text[:30]}...' "
+                  f"prov='{provisional[:20]}...'")
+
+            return True, self.confirmed_text, provisional
+        else:
+            # 불안정: 업데이트 스킵
+            self._skip_count += 1
+            print(f"[STABILIZER] score={stability_score:.2f} ✗ skipped")
+            return False, self.confirmed_text, ""
+
+    def _get_word_boundary_lcp(self, s1: str, s2: str) -> str:
+        """
+        단어 경계 기준 LCP(최장 공통 접두사) 반환.
+
+        문자 단위가 아닌 단어 단위로 공통 접두사를 찾아
+        더 안정적인 출력을 보장합니다.
+
+        Args:
+            s1: 이전 텍스트
+            s2: 새 텍스트
+
+        Returns:
+            단어 경계로 정렬된 공통 접두사
+        """
+        min_len = min(len(s1), len(s2))
+        common_len = 0
+
+        for i in range(min_len):
+            if s1[i] == s2[i]:
+                common_len += 1
+            else:
+                break
+
+        # 단어 경계로 조정 (공백 기준)
+        common = s1[:common_len]
+
+        # 한국어: 조사 경계 고려 (공백 또는 조사 앞)
+        # 영어: 공백 기준
+        last_space = common.rfind(' ')
+
+        if last_space != -1:
+            return common[:last_space + 1]  # 공백 포함
+
+        # 공백이 없으면 빈 문자열 (전체가 불안정)
+        return ""
+
+    def force_confirm(self) -> str:
+        """
+        현재 출력을 강제 확정합니다.
+
+        세그먼트 종료 시 호출하여 남은 provisional을 confirmed로 변환.
+
+        Returns:
+            확정된 전체 텍스트
+        """
+        if self.last_output:
+            self.confirmed_text = self.last_output
+            print(f"[STABILIZER] Force confirmed: '{self.confirmed_text[:50]}...'")
+        return self.confirmed_text
+
+    def reset(self) -> None:
+        """Stabilizer를 초기화합니다."""
+        self.last_output = ""
+        self.confirmed_text = ""
+        print(f"[STABILIZER] Reset (updates={self._update_count}, skips={self._skip_count})")
+        self._update_count = 0
+        self._skip_count = 0
+
+    def get_stats(self) -> dict:
+        """통계를 반환합니다."""
+        return {
+            "update_count": self._update_count,
+            "skip_count": self._skip_count,
+            "confirmed_length": len(self.confirmed_text),
+            "last_output_length": len(self.last_output)
         }
 
 

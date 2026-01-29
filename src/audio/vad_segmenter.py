@@ -75,19 +75,144 @@ class SileroVADSegmenter:
     SAMPLE_RATE = 16000
     FRAME_SIZE = 512  # 32ms @ 16kHz
 
-    # VAD 파라미터
-    VAD_THRESHOLD = 0.5
-    PRE_SPEECH_FRAMES = 3  # 음성 시작 전 버퍼링할 프레임 수
+    # VAD 파라미터 - 히스테리시스 (Dual Threshold)
+    # v0.4.0: 단일 임계값 대신 이중 임계값으로 발진(Oscillation) 방지
+    VAD_THRESHOLD = 0.5           # 기본 임계값 (하위 호환용)
+    VAD_THRESHOLD_ON = 0.6        # 음성 시작 기준 (높음) - 노이즈 오작동 방지
+    VAD_THRESHOLD_OFF = 0.35      # 음성 유지 기준 (낮음) - 짧은 멈춤 허용
+    PRE_SPEECH_FRAMES = 10        # v0.4.2: 음성 시작 전 버퍼링 (~320ms, Gemini 권장: 200-300ms)
+
+    # v0.4.1: 히스테리시스 루프 - 링 버퍼 기반 스무딩
+    VAD_SMOOTHING_WINDOW = 5      # 스무딩 윈도우 크기 (5 프레임 = 160ms)
 
     # 청크 길이 파라미터 (프레임 단위)
     # Deep Research 원래 설계값 (Section 3.2)
-    MIN_CHUNK_FRAMES = 47    # 1.5s - 오역 방지를 위한 최소 길이
-    MAX_CHUNK_FRAMES = 187   # 6.0s - 최대 청크 길이
-    FORCE_FLUSH_FRAMES = 218 # 7.0s - 강제 전송 타임아웃
-    SILENCE_FRAMES = 25      # 800ms - 문장 종료 판단 기준
+    MIN_CHUNK_FRAMES = 47         # 1.5s - 오역 방지를 위한 최소 길이
+    SAFE_MIN_CHUNK_FRAMES = 94    # 3.0s - v0.4.0: 짧은 세그먼트 방지 강화
+    MAX_CHUNK_FRAMES = 187        # 6.0s - 최대 청크 길이
+    FORCE_FLUSH_FRAMES = 218      # 7.0s - 강제 전송 타임아웃
+    SILENCE_FRAMES = 25           # 800ms - 문장 종료 판단 기준 (기본값)
+    MIN_HESITATION_FRAMES = 10    # 320ms - v0.4.0: HESITATION 진입 최소 무음
 
     # 시간 변환 (참고용)
     FRAME_DURATION_MS = FRAME_SIZE / SAMPLE_RATE * 1000  # 32ms
+
+    # ==========================================================================
+    # v0.4.0 적응형 메서드
+    # ==========================================================================
+
+    def _get_adaptive_silence_frames(self) -> int:
+        """
+        v0.4.0: 발화 길이에 따라 침묵 임계값 동적 조정.
+
+        긴 발화일수록 더 긴 침묵을 허용하여 문장 중간 끊김 방지.
+
+        Returns:
+            적응형 침묵 프레임 수
+        """
+        utterance_ms = self._speech_frames * self.FRAME_DURATION_MS
+
+        if utterance_ms > 5000:  # 5초 이상: 긴 발화
+            return 37  # 1200ms
+        elif utterance_ms > 3000:  # 3-5초: 중간 발화
+            return 31  # 1000ms
+        else:  # 3초 미만: 짧은 발화
+            return self.SILENCE_FRAMES  # 800ms (기본값)
+
+    def _is_hesitation_recovery_likely(self, speech_prob: float) -> bool:
+        """
+        v0.4.0: HESITATION 상태에서 음성 복귀 가능성 추정.
+
+        호흡 멈춤(respiratory pause)을 문장 종료로 오인하지 않도록 함.
+
+        Args:
+            speech_prob: 현재 VAD 확률
+
+        Returns:
+            복귀 가능성 여부
+        """
+        hesitation_ms = self._silence_frames * self.FRAME_DURATION_MS
+        utterance_ms = self._speech_frames * self.FRAME_DURATION_MS
+
+        # v0.4.0.1 버그 수정: 짧은 발화(3초 미만)는 항상 복귀 가능성 높음
+        # 2816ms 같은 짧은 세그먼트 방지
+        if utterance_ms < 3000:
+            return True
+
+        # 800ms 이내 HESITATION: 복귀 가능성 높음 (500ms → 800ms로 확장)
+        if hesitation_ms < 800:
+            return True
+
+        # VAD 점수 0.1-0.5: 약한 음성 신호 범위 확장 (0.2-0.4 → 0.1-0.5)
+        if 0.1 <= speech_prob <= 0.5:
+            return True
+
+        return False
+
+    def _get_hysteresis_threshold(self) -> float:
+        """
+        v0.4.0: 현재 상태에 따른 히스테리시스 임계값 반환.
+
+        IDLE 상태: 높은 임계값 (노이즈 방지)
+        SPEECH/HESITATION 상태: 낮은 임계값 (짧은 멈춤 허용)
+
+        Returns:
+            적용할 VAD 임계값
+        """
+        if self._state == VADState.IDLE or self._state == VADState.PRE_SPEECH:
+            return self._vad_threshold_on  # 인스턴스 변수 사용 (UI 조절 가능)
+        else:
+            return self.VAD_THRESHOLD_OFF  # 0.35
+
+    # ==========================================================================
+    # v0.4.2 UI 조절 가능한 setter/getter
+    # ==========================================================================
+
+    def set_noise_canceling(self, level: float) -> None:
+        """
+        v0.4.2: 노이즈 캔슬링 레벨 설정 (UI 슬라이더용).
+
+        높은 값 = 더 강한 노이즈 캔슬링 (배경음 무시)
+        낮은 값 = 더 민감한 음성 감지
+
+        Args:
+            level: 0.3 ~ 0.8 (기본값 0.6)
+        """
+        # 범위 제한
+        level = max(0.3, min(0.8, level))
+        self._vad_threshold_on = level
+        print(f"[VAD] 노이즈 캔슬링 설정: {level:.2f}")
+
+    def get_noise_canceling(self) -> float:
+        """현재 노이즈 캔슬링 레벨 반환."""
+        return self._vad_threshold_on
+
+    def _get_smoothed_vad_prob(self, current_prob: float) -> float:
+        """
+        v0.4.1: 링 버퍼 기반 스무딩된 VAD 확률 반환.
+
+        히스테리시스 루프: 최근 N 프레임의 중앙값을 사용하여
+        노이즈로 인한 급격한 변동 방지.
+
+        Args:
+            current_prob: 현재 프레임의 VAD 확률
+
+        Returns:
+            스무딩된 VAD 확률
+        """
+        # 현재 확률을 버퍼에 추가
+        self._vad_prob_buffer.append(current_prob)
+
+        # 버퍼가 충분히 차지 않으면 현재 값 반환
+        if len(self._vad_prob_buffer) < 3:
+            return current_prob
+
+        # 중앙값 필터 (median filter) - 노이즈에 강건함
+        sorted_probs = sorted(self._vad_prob_buffer)
+        median_idx = len(sorted_probs) // 2
+        smoothed = sorted_probs[median_idx]
+
+        return smoothed
 
     def __init__(
         self,
@@ -114,6 +239,12 @@ class SileroVADSegmenter:
         # 프레임 버퍼
         self._frame_buffer: deque[bytes] = deque()
         self._pre_speech_buffer: deque[bytes] = deque(maxlen=self.PRE_SPEECH_FRAMES)
+
+        # v0.4.1: VAD 확률 링 버퍼 (히스테리시스 루프용)
+        self._vad_prob_buffer: deque[float] = deque(maxlen=self.VAD_SMOOTHING_WINDOW)
+
+        # v0.4.2: UI 조절 가능한 노이즈 캔슬링 (기본값 0.6)
+        self._vad_threshold_on: float = self.VAD_THRESHOLD_ON
 
         # 프레임 카운터
         self._speech_frames = 0       # 현재 음성 구간의 프레임 수
@@ -277,13 +408,20 @@ class SileroVADSegmenter:
 
         # VAD 실행
         audio_float = self._bytes_to_float(frame_bytes)
-        speech_prob = self._run_vad(audio_float)
-        is_speech = speech_prob >= self.VAD_THRESHOLD
+        raw_prob = self._run_vad(audio_float)
+
+        # v0.4.1: 히스테리시스 루프 - 링 버퍼 기반 스무딩
+        speech_prob = self._get_smoothed_vad_prob(raw_prob)
+
+        # v0.4.0: 히스테리시스 적용 - 상태에 따라 다른 임계값
+        threshold = self._get_hysteresis_threshold()
+        is_speech = speech_prob >= threshold
 
         # 디버그: 매 100프레임마다 VAD 확률 로깅
         if self._total_frames % 100 == 0:
             rms = np.sqrt(np.mean(audio_float ** 2))
-            print(f"[VAD] Frame {self._total_frames}: prob={speech_prob:.3f}, rms={rms:.4f}, len={len(audio_float)}")
+            print(f"[VAD] Frame {self._total_frames}: raw={raw_prob:.3f}, smooth={speech_prob:.3f}, "
+                  f"rms={rms:.4f}, threshold={threshold:.2f}")
 
         # 상태 머신 처리
         segment = None
@@ -355,9 +493,12 @@ class SileroVADSegmenter:
         else:
             self._silence_frames += 1
 
+            # v0.4.0: 적응형 침묵 임계값 사용
+            adaptive_silence = self._get_adaptive_silence_frames()
+
             # 최소 길이 도달 + 충분한 무음 → 세그먼트 종료
             if (self._speech_frames >= self.MIN_CHUNK_FRAMES and
-                self._silence_frames >= self.SILENCE_FRAMES):
+                self._silence_frames >= adaptive_silence):
                 return self._flush_segment()
 
             # MAX_CHUNK 도달 → 세그먼트 종료
@@ -365,14 +506,22 @@ class SileroVADSegmenter:
                 print(f"[VAD] Max chunk reached at {self._speech_frames} frames")
                 return self._flush_segment()
 
-            # 짧은 무음 → HESITATION으로 전이
-            if self._silence_frames >= 5:  # ~160ms
+            # v0.4.0: HESITATION 진입 조건 강화 (5프레임 → MIN_HESITATION_FRAMES)
+            # 버그 수정: 너무 쉽게 HESITATION으로 전이되어 발진 발생
+            if self._silence_frames >= self.MIN_HESITATION_FRAMES:  # 320ms
                 self._transition_to(VADState.HESITATION)
 
         return None
 
     def _handle_hesitation(self, frame_bytes: bytes, is_speech: bool) -> Optional[bytes]:
-        """HESITATION 상태 처리."""
+        """
+        HESITATION 상태 처리.
+
+        v0.4.0 개선사항:
+        - 적응형 침묵 임계값 사용
+        - 복귀 가능성 판단으로 조기 종료 방지
+        - SAFE_MIN_CHUNK_FRAMES로 짧은 세그먼트 방지
+        """
         self._frame_buffer.append(frame_bytes)
         self._speech_frames += 1
 
@@ -381,6 +530,10 @@ class SileroVADSegmenter:
             self._force_flushes += 1
             return self._flush_segment()
 
+        # VAD 확률 다시 계산 (복귀 가능성 판단용)
+        audio_float = self._bytes_to_float(frame_bytes)
+        speech_prob = self._run_vad(audio_float)
+
         if is_speech:
             # 음성 재개 → SPEECH_ACTIVE로 복귀
             self._silence_frames = 0
@@ -388,13 +541,23 @@ class SileroVADSegmenter:
         else:
             self._silence_frames += 1
 
-            # 충분한 무음 → 세그먼트 종료
-            if self._silence_frames >= self.SILENCE_FRAMES:
-                if self._speech_frames >= self.MIN_CHUNK_FRAMES:
+            # v0.4.0: 적응형 침묵 임계값 사용
+            adaptive_silence = self._get_adaptive_silence_frames()
+
+            # 충분한 무음 → 세그먼트 종료 검토
+            if self._silence_frames >= adaptive_silence:
+                # v0.4.0 버그 수정: SAFE_MIN_CHUNK_FRAMES 이상일 때만 종료
+                if self._speech_frames >= self.SAFE_MIN_CHUNK_FRAMES:  # 3초 이상
                     return self._flush_segment()
-                else:
-                    # 최소 길이 미달이면 계속 대기
-                    pass
+                elif self._speech_frames >= self.MIN_CHUNK_FRAMES:
+                    # 1.5~3초: 복귀 가능성 확인
+                    if not self._is_hesitation_recovery_likely(speech_prob):
+                        return self._flush_segment()
+                    else:
+                        # 복귀 가능성 있으면 계속 대기
+                        print(f"[VAD] Waiting for speech recovery "
+                              f"({self._speech_frames} frames, prob={speech_prob:.2f})")
+                # 1.5초 미만이면 계속 대기
 
         return None
 
@@ -440,6 +603,8 @@ class SileroVADSegmenter:
         self._state_start_time = time.time()
         self._frame_buffer.clear()
         self._pre_speech_buffer.clear()
+        self._vad_prob_buffer.clear()  # v0.4.1: 링 버퍼 초기화
+        # v0.4.2: 노이즈 캔슬링 레벨은 reset해도 유지 (사용자 설정값)
         self._speech_frames = 0
         self._silence_frames = 0
         self._total_frames = 0
@@ -461,7 +626,8 @@ class SileroVADSegmenter:
             "buffer_frames": len(self._frame_buffer),
             "segments_created": self._segments_created,
             "force_flushes": self._force_flushes,
-            "model_loaded": self._session is not None
+            "model_loaded": self._session is not None,
+            "noise_canceling": self._vad_threshold_on  # v0.4.2: UI 조절 가능
         }
 
 

@@ -16,10 +16,8 @@ translation:
   # ==========================================================================
   # Model Selection
   # ==========================================================================
-  # Options:
-  #   - native-audio : Real-time translation with Gemini API (default)
-  #   - s2st         : Simultaneous translation (requires Vertex AI + Google approval)
-  model: native-audio
+  # V2: Uses gemini-2.5-flash with streamGenerateContent API
+  model: gemini-2.5-flash
 
   # ==========================================================================
   # Buffering Mode (for sequential interpretation)

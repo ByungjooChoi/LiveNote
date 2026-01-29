@@ -96,6 +96,24 @@ class MainWindow(QMainWindow):
         """)
         input_layout.addWidget(self.level_meter)
 
+        # v0.4.2: 노이즈 캔슬링 슬라이더 (레벨 미터 옆)
+        nc_label = QLabel("🔇")
+        nc_label.setToolTip("노이즈 캔슬링")
+        input_layout.addWidget(nc_label)
+
+        self.noise_canceling_slider = QSlider(Qt.Orientation.Horizontal)
+        self.noise_canceling_slider.setRange(30, 80)  # 0.3 ~ 0.8
+        self.noise_canceling_slider.setValue(60)  # 기본값 0.6
+        self.noise_canceling_slider.setFixedWidth(80)
+        self.noise_canceling_slider.setToolTip("노이즈 캔슬링: 높을수록 배경 소음 무시 (기본: 60)")
+        self.noise_canceling_slider.valueChanged.connect(self._on_noise_canceling_changed)
+        input_layout.addWidget(self.noise_canceling_slider)
+
+        self.nc_value_label = QLabel("60")
+        self.nc_value_label.setFixedWidth(20)
+        self.nc_value_label.setStyleSheet("color: #AAAAAA; font-size: 11px;")
+        input_layout.addWidget(self.nc_value_label)
+
         # Preview Button
         self.preview_btn = QPushButton("🔊 Preview")
         self.preview_btn.setFixedWidth(80)
@@ -240,6 +258,13 @@ class MainWindow(QMainWindow):
         """볼륨 변경 핸들러."""
         self.volume_value_label.setText(f"{value}%")
         self.audio_playback.set_volume(value / 100.0)
+
+    def _on_noise_canceling_changed(self, value):
+        """v0.4.2: 노이즈 캔슬링 레벨 변경 핸들러 (실시간 반영)."""
+        self.nc_value_label.setText(str(value))
+        # VAD 세그멘터가 활성화되어 있으면 실시간 반영
+        if self.vad_segmenter and isinstance(self.vad_segmenter, SileroVADSegmenter):
+            self.vad_segmenter.set_noise_canceling(value / 100.0)
 
     def _toggle_mute(self):
         """음소거 토글."""
@@ -419,8 +444,11 @@ class MainWindow(QMainWindow):
                         model_path=model_path,
                         on_segment_ready=None
                     )
+                    # v0.4.2: UI 슬라이더 값으로 노이즈 캔슬링 초기화
+                    nc_level = self.noise_canceling_slider.value() / 100.0
+                    self.vad_segmenter.set_noise_canceling(nc_level)
                     self._update_status("vad_active", "VAD initialized")
-                    print(f"[MAIN] Using Silero VAD: {model_path}")
+                    print(f"[MAIN] Using Silero VAD: {model_path}, noise_canceling={nc_level:.2f}")
                 else:
                     # VAD 사용 불가 → 폴백
                     if not ONNX_AVAILABLE:
