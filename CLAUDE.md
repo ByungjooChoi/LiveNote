@@ -27,7 +27,8 @@ livenote/
 │   │   ├── settings_manager.py # YAML config management
 │   │   └── secure_storage.py   # API key storage (env var)
 │   ├── translator/
-│   │   ├── gemini_client.py    # Gemini Live API WebSocket client
+│   │   ├── gemini_client.py    # Gemini generateContent API client
+│   │   ├── live_api_client.py  # S2ST Live API Full Duplex client
 │   │   └── model_fetcher.py    # Model list retrieval
 │   ├── ui/
 │   │   ├── main_window.py      # Main UI (dark mode)
@@ -55,12 +56,21 @@ livenote/
 5. Responses (text + audio) are yielded back to UI
 6. `AudioPlayback` plays TTS audio output at 24kHz
 
-### Gemini Live API
-- Model: `gemini-2.5-flash-native-audio-preview-12-2025`
-- Input: PCM 16kHz 16-bit mono
-- Output: PCM 24kHz 16-bit mono + text
-- Session timeout: 15 minutes (auto-reconnect at 14 min)
-- Must send `turn_complete=True` after silence to trigger response
+### Gemini API 모드
+
+**Standard Mode (generateContent)**
+- Model: `gemini-2.5-flash`
+- 방식: REST API, VAD 기반 세그멘테이션
+- 입력: WAV (16kHz 16-bit mono)
+- 출력: JSON (transcript, translation)
+
+**S2ST Mode (Live API Full Duplex)**
+- Model: `gemini-2.5-flash-s2st-exp-11-2025`
+- 방식: WebSocket, 양방향 스트리밍
+- 입력: PCM 16kHz 16-bit mono (연속 스트림)
+- 출력: `input_transcription` (원문) + `output_transcription` (번역)
+- 특징: VAD 불필요, Full Duplex (입출력 동시)
+- 주의: Allowlist 승인 필요
 
 ### Audio Format Conversion
 ```python
@@ -103,3 +113,17 @@ See `docs/REFERENCE.md` for detailed Gemini Live API documentation.
 - Use `asyncio` and `qasync` for async operations
 - Follow existing code style (type hints encouraged)
 - Test with `pytest` when applicable
+
+## 📋 필수 작업 (Claude 자동 수행)
+
+### Changelog 업데이트
+**코드 변경 시 반드시 `CHANGELOG.md` 업데이트:**
+- 새 기능 추가 시: 새 버전 섹션 생성 (v0.X.0)
+- 버그 수정 시: 해당 버전의 "Fixes" 섹션에 추가
+- 형식: 기존 changelog 스타일 따르기 (표, 코드 블록 등)
+
+### 업데이트 항목
+1. **핵심 기능**: 무엇이 바뀌었는지 한 줄 요약
+2. **변경 파일**: 수정된 파일 목록과 변경 내용
+3. **사용 방법**: 새 기능 사용법 (해당 시)
+4. **주의사항**: 알려진 제한사항이나 요구사항

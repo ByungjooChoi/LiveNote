@@ -2,34 +2,23 @@ audio:
   buffer_size: 1024
   channels: 1
   sample_rate: 16000
-
 output:
   auto_save: true
   filename_format: transcript_%Y%m%d_%H%M%S.txt
   save_directory: output
-
 translation:
+  buffer_duration: 5.0
+  buffered_mode: true
   language_from: en
   language_to: ko
+  # Vertex AI 모델 옵션:
+  #   - gemini-live-2.5-flash-native-audio (Native Audio GA)
+  #   - gemini-live-2.5-flash-preview-native-audio-09-2025 (Native Audio Preview)
+  #   - gemini-2.5-flash-s2st-exp-11-2025 (S2ST - 실제 작동 확인)
+  # 참고: S2ST는 번역 전용 - system_instruction, Proactive Audio 미지원
+  model: gemini-2.5-flash-s2st-exp-11-2025
+  service_account_key: credentials/elastic-sa-0726277ebb9e.json
   streaming: true
-
-  # ==========================================================================
-  # Model Selection
-  # ==========================================================================
-  # V2: Uses gemini-2.5-flash with streamGenerateContent API
-  model: gemini-2.5-flash
-
-  # ==========================================================================
-  # Buffering Mode (for sequential interpretation)
-  # ==========================================================================
-  # When enabled, audio is buffered before sending to API.
-  # This prevents audio loss but introduces delay.
-  buffered_mode: true
-  buffer_duration: 5.0  # seconds per buffer
-
-  # ==========================================================================
-  # Vertex AI Settings (only needed for s2st mode)
-  # ==========================================================================
-  use_vertex_ai: false
-  vertex_project: "elastic-sa"
-  vertex_location: "us-central1"
+  use_vertex_ai: true
+  vertex_location: us-central1
+  vertex_project: elastic-sa

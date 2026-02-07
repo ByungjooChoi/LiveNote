@@ -11,8 +11,9 @@ class ModelFetcher:
     # Live API compatible models (may not appear in models.list())
     # See: https://ai.google.dev/gemini-api/docs/models#gemini-2.5-flash-live
     LIVE_API_MODELS = [
-        {"name": "gemini-2.5-flash-native-audio-preview-12-2025", "displayName": "Gemini 2.5 Flash Native Audio (Dec 2025)"},
-        {"name": "gemini-2.0-flash-exp", "displayName": "Gemini 2.0 Flash Live (Exp)"},
+        {"name": "gemini-2.5-flash-s2st-exp-11-2025", "displayName": "🎤 Gemini 2.5 Flash S2ST (Full Duplex)", "type": "s2st"},
+        {"name": "gemini-2.5-flash-native-audio-preview-12-2025", "displayName": "Gemini 2.5 Flash Native Audio (Dec 2025)", "type": "native-audio"},
+        {"name": "gemini-2.0-flash-exp", "displayName": "Gemini 2.0 Flash Live (Exp)", "type": "standard"},
     ]
 
     @staticmethod

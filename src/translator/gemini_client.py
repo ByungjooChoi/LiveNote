@@ -27,6 +27,46 @@ from src.translator.context_manager import ContextManager
 
 
 # =============================================================================
+# 모델 타입 감지 유틸리티
+# =============================================================================
+
+def is_s2st_model(model_name: str) -> bool:
+    """
+    Live API가 필요한 모델인지 확인.
+
+    S2ST 모델과 Native Audio 모델은 모두 Live API Full Duplex를 사용해야 함.
+
+    Args:
+        model_name: 모델 이름
+
+    Returns:
+        Live API 필요 여부
+    """
+    model_lower = model_name.lower()
+    # S2ST 모델 또는 Native Audio 모델은 Live API 필요
+    return "s2st" in model_lower or "native-audio" in model_lower
+
+
+def get_model_type(model_name: str) -> str:
+    """
+    모델 타입 반환.
+
+    Args:
+        model_name: 모델 이름
+
+    Returns:
+        "s2st" | "native-audio" | "standard"
+    """
+    name_lower = model_name.lower()
+    if "s2st" in name_lower:
+        return "s2st"
+    elif "native-audio" in name_lower:
+        return "native-audio"
+    else:
+        return "standard"
+
+
+# =============================================================================
 # 상수 정의
 # =============================================================================
 

@@ -20,7 +20,9 @@ from qasync import asyncSlot
 from src.ui.settings_dialog import SettingsDialog
 from src.ui.audio_selector import AudioSelector
 from src.audio.capture import AudioCapture
-from src.translator.gemini_client import GeminiClient, TranslationPipeline
+from src.translator.gemini_client import GeminiClient, TranslationPipeline, is_s2st_model
+# WebSocket 버전 사용 (enable_speech_to_speech_translation: True)
+from src.translator.live_api_websocket import LiveAPIWebSocketClient as LiveAPIClient, S2STTranslationPipeline
 from src.audio.vad_segmenter import SileroVADSegmenter, SimpleTimeBasedSegmenter
 from src.config.secure_storage import SecureStorage
 from src.utils.file_writer import FileWriter
@@ -57,6 +59,12 @@ class MainWindow(QMainWindow):
         self.vad_task = None
         self.ui_update_task = None
         self.audio_playback = AudioPlayback()
+
+        # S2ST Full Duplex 모드 상태
+        self.is_s2st_mode = False
+        self.live_api_client = None
+        self.s2st_pipeline = None
+        self.s2st_audio_task = None
 
         # 타이머
         self.last_audio_time = None
@@ -307,7 +315,18 @@ class MainWindow(QMainWindow):
 
     def _update_stats_display(self):
         """통계 표시 업데이트."""
-        if self.gemini_client:
+        if self.is_s2st_mode and self.live_api_client:
+            # S2ST 모드 통계
+            stats = self.live_api_client.get_stats()
+            chunks = stats.get('audio_chunks_sent', 0)
+            transcriptions = stats.get('transcriptions_received', 0)
+            duration = stats.get('duration_sec', 0)
+
+            self.stats_label.setText(
+                f"🎤 S2ST | Chunks: {chunks} | Texts: {transcriptions} | {duration:.0f}s"
+            )
+        elif self.gemini_client:
+            # 기존 모드 통계
             stats = self.gemini_client.get_stats()
             avg_latency = stats.get('avg_latency', 0)
             req_count = stats.get('request_count', 0)
@@ -406,82 +425,25 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage("Connecting...")
         self._update_status("ready", "Initializing...")
 
+        # 모델 타입 확인
+        current_model = settings.get("translation", "model", "gemini-2.5-flash")
+        self.is_s2st_mode = is_s2st_model(current_model)
+
         try:
-            # 1. Gemini 클라이언트 초기화
-            self.gemini_client = GeminiClient()
-
-            # 콜백 설정
-            self.gemini_client.on_transcription = self._on_transcription
-            self.gemini_client.on_translation = self._on_translation
-            self.gemini_client.on_error = self._on_error
-
-            await self.gemini_client.connect()
-
-            # 2. 오디오 캡처 시작
-            self.audio_capture = AudioCapture(
-                device_id=device_id,
-                on_level_update=self._on_audio_level_update
-            )
-            await self.audio_capture.start()
-
-            # 3. 오디오 재생 시작
-            await self.audio_playback.start()
-
-            # 4. 파일 저장 시작
-            if settings.get("output", "auto_save", True):
-                self.file_writer.start_session()
-
-            # 5. VAD 세그멘터 또는 시간 기반 세그멘터 초기화
-            use_vad = self.vad_enabled.isChecked()
-
-            if use_vad:
-                # Silero VAD 사용 시도
-                from src.audio.vad_segmenter import ONNX_AVAILABLE, get_default_model_path
-
-                model_path = get_default_model_path()
-                if ONNX_AVAILABLE and model_path:
-                    self.vad_segmenter = SileroVADSegmenter(
-                        model_path=model_path,
-                        on_segment_ready=None
-                    )
-                    # v0.4.2: UI 슬라이더 값으로 노이즈 캔슬링 초기화
-                    nc_level = self.noise_canceling_slider.value() / 100.0
-                    self.vad_segmenter.set_noise_canceling(nc_level)
-                    self._update_status("vad_active", "VAD initialized")
-                    print(f"[MAIN] Using Silero VAD: {model_path}, noise_canceling={nc_level:.2f}")
-                else:
-                    # VAD 사용 불가 → 폴백
-                    if not ONNX_AVAILABLE:
-                        print("[MAIN] WARNING: onnxruntime not installed, falling back to time-based segmentation")
-                    elif not model_path:
-                        print("[MAIN] WARNING: VAD model not found, falling back to time-based segmentation")
-                    use_vad = False
-
-            if not use_vad:
-                # 고정 시간 세그멘터
-                chunk_duration = self.buffer_duration.value()
-                self.vad_segmenter = SimpleTimeBasedSegmenter(
-                    chunk_duration=chunk_duration,
-                    on_segment_ready=None
-                )
-                self._update_status("capturing", f"{chunk_duration}s buffers")
-                print(f"[MAIN] Using time-based segmentation: {chunk_duration}s")
-
-            # 6. 파이프라인 시작
-            self.pipeline = TranslationPipeline(self.gemini_client)
-            await self.pipeline.start()
-
-            # 7. is_running을 먼저 True로 설정 (태스크가 루프를 돌 수 있도록)
-            self.is_running = True
-
-            # 8. 태스크 시작
-            self.vad_task = asyncio.create_task(self._process_audio_with_vad())
-            self.ui_update_task = asyncio.create_task(self._update_ui_from_results())
-            print("[MAIN] VAD and UI update tasks started")
+            if self.is_s2st_mode:
+                # ============================================
+                # S2ST Full Duplex 모드
+                # ============================================
+                print(f"[MAIN] 🎤 S2ST Full Duplex Mode: {current_model}")
+                await self._start_s2st_mode(device_id)
+            else:
+                # ============================================
+                # 기존 모드 (generateContent)
+                # ============================================
+                print(f"[MAIN] 📝 Standard Mode: {current_model}")
+                await self._start_standard_mode(device_id)
 
             self.status_bar.showMessage("Translating...")
-            self._update_status("capturing")
-
             self.last_audio_time = time.time()
             self.silence_check_timer.start(1000)
             self.stats_timer.start(500)
@@ -494,6 +456,130 @@ class MainWindow(QMainWindow):
             self._update_status("error", str(e))
             await self.stop_translation()
 
+    async def _start_s2st_mode(self, device_id: int):
+        """S2ST Full Duplex 모드 시작."""
+        # 1. Live API 클라이언트 초기화
+        current_model = settings.get("translation", "model")
+        self.live_api_client = LiveAPIClient(model_name=current_model)
+
+        # 콜백 설정 (실시간 UI 업데이트)
+        self.live_api_client.on_input_transcription = self._on_s2st_input
+        self.live_api_client.on_output_transcription = self._on_s2st_output
+        self.live_api_client.on_error = self._on_error
+        self.live_api_client.on_turn_complete = self._on_s2st_turn_complete
+
+        if not await self.live_api_client.connect():
+            raise Exception("Failed to connect Live API")
+
+        # 2. 오디오 캡처 시작
+        self.audio_capture = AudioCapture(
+            device_id=device_id,
+            on_level_update=self._on_audio_level_update
+        )
+        await self.audio_capture.start()
+
+        # 3. 오디오 출력 비활성화 (S2ST는 텍스트만)
+        self.output_selector.setEnabled(False)
+        self.volume_slider.setEnabled(False)
+        self.mute_btn.setEnabled(False)
+
+        # 4. VAD 비활성화 (S2ST는 VAD 불필요)
+        self.vad_enabled.setEnabled(False)
+        self.buffer_duration.setEnabled(False)
+
+        # 5. 파일 저장 시작
+        if settings.get("output", "auto_save", True):
+            self.file_writer.start_session()
+
+        # 6. S2ST 파이프라인 시작
+        self.s2st_pipeline = S2STTranslationPipeline(self.live_api_client)
+        await self.s2st_pipeline.start()
+
+        # 7. is_running 설정
+        self.is_running = True
+
+        # 8. 오디오 피드 태스크 시작 (Full Duplex 입력 측)
+        self.s2st_audio_task = asyncio.create_task(self._feed_audio_to_s2st())
+
+        self._update_status("capturing", "🎤 S2ST Full Duplex")
+        print("[MAIN] S2ST mode started - Full Duplex active")
+
+    async def _start_standard_mode(self, device_id: int):
+        """기존 모드 (generateContent API) 시작."""
+        # 1. Gemini 클라이언트 초기화
+        self.gemini_client = GeminiClient()
+
+        # 콜백 설정
+        self.gemini_client.on_transcription = self._on_transcription
+        self.gemini_client.on_translation = self._on_translation
+        self.gemini_client.on_error = self._on_error
+
+        await self.gemini_client.connect()
+
+        # 2. 오디오 캡처 시작
+        self.audio_capture = AudioCapture(
+            device_id=device_id,
+            on_level_update=self._on_audio_level_update
+        )
+        await self.audio_capture.start()
+
+        # 3. 오디오 재생 시작
+        await self.audio_playback.start()
+
+        # 4. 파일 저장 시작
+        if settings.get("output", "auto_save", True):
+            self.file_writer.start_session()
+
+        # 5. VAD 세그멘터 또는 시간 기반 세그멘터 초기화
+        use_vad = self.vad_enabled.isChecked()
+
+        if use_vad:
+            # Silero VAD 사용 시도
+            from src.audio.vad_segmenter import ONNX_AVAILABLE, get_default_model_path
+
+            model_path = get_default_model_path()
+            if ONNX_AVAILABLE and model_path:
+                self.vad_segmenter = SileroVADSegmenter(
+                    model_path=model_path,
+                    on_segment_ready=None
+                )
+                # v0.4.2: UI 슬라이더 값으로 노이즈 캔슬링 초기화
+                nc_level = self.noise_canceling_slider.value() / 100.0
+                self.vad_segmenter.set_noise_canceling(nc_level)
+                self._update_status("vad_active", "VAD initialized")
+                print(f"[MAIN] Using Silero VAD: {model_path}, noise_canceling={nc_level:.2f}")
+            else:
+                # VAD 사용 불가 → 폴백
+                if not ONNX_AVAILABLE:
+                    print("[MAIN] WARNING: onnxruntime not installed, falling back to time-based segmentation")
+                elif not model_path:
+                    print("[MAIN] WARNING: VAD model not found, falling back to time-based segmentation")
+                use_vad = False
+
+        if not use_vad:
+            # 고정 시간 세그멘터
+            chunk_duration = self.buffer_duration.value()
+            self.vad_segmenter = SimpleTimeBasedSegmenter(
+                chunk_duration=chunk_duration,
+                on_segment_ready=None
+            )
+            self._update_status("capturing", f"{chunk_duration}s buffers")
+            print(f"[MAIN] Using time-based segmentation: {chunk_duration}s")
+
+        # 6. 파이프라인 시작
+        self.pipeline = TranslationPipeline(self.gemini_client)
+        await self.pipeline.start()
+
+        # 7. is_running을 먼저 True로 설정 (태스크가 루프를 돌 수 있도록)
+        self.is_running = True
+
+        # 8. 태스크 시작
+        self.vad_task = asyncio.create_task(self._process_audio_with_vad())
+        self.ui_update_task = asyncio.create_task(self._update_ui_from_results())
+        print("[MAIN] VAD and UI update tasks started")
+
+        self._update_status("capturing")
+
     async def stop_translation(self):
         """번역 중지."""
         self.is_running = False
@@ -501,42 +587,80 @@ class MainWindow(QMainWindow):
         self.silence_check_timer.stop()
         self.stats_timer.stop()
 
-        # 태스크 취소
-        for task in [self.vad_task, self.ui_update_task]:
-            if task:
-                task.cancel()
+        if self.is_s2st_mode:
+            # ============================================
+            # S2ST 모드 정리
+            # ============================================
+            # S2ST 오디오 태스크 취소
+            if self.s2st_audio_task:
+                self.s2st_audio_task.cancel()
                 try:
-                    await task
+                    await self.s2st_audio_task
                 except asyncio.CancelledError:
                     pass
-        self.vad_task = None
-        self.ui_update_task = None
+                self.s2st_audio_task = None
 
-        # 파이프라인 중지
-        if self.pipeline:
-            await self.pipeline.stop()
-            self.pipeline = None
+            # S2ST 파이프라인 중지
+            if self.s2st_pipeline:
+                await self.s2st_pipeline.stop()
+                self.s2st_pipeline = None
 
+            # Live API 클라이언트 종료
+            if self.live_api_client:
+                await self.live_api_client.disconnect()
+                self.live_api_client = None
+
+            # UI 컨트롤 다시 활성화
+            self.output_selector.setEnabled(True)
+            self.volume_slider.setEnabled(True)
+            self.mute_btn.setEnabled(True)
+            self.vad_enabled.setEnabled(True)
+            self.buffer_duration.setEnabled(True)
+
+        else:
+            # ============================================
+            # 기존 모드 정리
+            # ============================================
+            # 태스크 취소
+            for task in [self.vad_task, self.ui_update_task]:
+                if task:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+            self.vad_task = None
+            self.ui_update_task = None
+
+            # 파이프라인 중지
+            if self.pipeline:
+                await self.pipeline.stop()
+                self.pipeline = None
+
+            # Gemini 클라이언트 종료
+            if self.gemini_client:
+                self.gemini_client.disconnect()
+                self.gemini_client = None
+
+            # VAD 세그멘터 초기화
+            if self.vad_segmenter:
+                self.vad_segmenter.reset()
+                self.vad_segmenter = None
+
+            # 오디오 재생 중지
+            await self.audio_playback.stop()
+
+        # 공통 정리
         # 오디오 캡처 중지
         if self.audio_capture:
             self.audio_capture.stop()
             self.audio_capture = None
 
-        # 오디오 재생 중지
-        await self.audio_playback.stop()
-
         # 파일 저장 종료
         self.file_writer.close_session()
 
-        # Gemini 클라이언트 종료
-        if self.gemini_client:
-            self.gemini_client.disconnect()
-            self.gemini_client = None
-
-        # VAD 세그멘터 초기화
-        if self.vad_segmenter:
-            self.vad_segmenter.reset()
-            self.vad_segmenter = None
+        # 모드 초기화
+        self.is_s2st_mode = False
 
         self.start_btn.setText("Start Translation")
         self.start_btn.setChecked(False)
@@ -698,3 +822,117 @@ class MainWindow(QMainWindow):
         """에러 콜백."""
         self._update_status("error", error)
         self.status_bar.showMessage(f"Error: {error}")
+
+    # =========================================================================
+    # S2ST Full Duplex 모드 메서드
+    # =========================================================================
+
+    async def _feed_audio_to_s2st(self):
+        """
+        오디오를 S2ST Live API로 지속적으로 전송 (Full Duplex 입력).
+
+        VAD 없이 캡처된 오디오를 직접 Live API로 스트리밍.
+        """
+        import numpy as np
+
+        print("[S2ST] Audio feed task started")
+        chunks_sent = 0
+
+        try:
+            while self.is_running:
+                try:
+                    # 오디오 큐에서 데이터 가져오기
+                    item = await asyncio.wait_for(
+                        self.audio_capture.queue.get(),
+                        timeout=0.1
+                    )
+                except asyncio.TimeoutError:
+                    continue
+
+                # 오디오 데이터 변환
+                audio_data = item[0] if isinstance(item, tuple) else item
+
+                # float32 → int16 bytes 변환
+                if hasattr(audio_data, 'tobytes'):
+                    if getattr(audio_data, 'dtype', None) == np.float32:
+                        audio_data = audio_data.copy()
+                        audio_data = np.clip(audio_data, -1.0, 1.0)
+                        audio_data = (audio_data * 32767).astype(np.int16)
+                    audio_data = audio_data.tobytes()
+
+                # S2ST 파이프라인으로 피드
+                await self.s2st_pipeline.feed_audio(audio_data)
+                chunks_sent += 1
+
+                # 로깅 (1000개마다)
+                if chunks_sent % 1000 == 0:
+                    print(f"[S2ST] Fed {chunks_sent} audio chunks")
+
+        except asyncio.CancelledError:
+            print(f"[S2ST] Audio feed task cancelled. Total chunks: {chunks_sent}")
+            raise
+        except Exception as e:
+            print(f"[S2ST] Audio feed error: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _on_s2st_input(self, text: str):
+        """
+        S2ST 입력 텍스트 콜백 (원문 - 영어).
+
+        Live API에서 input_transcription 수신 시 호출됨.
+        """
+        if not text:
+            return
+
+        self._update_status("translating", "🎤")
+
+        # 텍스트 영역에 추가 (실시간)
+        self.text_area.moveCursor(
+            self.text_area.textCursor().MoveOperation.End
+        )
+        self.text_area.insertPlainText(f"\n[EN] {text}")
+        self.text_area.moveCursor(
+            self.text_area.textCursor().MoveOperation.End
+        )
+
+        # 파일 저장
+        self.file_writer.write_line(f"[EN] {text}")
+
+        self.last_audio_time = time.time()
+
+    def _on_s2st_output(self, text: str):
+        """
+        S2ST 출력 텍스트 콜백 (번역 - 한국어).
+
+        Live API에서 output_transcription 수신 시 호출됨.
+        """
+        if not text:
+            return
+
+        self._update_status("translating", "📝")
+
+        # 텍스트 영역에 추가 (실시간)
+        self.text_area.moveCursor(
+            self.text_area.textCursor().MoveOperation.End
+        )
+        self.text_area.insertPlainText(f"\n[KO] {text}")
+        self.text_area.moveCursor(
+            self.text_area.textCursor().MoveOperation.End
+        )
+
+        # 파일 저장
+        self.file_writer.write_line(f"[KO] {text}")
+
+    def _on_s2st_turn_complete(self):
+        """
+        S2ST 턴 완료 콜백.
+
+        화자의 발화가 끝났을 때 호출됨.
+        """
+        # 구분선 추가
+        self.text_area.moveCursor(
+            self.text_area.textCursor().MoveOperation.End
+        )
+        self.text_area.insertPlainText("\n---")
+        self.file_writer.write_line("---")

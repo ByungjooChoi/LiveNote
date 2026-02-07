@@ -6,6 +6,57 @@
 
 ---
 
+## v0.5.0 - 2026-02-06
+**S2ST Full Duplex 모드 추가**
+
+### 핵심 기능
+- **S2ST 모델 지원**: `gemini-2.5-flash-s2st-exp-11-2025`
+- **Full Duplex**: 입력과 출력이 동시에 독립적으로 동작
+- **텍스트 전용**: 음성 출력 무시, 번역 텍스트만 표시
+
+### 아키텍처
+```
+기존 모드 (generateContent)          S2ST 모드 (Live API Full Duplex)
+==============================      ================================
+Audio → VAD → Segment               Audio ─────────────────────────►
+         ↓                                     (끊김 없이 전송)
+  generateContent API
+         ↓                          ◄───────────────────────── Text
+      JSON 파싱                       input_transcription (원문)
+         ↓                           output_transcription (번역)
+      UI 업데이트
+```
+
+### 신규 파일
+| 파일 | 설명 |
+|------|------|
+| `live_api_client.py` | Live API WebSocket 클라이언트 (Full Duplex) |
+
+### 변경 파일
+| 파일 | 변경 내용 |
+|------|----------|
+| `model_fetcher.py` | S2ST 모델 추가 (`type: s2st`) |
+| `gemini_client.py` | `is_s2st_model()`, `get_model_type()` 추가 |
+| `main_window.py` | S2ST 모드 분기 (`_start_s2st_mode()`, `_feed_audio_to_s2st()`) |
+
+### S2ST 모드 특징
+- VAD 불필요 (모델이 발화 구간 자동 처리)
+- 오디오 출력 UI 비활성화
+- `input_transcription`: 원문 (영어)
+- `output_transcription`: 번역 (한국어)
+- `turn_complete`: 발화 종료 감지
+
+### 사용 방법
+1. Settings → Model에서 "🎤 Gemini 2.5 Flash S2ST" 선택
+2. Start Translation 클릭
+3. 영어 음성 입력 시 실시간 번역 표시
+
+### 주의사항
+- S2ST 모델은 **Allowlist 승인 필요** (Google Cloud Support Case)
+- Region: `us-central1` 필요할 수 있음
+
+---
+
 ## v0.4.0 - 2026-01-29
 **번역 품질 개선: VAD 히스테리시스 + Flicker 제어 + Wait Tokens**
 
@@ -136,5 +187,6 @@ git checkout 7f62895
 - [x] VAD 기반 세그멘테이션
 - [x] Thinking 비활성화로 레이턴시 개선
 - [x] 번역 품질 개선 (VAD 히스테리시스, Wait Tokens, Flicker 제어)
+- [x] S2ST (Speech-to-Speech Translation) Full Duplex 대응
 - [ ] Gradio UI Confirmed/Provisional 분리
-- [ ] S2ST (Speech-to-Speech Translation) 대응
+- [ ] S2ST 모드 성능 튜닝 및 최적화
