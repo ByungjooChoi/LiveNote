@@ -30,9 +30,12 @@ actor TranscriptionEngine {
     private static let minSegmentSamples = Int(0.4 * Double(sampleRate))
     /// 문장 시작 직전 보존할 프리롤
     private static let preRollSamples = Int(0.3 * Double(sampleRate))
-    /// 연속 발화가 이 길이를 넘은 상태에서 잠정 전사가 문장 종결부호(. ? ! …)로 끝나면
-    /// 12초 하드캡을 기다리지 않고 그 지점에서 조기 확정 (문장 중간 절단 방지 → 번역 품질)
+    /// 연속 발화가 이 길이를 넘으면 "내부 문장 경계"에서 조기 확정을 시도 (§5.1)
     private static let earlyCloseMinSamples = 7 * sampleRate
+    /// 내부 경계로 인정하려면 경계 뒤에 최소 이만큼 토큰이 더 있어야 함 (발화가 이어지는 중)
+    private static let earlyCloseMinTrailingTokens = 2
+    /// 경계 시각 하한 (너무 짧은 파편 방지)
+    private static let earlyCloseMinBoundarySeconds = 3.0
 
     // MARK: - 에코 게이트 상수
 
@@ -312,39 +315,82 @@ actor TranscriptionEngine {
 
     private func runVolatile(channel: AudioChannel, snapshot: [Float], segmentStart: Int) async {
         guard !asrBusy else { return }
-        guard let text = await runTranscribe(snapshot, channel: channel), Self.isMeaningful(text) else { return }
+        guard let result = await runTranscribeResult(snapshot, channel: channel) else { return }
+        let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard Self.isMeaningful(text) else { return }
 
-        // 문장부호 조기 확정: 연속 발화가 7초를 넘었고 잠정 전사가 종결부호로 끝나면
-        // 여기서 문장을 닫는다. 잠정 결과를 그대로 확정으로 승격하므로 추가 ASR 비용 없음.
-        // (Parakeet은 미완성 구절엔 종결부호를 잘 붙이지 않으므로 신뢰 가능한 신호)
+        // 내부 문장 경계 조기 확정 (2026-08-21 재설계).
+        // 이전 방식(끝이 종결부호면 승격)은 Parakeet이 잘린 오디오 끝에 붙이는 추정 마침표에
+        // 속아 가짜 경계에서 잘랐다 → 어색한 문장의 원인. 새 방식:
+        // "문장이 끝났고 그 뒤에 새 문장이 이미 진행 중"인 내부 경계에서만 자른다.
+        // 토큰 타임스탬프로 오디오를 경계 시각에서 정확히 자르고, 경계 뒤 오디오는
+        // 버퍼에 남겨 다음 확정에서 온전히 재전사한다 (단어 유실·중복 없음).
         if snapshot.count >= Self.earlyCloseMinSamples,
-           Self.endsWithSentenceTerminator(text),
+           let timings = result.tokenTimings, !timings.isEmpty,
+           let boundary = Self.lastInternalSentenceBoundary(text: text, timings: timings),
            var tracker = trackers[channel],
            tracker.active,
            tracker.segmentStartSample == segmentStart,      // await 중 다른 확정이 없었는지
            tracker.buffer.count >= snapshot.count {
-            // 스냅샷 이후 도착한 오디오는 다음 문장으로 이월하고 세그먼트를 이어감
-            let remainder = Array(tracker.buffer.suffix(tracker.buffer.count - snapshot.count))
-            let start = Double(tracker.segmentStartSample) / Double(Self.sampleRate)
-            let end = Double(tracker.segmentStartSample + snapshot.count) / Double(Self.sampleRate)
-            tracker.segmentStartSample += snapshot.count
-            tracker.buffer = remainder
-            tracker.gateChunksTotal = 0
-            tracker.gateChunksEcho = 0
-            tracker.lastVolatileSample = tracker.totalSamples
-            trackers[channel] = tracker
-            onVolatile(channel, "")
-            onFinal(FinalSegment(channel: channel, text: text, startSeconds: start, endSeconds: end))
-            return
+            let cutSample = min(snapshot.count, Int((boundary.time + 0.05) * Double(Self.sampleRate)))
+            if cutSample > Self.minSegmentSamples, cutSample < tracker.buffer.count {
+                let remainder = Array(tracker.buffer.suffix(tracker.buffer.count - cutSample))
+                let start = Double(tracker.segmentStartSample) / Double(Self.sampleRate)
+                let end = Double(tracker.segmentStartSample + cutSample) / Double(Self.sampleRate)
+                tracker.segmentStartSample += cutSample
+                tracker.buffer = remainder
+                tracker.gateChunksTotal = 0
+                tracker.gateChunksEcho = 0
+                tracker.lastVolatileSample = tracker.totalSamples
+                trackers[channel] = tracker
+                onVolatile(channel, "")
+                onFinal(FinalSegment(channel: channel, text: boundary.prefixText, startSeconds: start, endSeconds: end))
+                return
+            }
         }
 
         onVolatile(channel, text)
     }
 
-    /// 문장 종결부호로 끝나는지 (마침표/물음표/느낌표/말줄임표).
-    private static func endsWithSentenceTerminator(_ text: String) -> Bool {
-        guard let last = text.trimmingCharacters(in: .whitespacesAndNewlines).last else { return false }
-        return last == "." || last == "?" || last == "!" || last == "…"
+    private static let sentenceTerminators: Set<Character> = [".", "?", "!", "…"]
+
+    /// 텍스트의 "내부" 문장 경계 중 조건을 만족하는 마지막 것을 찾음.
+    /// 조건: 경계 토큰 뒤에 토큰이 2개 이상 더 있고 (발화가 이어짐), 경계 시각 ≥ 3초 (파편 방지).
+    /// 반환: 경계 시각(스냅샷 기준 초)과 경계까지의 텍스트. 토큰 순번과 텍스트 순번을 대응시켜 절단.
+    private static func lastInternalSentenceBoundary(
+        text: String, timings: [TokenTiming]
+    ) -> (time: Double, prefixText: String)? {
+        // 토큰 쪽: 종결부호로 끝나는 토큰들 중 조건 만족하는 마지막 것과 그 순번
+        var ordinal = 0
+        var best: (ordinal: Int, time: Double)?
+        for (index, timing) in timings.enumerated() {
+            guard let lastChar = timing.token.last, sentenceTerminators.contains(lastChar) else { continue }
+            ordinal += 1
+            let trailing = timings.count - 1 - index
+            if trailing >= earlyCloseMinTrailingTokens, timing.endTime >= earlyCloseMinBoundarySeconds {
+                best = (ordinal, timing.endTime)
+            }
+        }
+        guard let best else { return nil }
+
+        // 텍스트 쪽: 같은 순번의 종결부호(뒤가 공백 또는 끝) 위치에서 절단
+        var count = 0
+        var index = text.startIndex
+        while index < text.endIndex {
+            if sentenceTerminators.contains(text[index]) {
+                let next = text.index(after: index)
+                if next == text.endIndex || text[next] == " " {
+                    count += 1
+                    if count == best.ordinal {
+                        let prefix = String(text[text.startIndex..<next])
+                            .trimmingCharacters(in: .whitespaces)
+                        return prefix.count >= 2 ? (best.time, prefix) : nil
+                    }
+                }
+            }
+            index = text.index(after: index)
+        }
+        return nil
     }
 
     /// ASR 호출 직렬화. Parakeet은 빨라서(실시간의 100배+) 대기가 거의 없음.
@@ -352,6 +398,12 @@ actor TranscriptionEngine {
     /// 매 호출이 독립된 버퍼의 배치 전사이므로 항상 새 상태로 시작합니다
     /// (기본 2 레이어 = v2 모델 구조와 일치).
     private func runTranscribe(_ samples: [Float], channel: AudioChannel) async -> String? {
+        guard let result = await runTranscribeResult(samples, channel: channel) else { return nil }
+        return result.text.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+    }
+
+    /// 전체 ASRResult 반환 (토큰 타임스탬프 포함 — 내부 경계 분할용).
+    private func runTranscribeResult(_ samples: [Float], channel: AudioChannel) async -> ASRResult? {
         guard let asrManager else { return nil }
         while asrBusy {
             try? await Task.sleep(nanoseconds: 30_000_000)
@@ -360,9 +412,7 @@ actor TranscriptionEngine {
         defer { asrBusy = false }
         do {
             var decoderState = try TdtDecoderState()
-            let result: ASRResult = try await asrManager.transcribe(samples, decoderState: &decoderState)
-            let text: String = result.text
-            return text.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+            return try await asrManager.transcribe(samples, decoderState: &decoderState)
         } catch {
             return nil
         }

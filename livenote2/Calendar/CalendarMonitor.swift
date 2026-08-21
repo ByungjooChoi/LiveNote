@@ -191,6 +191,46 @@ final class CalendarMonitor {
         currentAlert = nil
     }
 
+    // MARK: - 참석자 이름 후보 (화자 rename 원클릭용)
+
+    /// 지금 진행 중이거나 10분 내 시작하는 일정의 참석자 이름 목록.
+    /// 화자 칩 rename 팝오버에 원클릭 후보로 표시됨. 본인·회의실 리소스 제외, 최대 10명.
+    func attendeeNamesForOngoingMeeting(now: Date = Date()) -> [String] {
+        guard EKEventStore.authorizationStatus(for: .event) == .fullAccess else { return [] }
+        let predicate = store.predicateForEvents(
+            withStart: now.addingTimeInterval(-90 * 60),
+            end: now.addingTimeInterval(30 * 60),
+            calendars: nil
+        )
+        let ongoing = store.events(matching: predicate).filter { event in
+            guard let start = event.startDate, let end = event.endDate, !event.isAllDay,
+                  event.status != .canceled else { return false }
+            return now >= start.addingTimeInterval(-10 * 60) && now <= end
+        }
+        var seen = Set<String>()
+        var names: [String] = []
+        for event in ongoing {
+            for attendee in event.attendees ?? [] {
+                guard attendee.participantType == .person, !attendee.isCurrentUser else { continue }
+                let name = Self.prettyName(attendee.name ?? "")
+                guard !name.isEmpty, seen.insert(name.lowercased()).inserted else { continue }
+                names.append(name)
+                if names.count >= 10 { return names }
+            }
+        }
+        return names
+    }
+
+    /// 표시 이름이 이메일이면 로컬 파트를 사람 이름처럼 정리 ("jane.doe@x.com" → "Jane Doe").
+    static func prettyName(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        guard trimmed.contains("@") else { return trimmed }
+        let local = trimmed.split(separator: "@").first.map(String.init) ?? trimmed
+        return local.split(whereSeparator: { $0 == "." || $0 == "_" })
+            .map { $0.prefix(1).uppercased() + $0.dropFirst() }
+            .joined(separator: " ")
+    }
+
     // MARK: - Zoom 링크 파싱
 
     /// 여러 텍스트 필드(url/location/notes)에서 첫 Zoom 링크를 찾음.

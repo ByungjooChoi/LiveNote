@@ -33,9 +33,11 @@ struct FinalSegment: Sendable {
     let endSeconds: Double
 }
 
-/// 번역 제공자. 로컬(Apple Translation, 기본) 또는 클라우드(Gemini Live Translate).
+/// 번역 제공자. 끔(영어 전용) / 로컬(Apple Translation, 기본) / 클라우드(Gemini Live Translate).
 /// 클라우드 모드에서는 회의 오디오가 Google로 전송됨 — UI에 명시.
+/// 끔은 한국어가 필요 없는 사용자(팀원 배포)용 — 언어팩 다운로드 요청도 뜨지 않음.
 enum TranslationMode: String, Sendable {
+    case off
     case local
     case cloud
 }

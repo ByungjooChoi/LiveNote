@@ -164,7 +164,8 @@
 
 상태머신: 대기 중엔 0.3s 프리롤 링만 유지 → isSpeech 청크에서 문장 오픈(프리롤 포함, 시작시각 = 누적샘플 - 청크 - 프리롤) → 활성 중 버퍼 축적, isSpeech면 lastSpeech 갱신 → 무음 0.9s 지속 또는 12s 도달 시 확정(12s 컷이면 0.2s 꼬리 물고 즉시 재오픈) → 확정 시 전체 버퍼를 최종 전사. 활성 중 1.4s마다(버퍼 ≥0.4s, ASR 유휴 시) 버퍼 전체를 잠정 전사해 회색 이탤릭으로 표시. 2글자 미만 결과 폐기. `flushAll()`/`flushChannel(_:)`은 중지·뮤트 시 열린 문장 강제 확정.
 
-**문장부호 조기 확정 (2026-08-06 추가)**: 연속 발화로 버퍼가 7초를 넘긴 상태에서 잠정 전사 결과가 문장 종결부호(. ? ! …)로 끝나면, 12초 하드캡을 기다리지 않고 그 잠정 텍스트를 확정으로 승격하고 스냅샷 이후 오디오는 다음 문장으로 이월(세그먼트 유지). 근거: Parakeet은 미완성 구절엔 종결부호를 잘 붙이지 않으므로 신뢰 가능한 경계 신호이고, 하드캡의 문장 중간 절단이 번역 품질을 해치는 주범이었음. 추가 ASR 비용 0 (잠정 결과 재사용). 경쟁 조건 가드: await 중 세그먼트가 딴 데서 확정됐으면(segmentStartSample 변경/inactive) 승격 포기.
+**내부 문장 경계 조기 확정 (2026-08-21 재설계 — v2)**: 연속 발화로 버퍼가 7초를 넘으면, 잠정 전사의 **내부** 문장 경계(종결부호로 끝나는 토큰 뒤에 토큰이 2개 이상 더 있고, 경계 시각 ≥ 3초)에서 문장을 닫는다. `ASRResult.tokenTimings`(토큰별 startTime/endTime)로 오디오를 경계 시각+0.05s에서 정확히 자르고, 텍스트는 토큰 순번↔텍스트 종결부호 순번 대응으로 절단. 경계 뒤 오디오는 버퍼에 남아 다음 확정에서 온전히 재전사됨 (단어 유실·중복 없음). 타임스탬프가 없으면 조기 확정 안 함 (12s 캡만).
+⚠️ 폐기된 v1 (2026-08-06~21): "잠정 전사 끝이 종결부호면 통째로 승격" — Parakeet이 잘린 오디오 끝에 붙이는 추정 마침표에 속아 가짜 경계에서 잘렸고, 실사용에서 하드캡 시절보다 더 어색하다는 피드백으로 폐기. 끝 종결부호는 신뢰하지 말 것.
 
 **확정 경계 안정화 후처리 (2026-08-06 추가, AppState.stabilizedFinalText — AirTranslate 1.4.1 패턴 이식)**: 같은 채널 직전 확정 행과 비교해 ① 간격 5s 미만이고 토큰 포함률 ≥0.85 & 길이 비슷(≤1.5배)이면 유사 중복 확정으로 폐기, ② 간격 1.5s 미만(이월 경계 시그니처)이면 직전 꼬리 1~3토큰과 새 머리 토큰이 일치할 때 중복 머리 제거(새 문장이 4단어 이상일 때만). 하드캡 0.2s 꼬리 이월과 조기 확정 경계에서 생기는 단어 반복 아티팩트 대응.
 
@@ -189,7 +190,7 @@
 
 ### 5.4 번역 — 이원화: 로컬(기본) / 클라우드(옵션, 2026-08-06 추가)
 
-**모드 선택**: 헤더 Picker "번역: 로컬 / 클라우드(Gemini)", UserDefaults `translationMode`, 기본 `.local`. 확정 시점의 모드가 그 행의 번역 경로를 결정. 클라우드 최초 선택 시 API 키 시트(SecureField) → **Keychain 보관**(`GeminiKeychain`, kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly). UI에 "오디오가 Google로 전송됨" 명시.
+**모드 선택**: 헤더 Picker "번역: 끔 / 로컬 / 클라우드(Gemini)", UserDefaults `translationMode`, 기본 `.local`. 확정 시점의 모드가 그 행의 번역 경로를 결정. **끔(2026-08-21 추가)**: 한국어가 필요 없는 사용자(팀원 배포)용 — 번역 안 함, Apple 세션 미활성(언어팩 다운로드 프롬프트도 안 뜸), 번역이 하나도 없는 회의는 ko.md 생성 생략. Apple 세션 activate는 로컬 모드에서만. 클라우드 최초 선택 시 API 키 시트(SecureField) → **Keychain 보관**(`GeminiKeychain`, kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly). UI에 "오디오가 Google로 전송됨" 명시.
 
 **로컬 (Apple Translation)**: `TranslationSession`은 직접 생성 불가 — SwiftUI `.translationTask(config)`가 세션을 주입하는 구조. config = `TranslationSession.Configuration(source: en, target: ko)`를 시작 시 set(nil→값). 뷰 최상위(NavigationSplitView 루트)에 부착해 사이드바 전환에도 세션 유지. serve 루프: `prepareTranslation()`(언어팩 다운로드 유도) 후 AppState의 `AsyncStream<TranslationRequest>` 소비 → `session.translate(text).targetText` → `applyTranslation(_:to: rowID)`. **확정 문장만 번역**(잠정 텍스트 번역 금지 — 화면 덜컹거림 방지, 지연 2~3초는 사용자 승인 사양). 실패 시 배너만, 영어 전사는 계속. Apple 세션은 클라우드 모드에서도 항상 activate 유지(전환 대비).
 
@@ -224,6 +225,7 @@
 - **Zoom 링크 파싱**: event의 url → location → notes 순으로 정규식 `https://[A-Za-z0-9.-]*zoom\.us/[^\s<>"')\]]+` 첫 매치. `/j/{회의번호}` 형태면 `zoommtg://{host}/join?action=join&confno=...&pwd=...` 딥링크로 변환(브라우저 안 거치고 Zoom 앱 직접 실행). 개인 링크(/my/) 등 번호 없는 경우와 Zoom 앱 미설치 시 웹 링크 폴백.
 - **팝업**: AppKit `NSPanel` — `.nonactivatingPanel`(포커스 안 뺏음), `.floating` 레벨, `[.canJoinAllSpaces, .fullScreenAuxiliary]`(전체 화면 Zoom 위에도 표시), 우상단 배치, Glass 사운드. 내용: 제목·시간·1초 카운트다운(TimelineView)·[Zoom 참가]·[닫기].
 - **참가 동작**: 딥링크(또는 웹 링크) open + `onJoinRequested` 콜백 → AppState가 기록 시작(`isActive`가 아니면 start()). 설정: 메뉴바 토글 "회의 1분 전 Zoom 참가 알림", UserDefaults `calendarAlerts`, **기본 켜짐**. 최초 활성 시 캘린더 권한 프롬프트, 거부 시 주황 배너 안내.
+- **참석자 이름 후보 (2026-08-21 추가)**: `attendeeNamesForOngoingMeeting()` — 진행 중(시작 10분 전~종료)인 일정의 참석자(사람만, 본인 제외, 최대 10명)를 start() 시점에 `AppState.attendeeCandidates`로 캡처. 화자 칩 rename 팝오버(.them 전용)에 원클릭 후보로 표시. 이름이 이메일이면 로컬 파트를 사람 이름처럼 정리(`prettyName`).
 - **이중 시작 가드**: 참가로 start()한 직후 Zoom 실행 감지 자동 시작이 겹칠 수 있어 start() 가드를 `!isRunning`(listening만 차단)에서 `!isActive`(preparing 포함 차단)로 강화. 기존에도 있던 잠재 레이스의 수정임.
 
 ---

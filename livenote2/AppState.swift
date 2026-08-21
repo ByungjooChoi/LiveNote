@@ -46,6 +46,8 @@ final class AppState {
     /// 화자 이름. 세션이 바뀌어도 유지됩니다.
     var myName = "Philip"
     var speakerNames: [Int: String] = [:]
+    /// 현재 회의의 캘린더 참석자 이름 후보 (화자 rename 원클릭용, 시작 시점에 조회)
+    private(set) var attendeeCandidates: [String] = []
 
     let translator = TranslationCoordinator()
     let meetingStore = MeetingStore()
@@ -218,14 +220,17 @@ final class AppState {
         cloudTranslationMessage = nil
         guard isRunning else { return }
         let geminiRef = gemini
-        if mode == .cloud {
+        switch mode {
+        case .cloud:
             let key = GeminiKeychain.load()
             Task {
                 await geminiRef.configure(apiKey: key)
                 await geminiRef.start()
             }
-        } else {
+        case .local:
             translator.activate()
+            Task { await geminiRef.stop() }
+        case .off:
             Task { await geminiRef.stop() }
         }
     }
@@ -257,6 +262,8 @@ final class AppState {
         resaveTask?.cancel()
         lastSpeechAt = Date()
         micMuted = false
+        // 진행 중인 캘린더 일정의 참석자 → 화자 이름 원클릭 후보
+        attendeeCandidates = calendar.attendeeNamesForOngoingMeeting()
 
         let newEngine = TranscriptionEngine(
             onVolatile: { [weak self] channel, text in
@@ -373,10 +380,15 @@ final class AppState {
                 systemAudioMessage = "시스템 오디오를 캡처할 수 없어 마이크만 전사합니다.\n\(error.localizedDescription)"
             }
 
-            // 7) 번역 활성화 (Apple 세션은 항상 준비 — 클라우드 실패 시 수동 전환 대비)
-            translator.activate()
+            // 7) 번역 활성화. Apple 세션은 로컬 모드에서만 준비
+            //    (끔/클라우드에서는 한국어 언어팩 다운로드 프롬프트를 띄우지 않음 — 팀원 배포 배려)
             cloudTranslationMessage = nil
-            if translationMode == .cloud {
+            switch translationMode {
+            case .off:
+                break
+            case .local:
+                translator.activate()
+            case .cloud:
                 if let key = GeminiKeychain.load() {
                     let geminiCloud = gemini
                     Task {
@@ -385,6 +397,7 @@ final class AppState {
                     }
                 } else {
                     translationMode = .local
+                    translator.activate()
                     cloudTranslationMessage = "Gemini API 키가 없어 로컬 번역으로 시작했습니다. 번역 메뉴에서 클라우드를 다시 선택해 키를 입력할 수 있습니다."
                 }
             }
@@ -622,11 +635,14 @@ final class AppState {
             removeEchoedMeRows(matching: row)
         }
 
-        // 번역 라우팅: 로컬은 확정 텍스트를 Apple 세션 큐로, 클라우드는 Gemini 누적분 회수 예약
-        if translationMode == .cloud {
-            scheduleCloudClaim(rowID: row.id, channel: row.channel)
-        } else {
+        // 번역 라우팅: 끔=안 함, 로컬=Apple 세션 큐, 클라우드=Gemini 누적분 회수 예약
+        switch translationMode {
+        case .off:
+            break
+        case .local:
             translationContinuation?.yield(TranslationRequest(rowID: row.id, text: stabilizedText))
+        case .cloud:
+            scheduleCloudClaim(rowID: row.id, channel: row.channel)
         }
     }
 

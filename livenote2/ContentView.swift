@@ -170,13 +170,14 @@ struct LiveMeetingView: View {
                 get: { app.translationMode },
                 set: { app.setTranslationMode($0) }
             )) {
+                Text("번역 끔").tag(TranslationMode.off)
                 Text("로컬 번역").tag(TranslationMode.local)
                 Text("클라우드 (Gemini)").tag(TranslationMode.cloud)
             }
             .pickerStyle(.menu)
             .controlSize(.small)
             .fixedSize()
-            .help("로컬: Apple 온디바이스 번역 (기본). 오디오가 Mac 밖으로 나가지 않습니다.\n클라우드: Gemini 실시간 번역 (실험적, 품질 우위). 회의 오디오가 Google로 전송됩니다. API 키 필요.")
+            .help("끔: 영어 전사만 (한국어가 필요 없는 사용자용, 언어팩 요청도 없음)\n로컬: Apple 온디바이스 번역. 오디오가 Mac 밖으로 나가지 않습니다.\n클라우드: Gemini 실시간 번역 (실험적, 품질 우위). 회의 오디오가 Google로 전송됩니다. API 키 필요.")
 
             if !app.isRunning, let savedURL = app.currentMeetingURL {
                 Button {
@@ -311,8 +312,28 @@ struct LiveMeetingView: View {
                 .foregroundStyle(.secondary)
             TextField("이름", text: $draftName)
                 .textFieldStyle(.roundedBorder)
-                .frame(width: 180)
+                .frame(width: 200)
                 .onSubmit { commitRename(for: row) }
+
+            // 캘린더 참석자 원클릭 후보 (상대방 화자에만)
+            if row.channel == .them, !app.attendeeCandidates.isEmpty {
+                Divider()
+                Text("캘린더 참석자")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                ForEach(app.attendeeCandidates.prefix(8), id: \.self) { candidate in
+                    Button {
+                        draftName = candidate
+                        commitRename(for: row)
+                    } label: {
+                        Label(candidate, systemImage: "person.crop.circle")
+                            .font(.callout)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Color.accentColor)
+                }
+            }
+
             HStack {
                 Spacer()
                 Button("저장") { commitRename(for: row) }
@@ -391,6 +412,8 @@ struct LiveMeetingView: View {
     /// "번역 중…" 표시 여부 (모드별 정상 동작 조건)
     private var translationPending: Bool {
         switch app.translationMode {
+        case .off:
+            return false
         case .local:
             return app.translator.config != nil && app.translator.issueMessage == nil
         case .cloud:

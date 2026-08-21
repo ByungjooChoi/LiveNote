@@ -138,8 +138,14 @@ final class MeetingStore {
         }
         try Self.englishMarkdown(meeting, resolve: resolve)
             .write(to: folder.appendingPathComponent("en.md"), atomically: true, encoding: .utf8)
-        try Self.koreanMarkdown(meeting, resolve: resolve)
-            .write(to: folder.appendingPathComponent("ko.md"), atomically: true, encoding: .utf8)
+        // 번역이 하나도 없으면(번역 끔 모드) ko.md는 만들지 않음
+        let koreanURL = folder.appendingPathComponent("ko.md")
+        if meeting.rows.contains(where: { $0.korean != nil }) {
+            try Self.koreanMarkdown(meeting, resolve: resolve)
+                .write(to: koreanURL, atomically: true, encoding: .utf8)
+        } else {
+            try? FileManager.default.removeItem(at: koreanURL)
+        }
         try Self.combinedMarkdown(meeting, resolve: resolve)
             .write(to: folder.appendingPathComponent("combined.md"), atomically: true, encoding: .utf8)
         if let summary = meeting.summary {
