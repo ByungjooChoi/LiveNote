@@ -160,7 +160,8 @@
 
 ### 5.1 에너지 기반 문장 분리 (TranscriptionEngine, 채널별 독립)
 
-상수(16kHz 샘플 기준): `speechThreshold` RMS 0.008 · `hangover` 0.9s · `hardCap` 12s · `volatileInterval` 1.4s · `minSegment` 0.4s · `preRoll` 0.3s · `earlyCloseMin` 7s
+상수(16kHz 샘플 기준): `speechThreshold` RMS 0.008 · `hangover` **1.8s** · `hardCap` **24s** · `volatileInterval` 1.4s · `minSegment` 0.4s · `preRoll` 0.3s · `earlyCloseMin` **14s** (경계 하한 6s)
+(2026-08-21 튜닝: 절단 주기를 일괄 2배로 — "너무 자주 잘려 파편화된다"는 실사용 피드백. 무음 0.9s는 문장 중간 숨 고르기에도 잘렸음. 트레이드오프: them 채널 한 행에 화자 교대가 섞일 확률 소폭 증가 — 화자 교대 지점 분할은 백로그)
 
 상태머신: 대기 중엔 0.3s 프리롤 링만 유지 → isSpeech 청크에서 문장 오픈(프리롤 포함, 시작시각 = 누적샘플 - 청크 - 프리롤) → 활성 중 버퍼 축적, isSpeech면 lastSpeech 갱신 → 무음 0.9s 지속 또는 12s 도달 시 확정(12s 컷이면 0.2s 꼬리 물고 즉시 재오픈) → 확정 시 전체 버퍼를 최종 전사. 활성 중 1.4s마다(버퍼 ≥0.4s, ASR 유휴 시) 버퍼 전체를 잠정 전사해 회색 이탤릭으로 표시. 2글자 미만 결과 폐기. `flushAll()`/`flushChannel(_:)`은 중지·뮤트 시 열린 문장 강제 확정.
 

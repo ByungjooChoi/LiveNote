@@ -21,9 +21,12 @@ actor TranscriptionEngine {
     /// 이 RMS를 넘으면 "말하는 중"으로 판정
     private static let speechThreshold: Float = 0.008
     /// 말이 끊긴 뒤 이 시간이 지나면 문장 확정
-    private static let hangoverSamples = Int(0.9 * Double(sampleRate))
+    /// (0.9s → 1.8s, 2026-08-21: 문장 중간 숨 고르기에도 잘려 행이 파편화된다는 실사용 피드백.
+    ///  더 길고 응집된 행 우선. 트레이드오프: them 채널에서 화자 교대가 한 행에 섞일 확률 소폭 증가)
+    private static let hangoverSamples = Int(1.8 * Double(sampleRate))
     /// 문장 최대 길이 (넘으면 강제 확정 후 이어서 새 문장)
-    private static let hardCapSamples = 12 * sampleRate
+    /// (12s → 24s: 내부 경계 조기 확정이 문장 끝에서 먼저 잘라주므로 캡은 최후 수단으로 후퇴)
+    private static let hardCapSamples = 24 * sampleRate
     /// 잠정 전사 주기
     private static let volatileIntervalSamples = Int(1.4 * Double(sampleRate))
     /// 이보다 짧은 조각은 버림
@@ -31,11 +34,12 @@ actor TranscriptionEngine {
     /// 문장 시작 직전 보존할 프리롤
     private static let preRollSamples = Int(0.3 * Double(sampleRate))
     /// 연속 발화가 이 길이를 넘으면 "내부 문장 경계"에서 조기 확정을 시도 (§5.1)
-    private static let earlyCloseMinSamples = 7 * sampleRate
+    /// (7s → 14s, 2026-08-21: 절단 빈도 절반으로 — 실사용 피드백)
+    private static let earlyCloseMinSamples = 14 * sampleRate
     /// 내부 경계로 인정하려면 경계 뒤에 최소 이만큼 토큰이 더 있어야 함 (발화가 이어지는 중)
     private static let earlyCloseMinTrailingTokens = 2
-    /// 경계 시각 하한 (너무 짧은 파편 방지)
-    private static let earlyCloseMinBoundarySeconds = 3.0
+    /// 경계 시각 하한 (너무 짧은 파편 방지) (3s → 6s)
+    private static let earlyCloseMinBoundarySeconds = 6.0
 
     // MARK: - 에코 게이트 상수
 
