@@ -172,6 +172,7 @@
 ### 5.2 에코 방어 — 수동 뮤트 + 3층 자동 필터 (스피커 사용 시 상대방 음성이 마이크로 재유입되는 문제)
 
 **⓪ 마이크 뮤트 (2026-08-06 추가, 가장 확실한 방어)**: 헤더 마이크 아이콘 클릭(⌘⇧M)으로 토글. 뮤트 시 엔진이 `.me` 채널 오디오를 통째로 버림(actor 내부 판정 — 오디오 스레드에서 관찰 프로퍼티 안 읽음, §7.4) + 열려 있던 "나" 문장은 `flushChannel(.me)`로 즉시 확정. 레벨 미터는 뮤트 중에도 입력을 표시(마이크는 살아 있고 앱이 버리는 중이라는 피드백, 미터는 빨간색). 세션 시작 시 항상 해제로 리셋. 말하지 않는 회의에서 켜 두면 에코 누출이 구조적으로 0이 됨.
+**뮤트 중 발화 감지 경고 (2026-08-21 추가)**: 뮤트 상태에서 micLevel > 0.15가 약 2초 누적되면 배너로 해제 권고 (60초 스로틀). 실측 사고에서 도입: 뮤트를 켠 채 발화해 21분 회의의 "나" 채널이 통째로 소실된 사례.
 
 **① 포락선 상관 게이트** (1차, 오디오 레벨 — VPIO 대체품): 두 채널 모두 10ms(160샘플) 프레임 RMS 포락선을 유지(them 링 150프레임=1.5s, me는 30프레임=0.3s + 여유). `.me` 청크의 isSpeech 판정 전에:
 - them 최근 피크 ≤ 0.008 → 스피커 조용 → 통과
@@ -202,9 +203,11 @@
 
 연결 수명 관리: ① **선제 로테이션** — 채널별 8분 주기로 미리 재연결(Live 세션 수명 한계 대응, Voxis·vtuber 패턴, LiveNote1 실측 8~10분 리셋), ② goAway 수신 시 즉시 재연결, ③ 오류 시 지수 백오프 2s×시도 상한 30s 최대 5회(kkdai 패턴), 초과 시 배너로 로컬 전환 안내. 수신 루프는 소켓 아이덴티티 체크로 이중 수신 방지. 뮤트 시 .me 채널 전송 중단.
 
-### 5.5 요약 (SummaryService)
+### 5.5 요약 (SummaryService + GeminiSummarizer)
 
-온디맨드 원칙: 모델을 상주시키지 않고 요청 시 로드 → 생성 → 참조 해제(메모리 반환). 로드: `#huggingFaceLoadModelContainer(configuration: ModelConfiguration(id:))` (§7.6) → `ChatSession(container, instructions: 시스템프롬프트)` → `respond(to:)`. 입력: `MeetingStore.transcriptForSummary` = `[mm:ss] 화자: 영어원문` 행들, suffix 60,000자 컷. 프롬프트: 한국어 시스템 프롬프트(ASR 오류 보정 지시 + 사고 과정 출력 금지 + 첫 줄 "## 개요" 강제 포함) + 출력 형식 지정(개요/핵심 논의/결정 사항/액션 아이템). **thinking 억제 (2026-08-06 개정)**: `/no_think` 소프트 스위치는 Qwen3 전용이라 Qwen3.5에서 무시됨(실측: 평문 "Thinking Process:" 누출) → 제거함. 후처리 `cleaned()`: ① `<think>...</think>` 블록 제거, ② 줄 시작이 "## 개요"인 첫 줄 앞을 전부 절단(태그 없는 평문 사고 제거; 정상 출력이면 no-op). 결과는 현재 세션이면 재저장, 저장 회의면 `updateSummary` → session.json + summary.md 갱신.
+**이원화 (2026-08-21)**: 클라우드 번역 모드 + API 키 보유 시 요약은 **Gemini 3.7 Flash**(`gemini-3.7-flash`, 2026-08-13 GA, generateContent REST, 프롬프트는 Qwen과 공유)로 실행 — 모델 로드 없이 수 초, 품질 우위, 비용 회의당 수 센트 미만. 실패 시 로컬 Qwen 자동 폴백 (`AppState.runSummary`). 로컬/끔 모드에서는 기존 Qwen 경로.
+
+온디맨드 원칙(로컬 경로): 모델을 상주시키지 않고 요청 시 로드 → 생성 → 참조 해제(메모리 반환). 로드: `#huggingFaceLoadModelContainer(configuration: ModelConfiguration(id:))` (§7.6) → `ChatSession(container, instructions: 시스템프롬프트)` → `respond(to:)`. 입력: `MeetingStore.transcriptForSummary` = `[mm:ss] 화자: 영어원문` 행들, suffix 60,000자 컷. 프롬프트: 한국어 시스템 프롬프트(ASR 오류 보정 지시 + 사고 과정 출력 금지 + 첫 줄 "## 개요" 강제 포함) + 출력 형식 지정(개요/핵심 논의/결정 사항/액션 아이템). **thinking 억제 (2026-08-06 개정)**: `/no_think` 소프트 스위치는 Qwen3 전용이라 Qwen3.5에서 무시됨(실측: 평문 "Thinking Process:" 누출) → 제거함. 후처리 `cleaned()`: ① `<think>...</think>` 블록 제거, ② 줄 시작이 "## 개요"인 첫 줄 앞을 전부 절단(태그 없는 평문 사고 제거; 정상 출력이면 no-op). 결과는 현재 세션이면 재저장, 저장 회의면 `updateSummary` → session.json + summary.md 갱신.
 
 ### 5.6 자동 시작/종료
 
@@ -226,6 +229,7 @@
 - **팝업**: AppKit `NSPanel` — `.nonactivatingPanel`(포커스 안 뺏음), `.floating` 레벨, `[.canJoinAllSpaces, .fullScreenAuxiliary]`(전체 화면 Zoom 위에도 표시), 우상단 배치, Glass 사운드. 내용: 제목·시간·1초 카운트다운(TimelineView)·[Zoom 참가]·[닫기].
 - **참가 동작**: 딥링크(또는 웹 링크) open + `onJoinRequested` 콜백 → AppState가 기록 시작(`isActive`가 아니면 start()). 설정: 메뉴바 토글 "회의 1분 전 Zoom 참가 알림", UserDefaults `calendarAlerts`, **기본 켜짐**. 최초 활성 시 캘린더 권한 프롬프트, 거부 시 주황 배너 안내.
 - **참석자 이름 후보 (2026-08-21 추가)**: `attendeeNamesForOngoingMeeting()` — 진행 중(시작 10분 전~종료)인 일정의 참석자(사람만, 본인 제외, 최대 10명)를 start() 시점에 `AppState.attendeeCandidates`로 캡처. 화자 칩 rename 팝오버(.them 전용)에 원클릭 후보로 표시. 이름이 이메일이면 로컬 파트를 사람 이름처럼 정리(`prettyName`).
+- **참석자 이름 교정 (2026-08-21 추가, Granola 어휘 힌트의 후처리판)**: 확정 텍스트의 대문자 시작 5자 이상 토큰을 참석자 이름 토큰(4자 이상, 내 이름 포함)과 대조해 편집거리 ≤ 2 & 길이차 ≤ 2면 교체 (Herminder→Harvinder류). Granola 대비 열세였던 고유명사 정확도 격차 대응 (WD 회의 실측 비교에서 도입 결정). 디코더 수준 어휘 부스팅(FluidAudio CustomVocabulary, SlidingWindowAsrManager 전환 필요)은 백로그.
 - **이중 시작 가드**: 참가로 start()한 직후 Zoom 실행 감지 자동 시작이 겹칠 수 있어 start() 가드를 `!isRunning`(listening만 차단)에서 `!isActive`(preparing 포함 차단)로 강화. 기존에도 있던 잠재 레이스의 수정임.
 
 ---

@@ -33,7 +33,7 @@ actor SummaryService {
 
     // MARK: - 프롬프트
 
-    private static let systemPrompt = """
+    static let systemPrompt = """
         당신은 회의록 요약 전문가입니다. 영어 회의 전사본을 받아 한국어로 요약합니다.
         전사본은 자동 음성인식 결과라 오타나 어색한 문장이 있을 수 있으니 문맥으로 보정해서 이해하세요.
         화자 라벨(이름)이 붙어 있으니 누가 말했는지 반영하세요.
@@ -45,7 +45,7 @@ actor SummaryService {
     // 주의: /no_think 소프트 스위치는 Qwen3 전용이라 Qwen3.5에서는 무시됨 (2026-08 확인).
     // enable_thinking=false 템플릿 kwarg도 mlx-swift-lm에서 전달되지 않는 이슈(#154)가 있어
     // 사고 억제는 시스템 프롬프트 지시 + cleaned()의 "## 개요" 앵커 절단으로 처리한다.
-    private static func userPrompt(transcript: String) -> String {
+    static func userPrompt(transcript: String) -> String {
         // 컨텍스트 안전 상한: 뒤쪽(최신) 우선으로 자름
         let capped = String(transcript.suffix(60_000))
         return """
@@ -69,13 +69,15 @@ actor SummaryService {
         """
     }
 
+    // 주의: cleaned()/systemPrompt/userPrompt는 GeminiSummarizer(클라우드 요약)와 공유됨.
+
     /// Qwen 계열 thinking 누출 등 출력 정리.
     /// ① <think>...</think> 태그 블록 제거.
     /// ② 태그 없이 평문으로 새는 사고 과정 제거: Qwen3.5가 /no_think를 무시하고
     ///    "Thinking Process:" 평문을 앞에 붙이는 사례를 실측(2026-08-06 세션).
     ///    출력 형식의 첫 헤더인 "## 개요"로 시작하는 줄을 앵커로 그 앞을 전부 절단.
     ///    사고 과정 안에서 형식을 인용할 때는 들여쓰기·불릿이 붙어 줄 시작이 아니므로 안전.
-    private static func cleaned(_ text: String) -> String {
+    static func cleaned(_ text: String) -> String {
         var result = text
         // <think>...</think> 블록 제거
         while let start = result.range(of: "<think>"),
@@ -88,5 +90,58 @@ actor SummaryService {
             result = lines[anchor...].joined(separator: "\n")
         }
         return result.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+// MARK: - 클라우드 요약 (Gemini 3.7 Flash)
+
+/// 클라우드 번역 모드일 때 요약도 Gemini로 (2026-08 GA, generateContent REST).
+/// 로컬 Qwen 대비 품질 우위, 모델 로드(2.3GB) 없이 수 초 내 응답.
+/// 실패 시 호출측(AppState.runSummary)이 로컬 Qwen으로 폴백.
+enum GeminiSummarizer {
+
+    static let model = "gemini-3.7-flash"
+
+    static func generateSummary(transcript: String, apiKey: String) async throws -> String {
+        guard let url = URL(string:
+            "https://generativelanguage.googleapis.com/v1beta/models/\(model):generateContent"
+        ) else {
+            throw Self.error("잘못된 URL")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
+        request.timeoutInterval = 120
+
+        let body: [String: Any] = [
+            "systemInstruction": ["parts": [["text": SummaryService.systemPrompt]]],
+            "contents": [[
+                "role": "user",
+                "parts": [["text": SummaryService.userPrompt(transcript: transcript)]],
+            ]],
+        ]
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            let detail = String(data: data, encoding: .utf8)?.prefix(200) ?? "HTTP 오류"
+            throw Self.error("Gemini 요약 실패 (\((response as? HTTPURLResponse)?.statusCode ?? -1)): \(detail)")
+        }
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let candidates = json["candidates"] as? [[String: Any]],
+              let content = candidates.first?["content"] as? [String: Any],
+              let parts = content["parts"] as? [[String: Any]] else {
+            throw Self.error("Gemini 응답 파싱 실패")
+        }
+        let text = parts.compactMap { $0["text"] as? String }.joined()
+        let cleanedText = SummaryService.cleaned(text)
+        guard !cleanedText.isEmpty else { throw Self.error("Gemini가 빈 요약을 반환") }
+        return cleanedText
+    }
+
+    private static func error(_ message: String) -> NSError {
+        NSError(domain: "livenote2.geminisummary", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: message])
     }
 }

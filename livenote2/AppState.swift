@@ -103,6 +103,8 @@ final class AppState {
     @ObservationIgnored private var appTerminateObserver: NSObjectProtocol?
     @ObservationIgnored private var meetingAppLaunchObserver: NSObjectProtocol?
     @ObservationIgnored private var lastSpeechAt = Date()
+    @ObservationIgnored private var mutedSpeechMonitor: Task<Void, Never>?
+    @ObservationIgnored private var lastMutedSpeechWarningAt: Date?
 
     // 번역 요청 큐
     struct TranslationRequest: Sendable {
@@ -198,12 +200,47 @@ final class AppState {
         micMuted = muted
         if muted {
             volatileText[.me] = ""
+            startMutedSpeechMonitor()
+        } else {
+            mutedSpeechMonitor?.cancel()
+            mutedSpeechMonitor = nil
         }
         let engineRef = engine
         let geminiRef = gemini
         Task {
             await engineRef?.setMicMuted(muted)
             await geminiRef.setMicMuted(muted)
+        }
+    }
+
+    /// 뮤트 중 발화 감지: 뮤트 상태에서 마이크 레벨이 지속적으로 올라가면 경고 배너.
+    /// (실측 사고: 뮤트를 켠 채 발화해 "나" 채널이 통째로 소실된 회의가 있었음 — 2026-08-21)
+    private func startMutedSpeechMonitor() {
+        mutedSpeechMonitor?.cancel()
+        mutedSpeechMonitor = Task { @MainActor [weak self] in
+            var loudTicks = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                guard let self, self.isRunning, self.micMuted else {
+                    loudTicks = 0
+                    continue
+                }
+                if self.micLevel > 0.15 {
+                    loudTicks += 1
+                } else {
+                    loudTicks = max(0, loudTicks - 1)
+                }
+                // 약 2초 누적 발화 감지 시 경고 (60초 스로틀)
+                if loudTicks >= 4 {
+                    loudTicks = 0
+                    let now = Date()
+                    let throttled = self.lastMutedSpeechWarningAt.map { now.timeIntervalSince($0) < 60 } ?? false
+                    if !throttled {
+                        self.lastMutedSpeechWarningAt = now
+                        self.noticeMessage = "마이크가 뮤트된 상태에서 발화가 감지됩니다. 내 발언을 기록하려면 뮤트(⌘⇧M)를 해제하세요."
+                    }
+                }
+            }
         }
     }
 
@@ -571,16 +608,29 @@ final class AppState {
         }
         summaryPhase = .generating
         Task { [weak self] in
+            guard let self else { return }
             do {
-                let summary = try await SummaryService().generateSummary(transcript: transcript)
-                guard let self else { return }
+                let summary = try await self.runSummary(transcript: transcript)
                 self.currentSummary = summary
                 self.summaryPhase = .idle
                 self.persistCurrentSession()
             } catch {
-                self?.summaryPhase = .failed(error.localizedDescription)
+                self.summaryPhase = .failed(error.localizedDescription)
             }
         }
+    }
+
+    /// 요약 실행 라우팅: 클라우드 번역 모드 + API 키 보유 시 Gemini 3.7 Flash
+    /// (빠르고 품질 우위, 모델 로드 불필요), 실패하거나 로컬 모드면 Qwen 로컬.
+    private func runSummary(transcript: String) async throws -> String {
+        if translationMode == .cloud, let key = GeminiKeychain.load() {
+            do {
+                return try await GeminiSummarizer.generateSummary(transcript: transcript, apiKey: key)
+            } catch {
+                // 클라우드 실패 → 로컬 Qwen 폴백 (아래로 계속)
+            }
+        }
+        return try await SummaryService().generateSummary(transcript: transcript)
     }
 
     /// 저장된 회의의 요약 생성 (session.json + summary.md 갱신).
@@ -591,13 +641,13 @@ final class AppState {
         }
         summaryPhase = .generating
         Task { [weak self] in
+            guard let self else { return }
             do {
-                let summary = try await SummaryService().generateSummary(transcript: transcript)
-                guard let self else { return }
+                let summary = try await self.runSummary(transcript: transcript)
                 self.meetingStore.updateSummary(at: url, summary: summary)
                 self.summaryPhase = .idle
             } catch {
-                self?.summaryPhase = .failed(error.localizedDescription)
+                self.summaryPhase = .failed(error.localizedDescription)
             }
         }
     }
@@ -612,10 +662,12 @@ final class AppState {
         }
 
         // 확정 경계 안정화: 유사 중복 확정 폐기, 이월 경계의 중복 머리 토큰 제거
-        guard let stabilizedText = stabilizedFinalText(segment) else {
+        guard let stabilized = stabilizedFinalText(segment) else {
             volatileText[segment.channel] = ""
             return
         }
+        // 참석자 이름 교정: ASR이 뭉갠 고유명사를 캘린더 참석자 이름으로 보정
+        let stabilizedText = correctedAttendeeNames(stabilized)
 
         let row = TranscriptRow(
             id: UUID(),
@@ -703,6 +755,63 @@ final class AppState {
 
     private static func normalizeWord(_ word: String) -> String {
         word.lowercased().filter { $0.isLetter || $0.isNumber }
+    }
+
+    // MARK: - 참석자 이름 교정 (Granola 어휘 힌트의 후처리판)
+    // ASR이 뭉갠 고유명사(Herminder, Poonaraj 등)를 캘린더 참석자 이름 토큰과
+    // 편집거리 비교로 보정. 보수적 조건: 대문자 시작 + 5자 이상 + 거리 ≤ 2 + 길이차 ≤ 2.
+
+    private func correctedAttendeeNames(_ text: String) -> String {
+        let nameTokens = attendeeNameTokens()
+        guard !nameTokens.isEmpty else { return text }
+        var changed = false
+        let corrected = text.split(separator: " ", omittingEmptySubsequences: false).map { rawWord -> String in
+            let word = String(rawWord)
+            let core = word.trimmingCharacters(in: CharacterSet.letters.inverted)
+            guard core.count >= 5, let first = core.first, first.isUppercase else { return word }
+            let coreLower = core.lowercased()
+            for name in nameTokens where abs(name.count - core.count) <= 2 {
+                let nameLower = name.lowercased()
+                if coreLower == nameLower { return word }   // 이미 정답
+                if Self.editDistance(coreLower, nameLower) <= 2 {
+                    changed = true
+                    return word.replacingOccurrences(of: core, with: name)
+                }
+            }
+            return word
+        }
+        return changed ? corrected.joined(separator: " ") : text
+    }
+
+    /// 참석자 후보 + 내 이름에서 4자 이상 이름 토큰 추출.
+    private func attendeeNameTokens() -> [String] {
+        var tokens = Set<String>()
+        for candidate in attendeeCandidates {
+            for part in candidate.split(separator: " ") where part.count >= 4 {
+                tokens.insert(String(part))
+            }
+        }
+        for part in myName.split(separator: " ") where part.count >= 4 {
+            tokens.insert(String(part))
+        }
+        return Array(tokens)
+    }
+
+    private static func editDistance(_ a: String, _ b: String) -> Int {
+        let aChars = Array(a), bChars = Array(b)
+        if aChars.isEmpty { return bChars.count }
+        if bChars.isEmpty { return aChars.count }
+        var previous = Array(0...bChars.count)
+        var current = [Int](repeating: 0, count: bChars.count + 1)
+        for i in 1...aChars.count {
+            current[0] = i
+            for j in 1...bChars.count {
+                let cost = aChars[i - 1] == bChars[j - 1] ? 0 : 1
+                current[j] = min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + cost)
+            }
+            swap(&previous, &current)
+        }
+        return previous[bChars.count]
     }
 
     // MARK: - 에코 중복 제거 (2차 방어)
