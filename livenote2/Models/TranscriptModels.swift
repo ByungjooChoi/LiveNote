@@ -41,3 +41,10 @@ enum TranslationMode: String, Sendable {
     case local
     case cloud
 }
+
+/// 클라우드 번역 연결 상태 (헤더 표시등용).
+enum CloudStatus: Sendable {
+    case connecting
+    case connected
+    case reconnecting
+}

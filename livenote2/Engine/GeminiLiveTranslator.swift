@@ -25,6 +25,9 @@ actor GeminiLiveTranslator {
     private var running = false
     private var micMuted = false
     private var issueHandler: (@Sendable (String?) -> Void)?
+    private var statusHandler: (@Sendable (CloudStatus?) -> Void)?
+    /// 채널별 수신한 번역 조각 수 (로그용)
+    private var outputCounts: [AudioChannel: Int] = [.me: 0, .them: 0]
 
     private var sockets: [AudioChannel: URLSessionWebSocketTask] = [:]
     private var ready: [AudioChannel: Bool] = [.me: false, .them: false]
@@ -44,7 +47,9 @@ actor GeminiLiveTranslator {
     private static let chunkSamples = 1600            // 100ms @16kHz
     private static let silenceRMS: Float = 0.004      // 이보다 조용하면 무음 후보
     private static let silenceHangover: TimeInterval = 1.0
-    private static let maxReconnects = 5
+    /// 이 횟수 이상 연속 실패하면 배너로 알림 (재연결은 세션이 사는 동안 무제한 계속 —
+    /// 2026-08 실사용에서 5회 제한 소진 후 영구 중단되는 문제로 정책 변경)
+    private static let reconnectWarnThreshold = 5
     /// 핸드셰이크·로테이션 중 보관할 오디오 상한 (3초) — 첫 문장 유실 방지 (ALAD 패턴)
     private static let preReadyCapSamples = 3 * 16_000
     /// 선제 세션 로테이션 주기 — Live 세션 수명 한계(수 분~15분)에 걸리기 전에 미리 교체
@@ -55,6 +60,47 @@ actor GeminiLiveTranslator {
 
     func setIssueHandler(_ handler: @escaping @Sendable (String?) -> Void) {
         issueHandler = handler
+    }
+
+    func setStatusHandler(_ handler: @escaping @Sendable (CloudStatus?) -> Void) {
+        statusHandler = handler
+    }
+
+    /// 두 채널의 ready 상태로 연결 상태를 계산해 UI에 전달.
+    private func publishStatus() {
+        guard running else {
+            statusHandler?(nil)
+            return
+        }
+        if ready[.me] == true, ready[.them] == true {
+            statusHandler?(.connected)
+        } else if (reconnectCounts[.me] ?? 0) > 0 || (reconnectCounts[.them] ?? 0) > 0 {
+            statusHandler?(.reconnecting)
+        } else {
+            statusHandler?(.connecting)
+        }
+    }
+
+    // MARK: - 진단 로그 (~/Documents/livenote2/logs/cloud.log)
+    // "갑자기 안 된다"를 소급 진단할 수 없던 문제로 도입 (2026-08). 텍스트 내용은 기록하지 않음.
+
+    private static let logURL: URL = {
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Documents/livenote2/logs", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("cloud.log")
+    }()
+
+    private func log(_ event: String) {
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        guard let data = "\(stamp) \(event)\n".data(using: .utf8) else { return }
+        if let handle = try? FileHandle(forWritingTo: Self.logURL) {
+            handle.seekToEndOfFile()
+            handle.write(data)
+            try? handle.close()
+        } else {
+            try? data.write(to: Self.logURL)
+        }
     }
 
     func configure(apiKey: String?) {
@@ -75,19 +121,25 @@ actor GeminiLiveTranslator {
         }
         running = true
         reconnectCounts = [.me: 0, .them: 0]
+        outputCounts = [.me: 0, .them: 0]
         pendingKorean = [.me: [], .them: []]
         issueHandler?(nil)
+        log("session start")
         for channel in [AudioChannel.me, .them] {
             connect(channel: channel, apiKey: apiKey)
         }
+        publishStatus()
     }
 
     func stop() {
+        guard running else { return }
         running = false
+        log("session stop (출력 조각 me=\(outputCounts[.me] ?? 0) them=\(outputCounts[.them] ?? 0))")
         for channel in [AudioChannel.me, .them] {
             teardown(channel: channel)
         }
         pcmPending = [.me: [], .them: []]
+        statusHandler?(nil)
     }
 
     private func teardown(channel: AudioChannel) {
@@ -110,6 +162,7 @@ actor GeminiLiveTranslator {
             "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=\(apiKey)"
         ) else { return }
 
+        log("connect \(channel)")
         let socket = URLSession.shared.webSocketTask(with: url)
         sockets[channel] = socket
         socket.resume()
@@ -178,6 +231,9 @@ actor GeminiLiveTranslator {
         if json["setupComplete"] != nil {
             ready[channel] = true
             reconnectCounts[channel] = 0
+            issueHandler?(nil)   // 재연결 성공 시 경고 배너 해제
+            log("setupComplete \(channel)")
+            publishStatus()
             // 핸드셰이크 동안 버퍼된 오디오 방출 (첫 문장 유실 방지)
             flushPending(channel: channel)
             // 선제 로테이션: 세션 수명 한계 전에 미리 재연결 (버퍼링이 공백을 메움)
@@ -192,6 +248,7 @@ actor GeminiLiveTranslator {
 
         // 서버가 연결 종료를 예고하면 선제 재연결
         if json["goAway"] != nil {
+            log("goAway \(channel) → 재연결")
             if let apiKey { connect(channel: channel, apiKey: apiKey) }
             return
         }
@@ -200,6 +257,11 @@ actor GeminiLiveTranslator {
         if let output = serverContent["outputTranscription"] as? [String: Any],
            let text = output["text"] as? String, !text.isEmpty {
             pendingKorean[channel, default: []].append(text)
+            let count = (outputCounts[channel] ?? 0) + 1
+            outputCounts[channel] = count
+            if count == 1 || count % 50 == 0 {
+                log("output \(channel) 조각 \(count)개째")
+            }
         }
         // inputTranscription과 번역 오디오(inlineData)는 사용하지 않음 (EN은 Parakeet이 담당)
     }
@@ -214,11 +276,15 @@ actor GeminiLiveTranslator {
         ready[channel] = false
         let count = (reconnectCounts[channel] ?? 0) + 1
         reconnectCounts[channel] = count
-        guard count <= Self.maxReconnects, let apiKey else {
-            issueHandler?("클라우드 번역 연결이 끊겨 이 세션에서는 중단합니다. 로컬 번역으로 전환하거나 다시 시도해 주세요. (\(error.localizedDescription))")
-            return
+        log("disconnect \(channel) #\(count): \(error.localizedDescription.prefix(160))")
+        publishStatus()
+        guard let apiKey else { return }
+        // 연속 실패가 쌓이면 배너로 알리되, 재연결은 세션이 사는 동안 계속 시도
+        // (과거: 5회 후 영구 중단 → 네트워크 순단 한 번에 세션이 죽는 문제)
+        if count == Self.reconnectWarnThreshold {
+            issueHandler?("클라우드 번역 연결이 불안정해 재연결을 계속 시도 중입니다. 네트워크를 확인해 주세요. (\(error.localizedDescription))")
         }
-        // 지수 백오프: 2s, 4s, … 상한 30s (kkdai 패턴)
+        // 지수 백오프: 2s, 4s, … 상한 30s
         let delaySeconds = min(Double(count) * 2.0, 30.0)
         Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(delaySeconds * 1_000_000_000))

@@ -179,6 +179,16 @@ struct LiveMeetingView: View {
             .fixedSize()
             .help("끔: 영어 전사만 (한국어가 필요 없는 사용자용, 언어팩 요청도 없음)\n로컬: Apple 온디바이스 번역. 오디오가 Mac 밖으로 나가지 않습니다.\n클라우드: Gemini 실시간 번역 (실험적, 품질 우위). 회의 오디오가 Google로 전송됩니다. API 키 필요.")
 
+            // 클라우드 연결 표시등: 초록=연결됨, 주황=연결/재연결 중
+            if app.translationMode == .cloud, app.isRunning, let status = app.cloudStatus {
+                Circle()
+                    .fill(status == .connected ? Color.green : Color.orange)
+                    .frame(width: 8, height: 8)
+                    .help(status == .connected
+                          ? "클라우드 번역 연결됨"
+                          : "클라우드 번역 연결 중 또는 재연결 중 — 로그: ~/Documents/livenote2/logs/cloud.log")
+            }
+
             if !app.isRunning, let savedURL = app.currentMeetingURL {
                 Button {
                     NSWorkspace.shared.activateFileViewerSelecting([savedURL])

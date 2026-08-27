@@ -60,6 +60,8 @@ final class AppState {
     private(set) var translationMode: TranslationMode = .local
     /// 클라우드 번역 문제 안내 배너 (nil이면 정상)
     var cloudTranslationMessage: String?
+    /// 클라우드 번역 연결 상태 (헤더 표시등, nil이면 비활성)
+    var cloudStatus: CloudStatus?
     /// Gemini API 키 입력 시트 표시
     var showGeminiKeyPrompt = false
 
@@ -144,12 +146,17 @@ final class AppState {
         }
         registerMeetingAppLaunchObserver()
 
-        // 클라우드 번역 문제 배너 배선
+        // 클라우드 번역 문제 배너·상태 표시등 배선
         let geminiRef = gemini
         Task {
             await geminiRef.setIssueHandler { message in
                 Task { @MainActor [weak self] in
                     self?.cloudTranslationMessage = message
+                }
+            }
+            await geminiRef.setStatusHandler { status in
+                Task { @MainActor [weak self] in
+                    self?.cloudStatus = status
                 }
             }
         }
