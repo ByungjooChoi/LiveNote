@@ -64,14 +64,141 @@ final class AppState {
     /// 클라우드 번역 (Gemini Live Translate) — 번역 모드가 .cloud일 때만 동작
     @ObservationIgnored let gemini = GeminiLiveTranslator()
 
-    /// 번역 제공자. 기본 로컬(Apple). 클라우드는 회의 오디오가 Google로 전송됨.
-    private(set) var translationMode: TranslationMode = .local
+    /// 번역 사용 여부 (체크박스). 백엔드와 독립 — 꺼도 백엔드 선택은 요약·채팅에 계속 적용.
+    private(set) var translationEnabled = true
+    /// 처리 백엔드 (번역·요약 제공자). 로컬=Apple+Qwen, 클라우드=Gemini.
+    private(set) var backend: ProcessingBackend = .local
     /// 클라우드 번역 문제 안내 배너 (nil이면 정상)
     var cloudTranslationMessage: String?
     /// 클라우드 번역 연결 상태 (헤더 표시등, nil이면 비활성)
     var cloudStatus: CloudStatus?
     /// Gemini API 키 입력 시트 표시
     var showGeminiKeyPrompt = false
+
+    // MARK: - AI 채팅 (Granola식 하단 대화창)
+
+    /// 채팅 범위: 라이브(현재 회의) / 저장 회의 / 전체 아카이브
+    enum ChatScope: Equatable {
+        case live
+        case saved(URL)
+        case archive
+
+        var key: String {
+            switch self {
+            case .live: return "live"
+            case .saved(let url): return "saved:\(url.path)"
+            case .archive: return "archive"
+            }
+        }
+    }
+
+    var chatMessages: [ChatMessage] = []
+    var chatBusy = false
+    /// 채팅 모델 (상단 백엔드와 독립, 영속)
+    private(set) var chatModel: ChatModelChoice = .cloudGemini
+    @ObservationIgnored private var chatScopeKey: String?
+    @ObservationIgnored private let localChat = LocalChatEngine()
+
+    func setChatModel(_ model: ChatModelChoice) {
+        chatModel = model
+        UserDefaults.standard.set(model.rawValue, forKey: "chatModel")
+    }
+
+    /// 범위(라이브/세션/아카이브)가 바뀌면 대화를 새로 시작.
+    func ensureChatScope(_ scope: ChatScope) {
+        guard chatScopeKey != scope.key else { return }
+        chatScopeKey = scope.key
+        chatMessages = []
+    }
+
+    func askChat(_ question: String, scope: ChatScope) {
+        let trimmed = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !chatBusy else { return }
+        ensureChatScope(scope)
+        chatMessages.append(ChatMessage(role: .user, text: trimmed))
+        chatBusy = true
+
+        let context = buildChatContext(scope)
+        let history = chatMessages.dropLast().suffix(8).map { (isUser: $0.role == .user, text: $0.text) }
+        let model = chatModel
+        let localRef = localChat
+
+        Task { [weak self] in
+            var answer: String
+            do {
+                switch model {
+                case .cloudGemini:
+                    guard let key = GeminiKeychain.load() else {
+                        throw NSError(domain: "livenote2.chat", code: 1, userInfo: [
+                            NSLocalizedDescriptionKey: "Gemini API 키가 없습니다. 백엔드를 클라우드로 한 번 선택해 키를 등록해 주세요."])
+                    }
+                    answer = try await GeminiChat.respond(
+                        context: context, history: Array(history), question: trimmed, apiKey: key)
+                case .localQwen:
+                    answer = try await localRef.respond(
+                        context: context, history: Array(history), question: trimmed)
+                }
+            } catch {
+                answer = "답변 실패: \(error.localizedDescription)"
+            }
+            await MainActor.run {
+                guard let self else { return }
+                self.chatMessages.append(ChatMessage(role: .assistant, text: answer))
+                self.chatBusy = false
+            }
+        }
+    }
+
+    /// 범위별 회의 컨텍스트 구성 (60K자 상한).
+    private func buildChatContext(_ scope: ChatScope) -> String {
+        switch scope {
+        case .live:
+            let meeting = SavedMeeting(
+                startedAt: sessionStartedAt ?? Date(),
+                durationSeconds: rows.map(\.endSeconds).max() ?? 0,
+                title: meetingTitle,
+                myName: myName,
+                speakerNames: speakerNames,
+                rows: rows,
+                summary: currentSummary
+            )
+            let transcript = MeetingStore.transcriptForSummary(meeting) { [self] row in
+                displayName(for: row)
+            }
+            let state = isRunning ? "회의가 지금 진행 중이며 아래는 현재까지의 전사입니다." : "방금 끝난 회의의 전사입니다."
+            let title = meetingTitle.map { "회의 제목: \($0)\n" } ?? ""
+            return "\(state)\n\(title)\n\(String(transcript.suffix(60_000)))"
+        case .saved(let url):
+            guard let meeting = meetingStore.load(url) else { return "회의 기록을 불러오지 못했습니다." }
+            let transcript = MeetingStore.transcriptForSummary(meeting) { row in
+                MeetingStore.resolveName(row: row, myName: meeting.myName, speakerNames: meeting.speakerNames)
+            }
+            let title = meeting.title.map { "회의 제목: \($0)\n" } ?? ""
+            let summary = meeting.summary.map { "요약:\n\($0)\n\n" } ?? ""
+            return "\(title)\(summary)전사:\n\(String(transcript.suffix(60_000)))"
+        case .archive:
+            var parts: [String] = []
+            var budget = 60_000
+            for meeting in meetingStore.meetings.prefix(15) {
+                guard budget > 2_000, let saved = meetingStore.load(meeting.url) else { continue }
+                let body: String
+                if let summary = saved.summary {
+                    body = summary
+                } else {
+                    let transcript = MeetingStore.transcriptForSummary(saved) { row in
+                        MeetingStore.resolveName(row: row, myName: saved.myName, speakerNames: saved.speakerNames)
+                    }
+                    body = String(transcript.prefix(1_500))
+                }
+                let section = "## \(meeting.title) (\(meeting.dateLabel))\n\(body)"
+                parts.append(String(section.prefix(budget)))
+                budget -= section.count
+            }
+            return parts.isEmpty
+                ? "저장된 회의가 아직 없습니다."
+                : "아래는 저장된 회의 전체 기록입니다.\n\n" + parts.joined(separator: "\n\n")
+        }
+    }
 
     // MARK: - 요약 상태
 
@@ -155,9 +282,21 @@ final class AppState {
         if defaults.object(forKey: "syncMuteWithZoom") != nil {
             syncMuteWithZoom = defaults.bool(forKey: "syncMuteWithZoom")
         }
-        if let savedMode = defaults.string(forKey: "translationMode"),
-           let mode = TranslationMode(rawValue: savedMode) {
-            translationMode = mode
+        // 신규 키 우선, 없으면 구 translationMode(off/local/cloud)에서 이행
+        if defaults.object(forKey: "translationEnabled") != nil {
+            translationEnabled = defaults.bool(forKey: "translationEnabled")
+        } else if let legacy = defaults.string(forKey: "translationMode") {
+            translationEnabled = legacy != "off"
+        }
+        if let savedBackend = defaults.string(forKey: "backend"),
+           let value = ProcessingBackend(rawValue: savedBackend) {
+            backend = value
+        } else if defaults.string(forKey: "translationMode") == "cloud" {
+            backend = .cloud
+        }
+        if let savedChatModel = defaults.string(forKey: "chatModel"),
+           let value = ChatModelChoice(rawValue: savedChatModel) {
+            chatModel = value
         }
         registerMeetingAppLaunchObserver()
 
@@ -283,31 +422,42 @@ final class AppState {
         }
     }
 
-    // MARK: - 번역 모드 (로컬/클라우드)
+    // MARK: - 번역 토글 + 백엔드 선택
 
-    func setTranslationMode(_ mode: TranslationMode) {
+    func setTranslationEnabled(_ enabled: Bool) {
+        translationEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "translationEnabled")
+        cloudTranslationMessage = nil
+        guard isRunning else { return }
+        applyTranslationPipeline()
+    }
+
+    func setBackend(_ newBackend: ProcessingBackend) {
         // 클라우드 전환 시 API 키가 없으면 먼저 입력받음 (저장 후 재호출됨)
-        if mode == .cloud, GeminiKeychain.load() == nil {
+        if newBackend == .cloud, GeminiKeychain.load() == nil {
             showGeminiKeyPrompt = true
             return
         }
-        translationMode = mode
-        UserDefaults.standard.set(mode.rawValue, forKey: "translationMode")
+        backend = newBackend
+        UserDefaults.standard.set(newBackend.rawValue, forKey: "backend")
         cloudTranslationMessage = nil
         guard isRunning else { return }
+        applyTranslationPipeline()
+    }
+
+    /// 현재 토글·백엔드 상태에 맞게 번역 파이프라인(Apple 세션/Gemini 라이브)을 정렬.
+    private func applyTranslationPipeline() {
         let geminiRef = gemini
-        switch mode {
-        case .cloud:
-            let key = GeminiKeychain.load()
+        if translationEnabled, backend == .cloud, let key = GeminiKeychain.load() {
             Task {
                 await geminiRef.configure(apiKey: key)
                 await geminiRef.start()
             }
-        case .local:
+        } else {
+            Task { await geminiRef.stop() }
+        }
+        if translationEnabled, backend == .local {
             translator.activate()
-            Task { await geminiRef.stop() }
-        case .off:
-            Task { await geminiRef.stop() }
         }
     }
 
@@ -316,7 +466,7 @@ final class AppState {
         showGeminiKeyPrompt = false
         guard !trimmed.isEmpty else { return }
         GeminiKeychain.save(trimmed)
-        setTranslationMode(.cloud)
+        setBackend(.cloud)
     }
 
     // MARK: - 시작/중지
@@ -479,27 +629,14 @@ final class AppState {
                 systemAudioMessage = "시스템 오디오를 캡처할 수 없어 마이크만 전사합니다.\n\(error.localizedDescription)"
             }
 
-            // 7) 번역 활성화. Apple 세션은 로컬 모드에서만 준비
+            // 7) 번역 활성화. Apple 세션은 번역 켬+로컬일 때만 준비
             //    (끔/클라우드에서는 한국어 언어팩 다운로드 프롬프트를 띄우지 않음 — 팀원 배포 배려)
             cloudTranslationMessage = nil
-            switch translationMode {
-            case .off:
-                break
-            case .local:
-                translator.activate()
-            case .cloud:
-                if let key = GeminiKeychain.load() {
-                    let geminiCloud = gemini
-                    Task {
-                        await geminiCloud.configure(apiKey: key)
-                        await geminiCloud.start()
-                    }
-                } else {
-                    translationMode = .local
-                    translator.activate()
-                    cloudTranslationMessage = "Gemini API 키가 없어 로컬 번역으로 시작했습니다. 번역 메뉴에서 클라우드를 다시 선택해 키를 입력할 수 있습니다."
-                }
+            if translationEnabled, backend == .cloud, GeminiKeychain.load() == nil {
+                backend = .local
+                cloudTranslationMessage = "Gemini API 키가 없어 로컬 백엔드로 시작했습니다. 백엔드 메뉴에서 클라우드를 다시 선택해 키를 입력할 수 있습니다."
             }
+            applyTranslationPipeline()
 
             // 8) 회의 자동 종료 감지
             startAutoStopMonitoring()
@@ -692,10 +829,10 @@ final class AppState {
         }
     }
 
-    /// 요약 실행 라우팅: 클라우드 번역 모드 + API 키 보유 시 Gemini 3.7 Flash
-    /// (빠르고 품질 우위, 모델 로드 불필요), 실패하거나 로컬 모드면 Qwen 로컬.
+    /// 요약 실행 라우팅: 클라우드 백엔드 + API 키 보유 시 Gemini 3.7 Flash
+    /// (빠르고 품질 우위, 모델 로드 불필요), 실패하거나 로컬 백엔드면 Qwen 로컬.
     private func runSummary(transcript: String) async throws -> String {
-        if translationMode == .cloud, let key = GeminiKeychain.load() {
+        if backend == .cloud, let key = GeminiKeychain.load() {
             do {
                 return try await GeminiSummarizer.generateSummary(transcript: transcript, apiKey: key)
             } catch {
@@ -771,13 +908,13 @@ final class AppState {
         }
 
         // 번역 라우팅: 끔=안 함, 로컬=Apple 세션 큐, 클라우드=Gemini 누적분 회수 예약
-        switch translationMode {
-        case .off:
-            break
-        case .local:
-            translationContinuation?.yield(TranslationRequest(rowID: row.id, text: stabilizedText))
-        case .cloud:
-            scheduleCloudClaim(rowID: row.id, channel: row.channel)
+        if translationEnabled {
+            switch backend {
+            case .local:
+                translationContinuation?.yield(TranslationRequest(rowID: row.id, text: stabilizedText))
+            case .cloud:
+                scheduleCloudClaim(rowID: row.id, channel: row.channel)
+            }
         }
     }
 

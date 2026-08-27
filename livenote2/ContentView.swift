@@ -120,6 +120,8 @@ struct LiveMeetingView: View {
             banners
             summarySection
             transcript
+            Divider()
+            ChatPanel(scope: (app.isRunning || !app.rows.isEmpty) ? .live : .archive)
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .sheet(isPresented: Binding(
@@ -198,21 +200,28 @@ struct LiveMeetingView: View {
             .font(.caption)
             .help("스피커에서 나온 상대방 소리가 마이크로 들어와 '나'로 잘못 전사되는 것을 걸러냅니다. 실행 중에도 켜고 끌 수 있습니다.")
 
-            Picker("번역", selection: Binding(
-                get: { app.translationMode },
-                set: { app.setTranslationMode($0) }
+            Toggle("번역", isOn: Binding(
+                get: { app.translationEnabled },
+                set: { app.setTranslationEnabled($0) }
+            ))
+            .toggleStyle(.checkbox)
+            .font(.caption)
+            .help("한국어 번역 표시를 켜고 끕니다. 처리 백엔드(로컬/클라우드)는 옆 메뉴에서 선택.")
+
+            Picker("", selection: Binding(
+                get: { app.backend },
+                set: { app.setBackend($0) }
             )) {
-                Text("번역 끔").tag(TranslationMode.off)
-                Text("로컬 번역").tag(TranslationMode.local)
-                Text("클라우드 (Gemini)").tag(TranslationMode.cloud)
+                Text("로컬").tag(ProcessingBackend.local)
+                Text("클라우드").tag(ProcessingBackend.cloud)
             }
             .pickerStyle(.menu)
             .controlSize(.small)
             .fixedSize()
-            .help("끔: 영어 전사만 (한국어가 필요 없는 사용자용, 언어팩 요청도 없음)\n로컬: Apple 온디바이스 번역. 오디오가 Mac 밖으로 나가지 않습니다.\n클라우드: Gemini 실시간 번역 (실험적, 품질 우위). 회의 오디오가 Google로 전송됩니다. API 키 필요.")
+            .help("처리 백엔드 — 번역·요약의 제공자를 결정합니다.\n로컬: Apple 번역 + Qwen 요약. 오디오가 Mac 밖으로 나가지 않습니다.\n클라우드: Gemini 번역·요약 (품질 우위). 회의 오디오가 Google로 전송됩니다. API 키 필요.")
 
             // 클라우드 연결 표시등: 초록=연결됨, 주황=연결/재연결 중
-            if app.translationMode == .cloud, app.isRunning, let status = app.cloudStatus {
+            if app.backend == .cloud, app.translationEnabled, app.isRunning, let status = app.cloudStatus {
                 Circle()
                     .fill(status == .connected ? Color.green : Color.orange)
                     .frame(width: 8, height: 8)
@@ -476,9 +485,8 @@ struct LiveMeetingView: View {
 
     /// "번역 중…" 표시 여부 (모드별 정상 동작 조건)
     private var translationPending: Bool {
-        switch app.translationMode {
-        case .off:
-            return false
+        guard app.translationEnabled else { return false }
+        switch app.backend {
         case .local:
             return app.translator.config != nil && app.translator.issueMessage == nil
         case .cloud:
@@ -556,6 +564,8 @@ struct SavedMeetingView: View {
                         }
                         .padding(16)
                     }
+                    Divider()
+                    ChatPanel(scope: .saved(url))
                 }
             } else {
                 ContentUnavailableView("회의를 불러올 수 없습니다", systemImage: "exclamationmark.folder")
@@ -661,6 +671,121 @@ struct SummaryCard: View {
             RoundedRectangle(cornerRadius: 10)
                 .stroke(Color.primary.opacity(0.08))
         )
+    }
+}
+
+// MARK: - AI 채팅 패널 (Granola식 하단 대화창)
+
+/// 회의 기록에 대한 질의응답. 범위: 라이브(진행 중 회의 실시간 질문 가능) /
+/// 저장 회의 / 전체 아카이브. 모델은 상단 백엔드와 독립적으로 선택.
+struct ChatPanel: View {
+    @Environment(AppState.self) private var app
+    let scope: AppState.ChatScope
+    @State private var input = ""
+
+    var body: some View {
+        VStack(spacing: 8) {
+            if !app.chatMessages.isEmpty {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(app.chatMessages) { message in
+                                bubble(message).id(message.id)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, 4)
+                    }
+                    .frame(maxHeight: 220)
+                    .onChange(of: app.chatMessages.count) {
+                        if let last = app.chatMessages.last {
+                            proxy.scrollTo(last.id, anchor: .bottom)
+                        }
+                    }
+                }
+            }
+            HStack(spacing: 8) {
+                TextField(placeholder, text: $input)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit(send)
+                    .disabled(app.chatBusy)
+                Menu {
+                    ForEach(ChatModelChoice.allCases, id: \.self) { choice in
+                        Button {
+                            app.setChatModel(choice)
+                        } label: {
+                            if choice == app.chatModel {
+                                Label(choice.displayName, systemImage: "checkmark")
+                            } else {
+                                Text(choice.displayName)
+                            }
+                        }
+                    }
+                } label: {
+                    Text(app.chatModel.displayName)
+                        .font(.caption)
+                }
+                .fixedSize()
+                .controlSize(.small)
+                if app.chatBusy {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Button("질문", action: send)
+                        .disabled(input.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                if !app.chatMessages.isEmpty {
+                    Button {
+                        app.chatMessages = []
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.tertiary)
+                    .help("대화 지우기")
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .onAppear { app.ensureChatScope(scope) }
+        .onChange(of: scope.key) {
+            app.ensureChatScope(scope)
+        }
+    }
+
+    private var placeholder: String {
+        switch scope {
+        case .archive:
+            return "전체 회의 기록에 대해 질문…"
+        case .live:
+            return app.isRunning ? "진행 중인 회의에 대해 질문…" : "이 회의에 대해 질문…"
+        case .saved:
+            return "이 회의에 대해 질문…"
+        }
+    }
+
+    private func send() {
+        let question = input
+        input = ""
+        app.askChat(question, scope: scope)
+    }
+
+    private func bubble(_ message: ChatMessage) -> some View {
+        HStack {
+            if message.role == .user { Spacer(minLength: 60) }
+            Text(message.text)
+                .font(.callout)
+                .textSelection(.enabled)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(message.role == .user
+                            ? Color.accentColor.opacity(0.15)
+                            : Color.primary.opacity(0.06))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            if message.role == .assistant { Spacer(minLength: 60) }
+        }
     }
 }
 

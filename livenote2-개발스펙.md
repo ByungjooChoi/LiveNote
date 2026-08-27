@@ -202,7 +202,7 @@
 
 ### 5.4 번역 — 이원화: 로컬(기본) / 클라우드(옵션, 2026-08-06 추가)
 
-**모드 선택**: 헤더 Picker "번역: 끔 / 로컬 / 클라우드(Gemini)", UserDefaults `translationMode`, 기본 `.local`. 확정 시점의 모드가 그 행의 번역 경로를 결정. **끔(2026-08-21 추가)**: 한국어가 필요 없는 사용자(팀원 배포)용 — 번역 안 함, Apple 세션 미활성(언어팩 다운로드 프롬프트도 안 뜸), 번역이 하나도 없는 회의는 ko.md 생성 생략. Apple 세션 activate는 로컬 모드에서만. 클라우드 최초 선택 시 API 키 시트(SecureField) → **Keychain 보관**(`GeminiKeychain`, kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly). UI에 "오디오가 Google로 전송됨" 명시.
+**모드 선택 (2026-08-27 재편)**: **번역 체크박스**(`translationEnabled`) + **백엔드 Picker 로컬/클라우드**(`ProcessingBackend`, 키 "backend")로 분리. 백엔드는 번역뿐 아니라 요약(§5.5)의 제공자를 결정하고, 채팅(§5.9)은 독립 선택. 구 `translationMode`(off/local/cloud) 키에서 자동 이행. 파이프라인 정렬은 `applyTranslationPipeline()` 한 곳에서: 번역 켬+클라우드+키 → Gemini 라이브 기동, 아니면 정지; 번역 켬+로컬 → Apple activate(언어팩 프롬프트는 이때만). 번역이 하나도 없는 회의는 ko.md 생성 생략. 클라우드 최초 선택 시 API 키 시트 → **Keychain 보관**(`GeminiKeychain`). UI에 "오디오가 Google로 전송됨" 명시.
 
 **로컬 (Apple Translation)**: `TranslationSession`은 직접 생성 불가 — SwiftUI `.translationTask(config)`가 세션을 주입하는 구조. config = `TranslationSession.Configuration(source: en, target: ko)`를 시작 시 set(nil→값). 뷰 최상위(NavigationSplitView 루트)에 부착해 사이드바 전환에도 세션 유지. serve 루프: `prepareTranslation()`(언어팩 다운로드 유도) 후 AppState의 `AsyncStream<TranslationRequest>` 소비 → `session.translate(text).targetText` → `applyTranslation(_:to: rowID)`. **확정 문장만 번역**(잠정 텍스트 번역 금지 — 화면 덜컹거림 방지, 지연 2~3초는 사용자 승인 사양). 실패 시 배너만, 영어 전사는 계속. Apple 세션은 클라우드 모드에서도 항상 activate 유지(전환 대비).
 
@@ -233,6 +233,12 @@
 
 루트 `~/Documents/livenote2/`, 폴더명 `yyyy-MM-dd HHmm`(충돌 시 " (2)"). 구성: `session.json`(SavedMeeting Codable: startedAt ISO8601, durationSeconds, myName, speakerNames[Int:String], rows[TranscriptRow], summary?; prettyPrinted+sortedKeys. 주의: Swift의 [Int:String]은 JSON 배열 [키,값,...]로 인코딩됨 — 같은 디코더로만 읽으면 무해) · `en.md` · `ko.md`(번역 없으면 "_(번역 없음)_ 원문") · `combined.md`(EN + `> KO`) · `summary.md`. 마크다운 헤더: 일시/길이/참석(등장 순 화자명). 오디오는 어떤 형태로도 저장하지 않음.
 
+### 5.9 AI 채팅 (ChatService + ChatPanel, 2026-08-27 추가 — Granola식 하단 대화창)
+
+라이브/저장 회의 뷰 하단에 상주하는 질의응답 패널. **범위 자동 전환**: 저장 회의를 열면 그 회의의 전사+요약, 라이브 뷰에서 회의 중(또는 직후)이면 현재 세션의 실시간 전사("회의가 지금 진행 중" 힌트 포함 — 회의 중 캐치업 질문 가능), 둘 다 아니면 전체 아카이브(최근 15개 회의의 요약 또는 전사 앞부분, 총 60K자 상한). 범위 키가 바뀌면 대화 초기화.
+
+**모델은 상단 백엔드와 독립 선택** (패널 내 메뉴, UserDefaults `chatModel`): `Gemini 3.7 Flash`(generateContent 멀티턴 contents, 컨텍스트는 첫 user 턴으로 주입) / `Qwen3.5 4B (로컬)`. 로컬은 `LocalChatEngine` actor가 첫 질문 때 컨테이너를 로드 후 **상주** (요약과 달리 연속 사용이 잦아 온디맨드 해제 안 함 — 메모리 +2.3GB, 문서화된 예외). 이력은 최근 8턴을 프롬프트에 포함. 시스템 프롬프트: 기록 근거 답변, 없는 내용 추측 금지, 질문 언어 추종.
+
 ### 5.8 캘린더 회의 임박 알림 (CalendarMonitor + MeetingAlertPanel, 2026-08-06 추가)
 
 상수: `leadSeconds` 60 (시작 60초 전부터 팝업) · `graceSeconds` 600 (시작 후 10분까지 유지 — 지각 참가 대비) · 폴링 10s
@@ -261,6 +267,7 @@
 | `Engine/TranslationCoordinator.swift` | @MainActor @Observable. config 보유, `serve(session:state:)` 루프, issueMessage 배너 |
 | `Engine/GeminiLiveTranslator.swift` | actor. §5.4 클라우드 번역: 채널별 WebSocket 2개, PCM 변환·무음 게이트·전송, outputTranscription 누적·claim, 재연결. + `GeminiKeychain`(API 키 Keychain 보관) |
 | `Engine/ZoomSpeakerTagger.swift` | @MainActor. §5.3 Zoom AX 폴링: 타일 파싱(이름·active speaker·뮤트), 활성 화자 타임라인, dominantName, 내 뮤트 변화 콜백. AX API를 만지는 유일한 파일 |
+| `Engine/ChatService.swift` | §5.9 채팅: `ChatPrompt`(공유 프롬프트·이력 합성), `LocalChatEngine` actor(Qwen 상주), `GeminiChat`(3.7 Flash 멀티턴 REST) |
 | `Calendar/CalendarMonitor.swift` | @MainActor @Observable. §5.8 감시 루프·자격 판정·Zoom 링크 파싱(`firstZoomLink`/`zoomDeepLink` static)·참가 실행. EventKit을 만지는 유일한 파일 |
 | `Calendar/MeetingAlertPanel.swift` | `MeetingAlertPanelController`(NSPanel 생성·우상단 배치·닫기) + `MeetingAlertView`(SwiftUI: 제목·시간·카운트다운·참가/닫기) |
 | `Engine/SummaryService.swift` | actor. §5.5. 모델 ID 상수 한 줄로 교체 가능하게 유지할 것 |

@@ -35,13 +35,33 @@ struct FinalSegment: Sendable {
     let endSeconds: Double
 }
 
-/// 번역 제공자. 끔(영어 전용) / 로컬(Apple Translation, 기본) / 클라우드(Gemini Live Translate).
-/// 클라우드 모드에서는 회의 오디오가 Google로 전송됨 — UI에 명시.
-/// 끔은 한국어가 필요 없는 사용자(팀원 배포)용 — 언어팩 다운로드 요청도 뜨지 않음.
-enum TranslationMode: String, Sendable {
-    case off
+/// 처리 백엔드. 번역·요약·(채팅 기본값)의 제공자를 결정.
+/// 로컬 = Apple Translation + Qwen (오디오가 Mac 밖으로 안 나감)
+/// 클라우드 = Gemini Live Translate + Gemini 3.7 Flash (품질 우위, 오디오 전송)
+enum ProcessingBackend: String, Sendable {
     case local
     case cloud
+}
+
+/// AI 채팅 모델 선택 (상단 백엔드와 독립).
+enum ChatModelChoice: String, Sendable, CaseIterable {
+    case cloudGemini
+    case localQwen
+
+    var displayName: String {
+        switch self {
+        case .cloudGemini: return "Gemini 3.7 Flash"
+        case .localQwen: return "Qwen3.5 4B (로컬)"
+        }
+    }
+}
+
+/// AI 채팅 말풍선.
+struct ChatMessage: Identifiable, Sendable {
+    enum Role: Sendable { case user, assistant }
+    let id = UUID()
+    let role: Role
+    var text: String
 }
 
 /// 클라우드 번역 연결 상태 (헤더 표시등용).
