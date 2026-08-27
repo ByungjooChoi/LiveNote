@@ -371,6 +371,7 @@ actor GeminiLiveTranslator {
     /// 지금까지 쌓인 한국어 번역 조각을 합쳐서 반환하고 비움. 없으면 nil.
     func claimKorean(channel: AudioChannel) -> String? {
         let fragments = pendingKorean[channel] ?? []
+        log("claim \(channel) → \(fragments.count)조각")
         guard !fragments.isEmpty else { return nil }
         pendingKorean[channel] = []
         let joined = fragments.joined()

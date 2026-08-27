@@ -34,12 +34,13 @@ actor SummaryService {
     // MARK: - 프롬프트
 
     static let systemPrompt = """
-        당신은 회의록 요약 전문가입니다. 영어 회의 전사본을 받아 한국어로 요약합니다.
+        당신은 회의록 요약 전문가입니다. 영어 회의 전사본을 받아 한국어로 상세히 요약합니다.
         전사본은 자동 음성인식 결과라 오타나 어색한 문장이 있을 수 있으니 문맥으로 보정해서 이해하세요.
         화자 라벨(이름)이 붙어 있으니 누가 말했는지 반영하세요.
-        반드시 한국어로만 답하세요.
+        고유명사(사람·제품·회사명)와 수치는 원문 그대로 보존하세요.
+        반드시 한국어로만 답하세요 (고유명사와 기술 용어는 영문 유지).
         사고 과정, 분석 과정, 계획(Thinking Process 등)을 절대 출력하지 마세요.
-        응답의 첫 줄은 반드시 "## 개요"로 시작해야 합니다.
+        응답의 첫 줄은 반드시 "# "(마크다운 H1)로 시작해야 합니다.
         """
 
     // 주의: /no_think 소프트 스위치는 Qwen3 전용이라 Qwen3.5에서는 무시됨 (2026-08 확인).
@@ -49,19 +50,16 @@ actor SummaryService {
         // 컨텍스트 안전 상한: 뒤쪽(최신) 우선으로 자름
         let capped = String(transcript.suffix(60_000))
         return """
-        다음 회의 전사본을 아래 형식으로 요약해 주세요:
+        다음 회의 전사본을 주제별로 상세하게 요약해 주세요.
 
-        ## 개요
-        (회의 전체를 2~3문장으로)
-
-        ## 핵심 논의
-        (주요 논의 사항을 항목별로, 화자 언급 포함)
-
-        ## 결정 사항
-        (합의되거나 결정된 것. 없으면 "없음")
-
-        ## 액션 아이템
-        (해야 할 일과 담당자. 없으면 "없음")
+        형식 규칙 (엄격히 지킬 것):
+        - 논의된 주요 주제마다 "# 주제명" 섹션을 만든다 (논의 흐름 순서로, 보통 3~7개)
+        - 각 섹션은 불릿(-)과 들여쓴 하위 불릿으로 구성한다
+        - 수치, 고유명사, 결정 사항, 그 근거를 최대한 보존한다 (예: "디스크 50% 절감", "9.6 GA 타임라인")
+        - 발언자가 중요한 대목은 이름을 자연스럽게 넣는다 (예: "- Steve: 다음 한두 달간 모두 실험해볼 것")
+        - 마지막 섹션은 반드시 "# Next Steps": 액션 아이템을 "- **할 일** (담당자)" 형식으로 나열
+        - 인사말, 잡담, 회의 진행 멘트는 제외하고 실질 내용만 담는다
+        - 응답의 첫 줄은 반드시 "# "로 시작한다 (그 앞에 다른 텍스트 금지)
 
         --- 전사본 시작 ---
         \(capped)
@@ -84,9 +82,10 @@ actor SummaryService {
               let end = result.range(of: "</think>", range: start.upperBound..<result.endIndex) {
             result.removeSubrange(start.lowerBound..<end.upperBound)
         }
-        // 줄 시작이 "## 개요"인 첫 줄 앞을 절단 (정상 출력이면 첫 줄이라 no-op)
+        // 첫 마크다운 헤더("# " 또는 구버전 "## 개요") 앞을 절단 (정상 출력이면 첫 줄이라 no-op)
         let lines = result.components(separatedBy: "\n")
-        if let anchor = lines.firstIndex(where: { $0.hasPrefix("## 개요") }), anchor > 0 {
+        if let anchor = lines.firstIndex(where: { $0.hasPrefix("# ") || $0.hasPrefix("## 개요") }),
+           anchor > 0 {
             result = lines[anchor...].joined(separator: "\n")
         }
         return result.trimmingCharacters(in: .whitespacesAndNewlines)

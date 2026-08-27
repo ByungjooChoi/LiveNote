@@ -5,6 +5,8 @@ import Observation
 struct MeetingSummary: Identifiable, Hashable {
     let url: URL
     let title: String
+    /// 사이드바 부제용 짧은 일시 ("8/27 09:01")
+    let dateLabel: String
     let startedAt: Date
     let rowCount: Int
     let durationSeconds: Double
@@ -24,6 +26,8 @@ struct MeetingSummary: Identifiable, Hashable {
 struct SavedMeeting: Codable {
     var startedAt: Date
     var durationSeconds: Double
+    /// 캘린더 일정 제목 (없으면 nil — 사이드바는 날짜로 폴백)
+    var title: String? = nil
     var myName: String
     var speakerNames: [Int: String]
     var rows: [TranscriptRow]
@@ -70,7 +74,8 @@ final class MeetingStore {
             guard let meeting = load(folder) else { continue }
             found.append(MeetingSummary(
                 url: folder,
-                title: Self.titleFormatter.string(from: meeting.startedAt),
+                title: meeting.title ?? Self.titleFormatter.string(from: meeting.startedAt),
+                dateLabel: Self.shortDateFormatter.string(from: meeting.startedAt),
                 startedAt: meeting.startedAt,
                 rowCount: meeting.rows.count,
                 durationSeconds: meeting.durationSeconds
@@ -88,6 +93,7 @@ final class MeetingStore {
         speakerNames: [Int: String],
         startedAt: Date,
         durationSeconds: Double,
+        title: String?,
         summary: String?,
         existingURL: URL?
     ) -> URL? {
@@ -103,6 +109,7 @@ final class MeetingStore {
         let meeting = SavedMeeting(
             startedAt: startedAt,
             durationSeconds: durationSeconds,
+            title: title,
             myName: myName,
             speakerNames: speakerNames,
             rows: rows,
@@ -189,8 +196,9 @@ final class MeetingStore {
         let participants = orderedParticipants(meeting, resolve: resolve).joined(separator: ", ")
         let total = Int(meeting.durationSeconds)
         let duration = total >= 60 ? "\(total / 60)분 \(total % 60)초" : "\(total)초"
+        let titleLine = meeting.title.map { "제목: \($0)\n" } ?? ""
         return """
-        일시: \(titleFormatter.string(from: meeting.startedAt))
+        \(titleLine)일시: \(titleFormatter.string(from: meeting.startedAt))
         길이: \(duration)
         참석: \(participants)
         """
@@ -263,6 +271,13 @@ final class MeetingStore {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "ko_KR")
         formatter.dateFormat = "yyyy년 M월 d일 HH:mm"
+        return formatter
+    }()
+
+    private static let shortDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "M/d HH:mm"
         return formatter
     }()
 

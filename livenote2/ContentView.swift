@@ -31,11 +31,43 @@ struct ContentView: View {
         }
     }
 
+    private static let upcomingTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
+
     private var sidebar: some View {
         List(selection: $selection) {
             Section {
                 Label(app.isRunning ? "라이브 (듣는 중)" : "라이브", systemImage: "waveform")
                     .tag(SidebarItem.live)
+            }
+            if !app.calendar.todayUpcoming.isEmpty {
+                Section("오늘 일정") {
+                    ForEach(app.calendar.todayUpcoming) { item in
+                        HStack(spacing: 6) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(item.title)
+                                    .font(.callout)
+                                    .lineLimit(1)
+                                Text("\(Self.upcomingTimeFormatter.string(from: item.start)) ~ \(Self.upcomingTimeFormatter.string(from: item.end))")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if item.isNow(), !app.isRunning {
+                                Button("지금 시작") {
+                                    selection = .live
+                                    app.startUpcomingMeeting(link: item.deepLink ?? item.webLink)
+                                }
+                                .controlSize(.small)
+                                .buttonStyle(.borderedProminent)
+                            }
+                        }
+                        .selectionDisabled(true)
+                    }
+                }
             }
             Section("저장된 회의") {
                 if app.meetingStore.meetings.isEmpty {
@@ -47,7 +79,7 @@ struct ContentView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(meeting.title)
                             .lineLimit(1)
-                        Text("\(meeting.rowCount)건 · \(meeting.durationLabel)")
+                        Text("\(meeting.dateLabel) · \(meeting.rowCount)건 · \(meeting.durationLabel)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }

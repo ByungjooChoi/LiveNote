@@ -111,6 +111,9 @@ final class CalendarMonitor {
         guard isEnabled else { return }
         let now = Date()
 
+        // 사이드바 "오늘 일정" 갱신 (내부 60초 스로틀)
+        refreshTodayUpcoming(now: now)
+
         // 떠 있는 팝업이 유예 시간을 넘기면 자동 닫기
         if let current = currentAlert, now > current.start.addingTimeInterval(Self.graceSeconds) {
             dismissAlert()
@@ -189,6 +192,83 @@ final class CalendarMonitor {
     private func dismissAlert() {
         panel.close()
         currentAlert = nil
+    }
+
+    // MARK: - 오늘 일정 (사이드바 "다가오는 회의" + Start now)
+
+    struct UpcomingMeetingItem: Identifiable, Equatable {
+        let id: String
+        let title: String
+        let start: Date
+        let end: Date
+        let webLink: URL?
+        let deepLink: URL?
+
+        /// 지금 시작 버튼 활성 조건: 시작 10분 전 ~ 종료 전
+        func isNow(_ now: Date = Date()) -> Bool {
+            now >= start.addingTimeInterval(-10 * 60) && now <= end
+        }
+    }
+
+    /// 오늘 남은 일정 (60초마다 갱신, 최대 6개)
+    private(set) var todayUpcoming: [UpcomingMeetingItem] = []
+    @ObservationIgnored private var lastUpcomingRefresh = Date.distantPast
+
+    private func refreshTodayUpcoming(now: Date) {
+        guard now.timeIntervalSince(lastUpcomingRefresh) >= 60 else { return }
+        lastUpcomingRefresh = now
+        let endOfDay = Foundation.Calendar.current.startOfDay(for: now).addingTimeInterval(24 * 3600)
+        let predicate = store.predicateForEvents(
+            withStart: now.addingTimeInterval(-15 * 60), end: endOfDay, calendars: nil)
+        let events = store.events(matching: predicate)
+            .filter { event in
+                guard let start = event.startDate, let end = event.endDate,
+                      !event.isAllDay, event.status != .canceled, end > now else { return false }
+                if let attendees = event.attendees,
+                   let me = attendees.first(where: { $0.isCurrentUser }),
+                   me.participantStatus == .declined { return false }
+                _ = start
+                return true
+            }
+            .sorted { ($0.startDate ?? .distantFuture) < ($1.startDate ?? .distantFuture) }
+
+        var seen = Set<String>()
+        var items: [UpcomingMeetingItem] = []
+        for event in events {
+            guard let start = event.startDate, let end = event.endDate else { continue }
+            let key = "\(event.eventIdentifier ?? event.title ?? "?")@\(Int(start.timeIntervalSince1970))"
+            guard seen.insert(key).inserted else { continue }
+            let web = Self.firstZoomLink(in: [event.url?.absoluteString, event.location, event.notes])
+            items.append(UpcomingMeetingItem(
+                id: key,
+                title: event.title ?? "회의",
+                start: start,
+                end: end,
+                webLink: web,
+                deepLink: web.flatMap(Self.zoomDeepLink(for:))
+            ))
+            if items.count >= 6 { break }
+        }
+        todayUpcoming = items
+    }
+
+    /// 지금 진행 중(시작 10분 전~종료)인 일정의 제목. Zoom 링크가 있는 일정 우선.
+    func ongoingMeetingTitle(now: Date = Date()) -> String? {
+        guard EKEventStore.authorizationStatus(for: .event) == .fullAccess else { return nil }
+        let predicate = store.predicateForEvents(
+            withStart: now.addingTimeInterval(-90 * 60),
+            end: now.addingTimeInterval(30 * 60),
+            calendars: nil
+        )
+        let ongoing = store.events(matching: predicate).filter { event in
+            guard let start = event.startDate, let end = event.endDate, !event.isAllDay,
+                  event.status != .canceled else { return false }
+            return now >= start.addingTimeInterval(-10 * 60) && now <= end
+        }
+        let withZoom = ongoing.first {
+            Self.firstZoomLink(in: [$0.url?.absoluteString, $0.location, $0.notes]) != nil
+        }
+        return (withZoom ?? ongoing.first)?.title
     }
 
     // MARK: - 참석자 이름 후보 (화자 rename 원클릭용)

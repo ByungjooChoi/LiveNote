@@ -117,6 +117,8 @@ final class AppState {
     @ObservationIgnored private var lastMutedSpeechWarningAt: Date?
     /// 오디오 캡처가 실제로 시작된 시각 (행 초 ↔ 실시각 매핑 기준)
     @ObservationIgnored private var captureStartedAt: Date?
+    /// 현재 회의의 캘린더 일정 제목 (저장 시 함께 기록)
+    @ObservationIgnored private var meetingTitle: String?
 
     // 번역 요청 큐
     struct TranslationRequest: Sendable {
@@ -339,8 +341,9 @@ final class AppState {
         micMutedByZoom = false
         zoomTagMessage = nil
         captureStartedAt = nil
-        // 진행 중인 캘린더 일정의 참석자 → 화자 이름 원클릭 후보
+        // 진행 중인 캘린더 일정의 참석자 → 화자 이름 원클릭 후보, 제목 → 회의 이름
         attendeeCandidates = calendar.attendeeNamesForOngoingMeeting()
+        meetingTitle = calendar.ongoingMeetingTitle()
 
         // Zoom 화자 태그: Zoom이 떠 있으면 폴링 시작 (권한 없으면 요청 다이얼로그 + 안내)
         if ZoomSpeakerTagger.zoomRunning() {
@@ -531,6 +534,10 @@ final class AppState {
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             await geminiRef.stop()
             persistCurrentSession()
+            // 자동 요약: 실제 회의 규모(15행 이상)면 저장 직후 자동 생성
+            if rows.count >= 15, currentSummary == nil {
+                generateSummaryForCurrentSession()
+            }
         }
     }
 
@@ -613,6 +620,7 @@ final class AppState {
             speakerNames: speakerNames,
             startedAt: startedAt,
             durationSeconds: duration,
+            title: meetingTitle,
             summary: currentSummary,
             existingURL: currentMeetingURL
         )
@@ -774,19 +782,32 @@ final class AppState {
     }
 
     /// 클라우드 번역 회수: Gemini의 한국어 출력이 행 확정보다 몇 초 늦게 흘러오므로
-    /// linger(2.5s) 후 그때까지 쌓인 조각을 이 행에 붙인다. 비어 있으면 3초 뒤 1회 재시도.
-    /// 한계: Gemini와 우리 문장 분할이 달라 경계에서 번역이 이웃 행으로 번질 수 있음 (§5.4).
+    /// linger(2.5s) 후 그때까지 쌓인 조각을 이 행에 붙인다. 비면 3초 간격 3회까지 재시도
+    /// (번역 지연 내성). 한계: Gemini와 우리 문장 분할이 달라 경계에서 번역이 이웃 행으로
+    /// 번질 수 있음 (§5.4).
     private func scheduleCloudClaim(rowID: UUID, channel: AudioChannel) {
         let geminiRef = gemini
         Task { [weak self] in
             try? await Task.sleep(nanoseconds: 2_500_000_000)
             var korean = await geminiRef.claimKorean(channel: channel)
-            if korean == nil {
+            var retries = 0
+            while korean == nil, retries < 3 {
+                retries += 1
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
                 korean = await geminiRef.claimKorean(channel: channel)
             }
             guard let korean else { return }
             await MainActor.run { self?.applyTranslation(korean, to: rowID) }
+        }
+    }
+
+    /// 사이드바 "오늘 일정"의 지금 시작: Zoom 미실행이면 참가 링크를 열고 기록 시작.
+    func startUpcomingMeeting(link: URL?) {
+        if !ZoomSpeakerTagger.zoomRunning(), let link {
+            NSWorkspace.shared.open(link)
+        }
+        if !isActive {
+            start()
         }
     }
 
