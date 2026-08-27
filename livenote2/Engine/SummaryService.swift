@@ -121,12 +121,9 @@ enum GeminiSummarizer {
             ]],
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        AppLog.write("summary", "Gemini 요약 요청 transcript=\(transcript.count)자")
 
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            let detail = String(data: data, encoding: .utf8)?.prefix(200) ?? "HTTP 오류"
-            throw Self.error("Gemini 요약 실패 (\((response as? HTTPURLResponse)?.statusCode ?? -1)): \(detail)")
-        }
+        let data = try await GeminiREST.send(request, logCategory: "summary")
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let candidates = json["candidates"] as? [[String: Any]],
               let content = candidates.first?["content"] as? [String: Any],

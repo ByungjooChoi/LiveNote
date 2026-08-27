@@ -62,6 +62,9 @@ final class ZoomSpeakerTagger {
         lastSelfMuted = nil
         zoomDetected = false
         permissionMissing = !Self.accessibilityTrusted(prompt: false)
+        AppLog.write("zoomtag", permissionMissing
+            ? "시작 실패 — 손쉬운 사용 권한 없음 (재설치로 리셋됐을 수 있음)"
+            : "폴링 시작 (myName=\(myName))")
         guard !permissionMissing else { return }
         pollTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
@@ -175,11 +178,18 @@ final class ZoomSpeakerTagger {
             }
         }
 
+        let wasDetected = zoomDetected
         zoomDetected = tileCount > 0
+        if zoomDetected != wasDetected {
+            AppLog.write("zoomtag", zoomDetected ? "타일 감지 (\(tileCount)개)" : "타일 사라짐 (화면 공유/창 닫힘?)")
+        }
 
         // 활성 화자 타임라인 갱신
         let now = Date()
         if activeName != currentActive?.name {
+            if let activeName {
+                AppLog.write("zoomtag", "활성 화자 → \(Self.shortName(activeName))")
+            }
             closeActive(at: now)
             if let activeName {
                 currentActive = (activeName, now)
@@ -194,6 +204,7 @@ final class ZoomSpeakerTagger {
         // 내 뮤트 상태 변화 통지
         if let selfMuted, selfMuted != lastSelfMuted {
             lastSelfMuted = selfMuted
+            AppLog.write("zoomtag", "내 Zoom 뮤트 \(selfMuted ? "켜짐" : "해제")")
             onSelfMuteChange?(selfMuted)
         }
     }

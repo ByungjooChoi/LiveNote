@@ -684,7 +684,16 @@ struct ChatPanel: View {
     @State private var input = ""
 
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 10) {
+            HStack(spacing: 6) {
+                Label("AI에게 질문", systemImage: "sparkles")
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text(scopeHint)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                Spacer()
+            }
             if !app.chatMessages.isEmpty {
                 ScrollViewReader { proxy in
                     ScrollView {
@@ -696,7 +705,7 @@ struct ChatPanel: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.top, 4)
                     }
-                    .frame(maxHeight: 220)
+                    .frame(minHeight: 60, maxHeight: 320)
                     .onChange(of: app.chatMessages.count) {
                         if let last = app.chatMessages.last {
                             proxy.scrollTo(last.id, anchor: .bottom)
@@ -707,6 +716,7 @@ struct ChatPanel: View {
             HStack(spacing: 8) {
                 TextField(placeholder, text: $input)
                     .textFieldStyle(.roundedBorder)
+                    .controlSize(.large)
                     .onSubmit(send)
                     .disabled(app.chatBusy)
                 Menu {
@@ -747,11 +757,20 @@ struct ChatPanel: View {
             }
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.top, 12)
+        .padding(.bottom, 14)
         .background(Color(nsColor: .controlBackgroundColor))
         .onAppear { app.ensureChatScope(scope) }
         .onChange(of: scope.key) {
             app.ensureChatScope(scope)
+        }
+    }
+
+    private var scopeHint: String {
+        switch scope {
+        case .archive: return "· 전체 회의 기록 대상"
+        case .live: return app.isRunning ? "· 진행 중인 회의 대상 (실시간)" : "· 이 회의 대상"
+        case .saved: return "· 이 회의 대상"
         }
     }
 

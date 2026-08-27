@@ -81,26 +81,11 @@ actor GeminiLiveTranslator {
         }
     }
 
-    // MARK: - 진단 로그 (~/Documents/livenote2/logs/cloud.log)
+    // MARK: - 진단 로그 (logs/cloud.log — AppLog 공용 로거 경유)
     // "갑자기 안 된다"를 소급 진단할 수 없던 문제로 도입 (2026-08). 텍스트 내용은 기록하지 않음.
 
-    private static let logURL: URL = {
-        let dir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Documents/livenote2/logs", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("cloud.log")
-    }()
-
     private func log(_ event: String) {
-        let stamp = ISO8601DateFormatter().string(from: Date())
-        guard let data = "\(stamp) \(event)\n".data(using: .utf8) else { return }
-        if let handle = try? FileHandle(forWritingTo: Self.logURL) {
-            handle.seekToEndOfFile()
-            handle.write(data)
-            try? handle.close()
-        } else {
-            try? data.write(to: Self.logURL)
-        }
+        AppLog.write("cloud", event)
     }
 
     func configure(apiKey: String?) {

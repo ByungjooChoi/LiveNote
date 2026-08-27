@@ -117,6 +117,7 @@ final class AppState {
         ensureChatScope(scope)
         chatMessages.append(ChatMessage(role: .user, text: trimmed))
         chatBusy = true
+        AppLog.write("chat", "질문 scope=\(scope.key.prefix(40)) model=\(chatModel.rawValue) 질문=\(trimmed.count)자")
 
         let context = buildChatContext(scope)
         let history = chatMessages.dropLast().suffix(8).map { (isUser: $0.role == .user, text: $0.text) }
@@ -644,12 +645,14 @@ final class AppState {
             // 오디오 타임라인 기준 시각 (Zoom 태그 매칭용 — 모델 준비 시간만큼
             // sessionStartedAt과 어긋나므로 캡처 시작 시각을 별도 기록)
             captureStartedAt = Date()
+            AppLog.write("app", "세션 시작 backend=\(backend.rawValue) 번역=\(translationEnabled) zoom태그=\(zoomTagger.zoomDetected) 다이어라이저=\(speakerDiarizer != nil) 제목=\(meetingTitle ?? "-")")
             phase = .listening
         }
     }
 
     func stop() {
         guard isRunning else { return }
+        AppLog.write("app", "세션 중지 rows=\(rows.count)")
         zoomTagger.stop()
         micMutedByZoom = false
         mic?.stop()
@@ -836,9 +839,10 @@ final class AppState {
             do {
                 return try await GeminiSummarizer.generateSummary(transcript: transcript, apiKey: key)
             } catch {
-                // 클라우드 실패 → 로컬 Qwen 폴백 (아래로 계속)
+                AppLog.write("summary", "클라우드 실패 → 로컬 Qwen 폴백: \(error.localizedDescription.prefix(150))")
             }
         }
+        AppLog.write("summary", "로컬 Qwen 요약 시작 transcript=\(transcript.count)자")
         return try await SummaryService().generateSummary(transcript: transcript)
     }
 

@@ -34,14 +34,19 @@ actor LocalChatEngine {
 
     func respond(context: String, history: [(isUser: Bool, text: String)], question: String) async throws -> String {
         if container == nil {
+            AppLog.write("chat", "로컬 Qwen 로드 시작")
+            let loadStart = Date()
             let configuration = ModelConfiguration(id: SummaryService.modelID)
             container = try await #huggingFaceLoadModelContainer(configuration: configuration)
+            AppLog.write("chat", "로컬 Qwen 로드 완료 \(String(format: "%.1f", Date().timeIntervalSince(loadStart)))s")
         }
         guard let container else { throw NSError(domain: "livenote2.chat", code: 2,
             userInfo: [NSLocalizedDescriptionKey: "로컬 모델 로드 실패"]) }
+        let started = Date()
         let session = ChatSession(container, instructions: ChatPrompt.system)
         let answer = try await session.respond(
             to: ChatPrompt.composed(context: context, history: history, question: question))
+        AppLog.write("chat", "로컬 응답 \(answer.count)자 \(String(format: "%.1f", Date().timeIntervalSince(started)))s")
         return Self.stripThinking(answer)
     }
 
@@ -87,18 +92,15 @@ enum GeminiChat {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
-        request.timeoutInterval = 60
+        request.timeoutInterval = 150
         let body: [String: Any] = [
             "systemInstruction": ["parts": [["text": ChatPrompt.system]]],
             "contents": contents,
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        AppLog.write("chat", "Gemini 요청 ctx=\(context.count)자 hist=\(history.count)턴 body=\(request.httpBody?.count ?? 0)B")
 
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            let detail = String(data: data, encoding: .utf8)?.prefix(200) ?? "HTTP 오류"
-            throw Self.error("Gemini 응답 실패 (\((response as? HTTPURLResponse)?.statusCode ?? -1)): \(detail)")
-        }
+        let data = try await GeminiREST.send(request, logCategory: "chat")
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let candidates = json["candidates"] as? [[String: Any]],
               let content = candidates.first?["content"] as? [String: Any],
