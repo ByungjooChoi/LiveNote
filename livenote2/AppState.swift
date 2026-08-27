@@ -302,6 +302,13 @@ final class AppState {
         registerMeetingAppLaunchObserver()
 
         // Zoom 뮤트 동기화: 내 Zoom 타일의 음소거 상태를 따라 마이크 캡처를 켜고 끔
+        // Zoom 회의 종료 즉시 감지 → 자동 중지·저장·요약 (Granola식, 4분 무음 대기 불필요)
+        zoomTagger.onMeetingEnded = { [weak self] in
+            guard let self, self.isRunning else { return }
+            self.noticeMessage = "Zoom 회의 종료를 감지해 자동으로 저장하고 요약을 시작합니다."
+            self.stop()
+        }
+
         zoomTagger.onSelfMuteChange = { [weak self] muted in
             guard let self, self.syncMuteWithZoom, self.isRunning else { return }
             guard muted != self.micMuted else { return }

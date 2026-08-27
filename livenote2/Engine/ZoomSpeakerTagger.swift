@@ -32,6 +32,13 @@ final class ZoomSpeakerTagger {
     private(set) var permissionMissing = false
     /// 내 Zoom 뮤트 상태 변화 콜백 (AppState가 마이크 동기화 배선)
     var onSelfMuteChange: ((Bool) -> Void)?
+    /// Zoom 회의 종료 감지 콜백 (회의 창·타일이 12초간 사라지면 1회 호출 — 즉시 저장·요약용)
+    var onMeetingEnded: (() -> Void)?
+
+    /// 종료 감지 상태
+    private var meetingWasPresent = false
+    private var absentStreak = 0
+    private var endedFired = false
 
     private var pollTask: Task<Void, Never>?
     private var segments: [Segment] = []
@@ -61,6 +68,9 @@ final class ZoomSpeakerTagger {
         currentActive = nil
         lastSelfMuted = nil
         zoomDetected = false
+        meetingWasPresent = false
+        absentStreak = 0
+        endedFired = false
         permissionMissing = !Self.accessibilityTrusted(prompt: false)
         AppLog.write("zoomtag", permissionMissing
             ? "시작 실패 — 손쉬운 사용 권한 없음 (재설치로 리셋됐을 수 있음)"
@@ -128,12 +138,29 @@ final class ZoomSpeakerTagger {
         return value
     }
 
+    /// 회의 창·타일 존재 여부로 종료를 판정 (12초 연속 부재 시 1회 통지).
+    private func noteMeetingPresence(_ present: Bool) {
+        if present {
+            meetingWasPresent = true
+            absentStreak = 0
+            endedFired = false
+        } else if meetingWasPresent, !endedFired {
+            absentStreak += 1
+            if absentStreak >= 12 {
+                endedFired = true
+                AppLog.write("zoomtag", "회의 종료 감지 (창·타일 12초 부재)")
+                onMeetingEnded?()
+            }
+        }
+    }
+
     private func poll() {
         guard let zoom = NSWorkspace.shared.runningApplications.first(where: {
             $0.bundleIdentifier == "us.zoom.xos"
         }) else {
             closeActive()
             zoomDetected = false
+            noteMeetingPresence(false)
             return
         }
 
@@ -141,14 +168,20 @@ final class ZoomSpeakerTagger {
         guard let windows = attr(app, kAXWindowsAttribute) as? [AXUIElement] else {
             closeActive()
             zoomDetected = false
+            noteMeetingPresence(false)
             return
         }
 
         var activeName: String?
         var selfMuted: Bool?
         var tileCount = 0
+        var meetingWindowFound = false
 
         for window in windows {
+            if let title = attr(window, kAXTitleAttribute) as? String,
+               title.contains("Zoom 회의") || title.contains("Zoom Meeting") {
+                meetingWindowFound = true
+            }
             guard let children = attr(window, kAXChildrenAttribute) as? [AXUIElement] else { continue }
             for tile in children {
                 guard (attr(tile, kAXRoleAttribute) as? String) == "AXTabGroup",
@@ -183,6 +216,7 @@ final class ZoomSpeakerTagger {
         if zoomDetected != wasDetected {
             AppLog.write("zoomtag", zoomDetected ? "타일 감지 (\(tileCount)개)" : "타일 사라짐 (화면 공유/창 닫힘?)")
         }
+        noteMeetingPresence(meetingWindowFound || tileCount > 0)
 
         // 활성 화자 타임라인 갱신
         let now = Date()

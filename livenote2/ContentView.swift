@@ -1,104 +1,575 @@
 import SwiftUI
 import Translation
 
-/// 메인 화면: 좌측 회의 목록 사이드바 + 우측 라이브/저장 회의 뷰.
+// MARK: - 테마 (한지 · 쪽빛 · 먹 — 앱 아이콘과 동일 계열)
+
+enum Theme {
+    static let canvas = Color(red: 0.972, green: 0.965, blue: 0.945)       // 한지
+    static let card = Color.white
+    static let cardStroke = Color.black.opacity(0.07)
+    static let sidebarTop = Color(red: 0.145, green: 0.170, blue: 0.260)   // 먹남
+    static let sidebarBottom = Color(red: 0.085, green: 0.100, blue: 0.165)
+    static let accent = Color(red: 0.153, green: 0.298, blue: 0.612)       // 쪽빛
+    static let vermilion = Color(red: 0.769, green: 0.224, blue: 0.180)    // 주홍
+}
+
+extension View {
+    /// 흰 카드 스타일 (라운드 + 얇은 테두리)
+    func themedCard() -> some View {
+        background(Theme.card)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.cardStroke))
+    }
+}
+
+// MARK: - 루트: 좌측 레일 + 메인 콘텐츠
+
 struct ContentView: View {
     @Environment(AppState.self) private var app
-    @State private var selection: SidebarItem? = .live
+    @State private var screen: Screen = .home
 
-    enum SidebarItem: Hashable {
+    enum Screen: Equatable {
+        case home
+        case chat
         case live
-        case saved(URL)
+        case meeting(URL)
     }
 
     var body: some View {
-        NavigationSplitView {
-            sidebar
-                .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 300)
-        } detail: {
-            switch selection {
-            case .saved(let url):
-                SavedMeetingView(url: url)
-                    .id(url)
-            default:
-                LiveMeetingView()
-            }
+        HStack(spacing: 0) {
+            SidebarRail(screen: $screen)
+            content
         }
-        // Apple Translation 세션은 이 modifier를 통해서만 열립니다 (EN→KO 온디바이스).
-        // 사이드바 전환에도 세션이 유지되도록 최상위에 부착.
+        .frame(minWidth: 840, minHeight: 520)
+        .background(Theme.canvas)
+        .preferredColorScheme(.light)
+        // Apple Translation 세션은 이 modifier를 통해서만 열립니다 (EN→KO 온디바이스)
         .translationTask(app.translator.config) { session in
             await app.translator.serve(session: session, state: app)
         }
+        .sheet(isPresented: Binding(
+            get: { app.showGeminiKeyPrompt },
+            set: { app.showGeminiKeyPrompt = $0 }
+        )) {
+            GeminiKeySheet(
+                onSave: { app.saveGeminiKey($0) },
+                onCancel: { app.showGeminiKeyPrompt = false }
+            )
+        }
+        .onChange(of: app.isRunning) { _, running in
+            if running { screen = .live }
+        }
     }
 
-    private static let upcomingTimeFormatter: DateFormatter = {
+    @ViewBuilder
+    private var content: some View {
+        switch screen {
+        case .home:
+            HomeView(screen: $screen)
+        case .chat:
+            ChatFullView()
+        case .live:
+            LiveMeetingView()
+        case .meeting(let url):
+            MeetingDetailView(url: url, screen: $screen)
+                .id(url)
+        }
+    }
+}
+
+// MARK: - 좌측 레일 (Granola식 미니 메뉴)
+
+struct SidebarRail: View {
+    @Environment(AppState.self) private var app
+    @Binding var screen: ContentView.Screen
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Image(nsImage: NSApp.applicationIconImage)
+                    .resizable()
+                    .frame(width: 26, height: 26)
+                Text("livenote")
+                    .font(.headline)
+                    .foregroundStyle(.white)
+            }
+            .padding(.bottom, 16)
+
+            railItem("홈", icon: "house.fill", target: .home,
+                     selected: isHome)
+            railItem("채팅", icon: "bubble.left.and.bubble.right.fill", target: .chat,
+                     selected: screen == .chat)
+            if app.isRunning || !app.rows.isEmpty {
+                railItem(app.isRunning ? "라이브 · 듣는 중" : "라이브",
+                         icon: "waveform", target: .live,
+                         selected: screen == .live,
+                         dot: app.isRunning ? Theme.vermilion : nil)
+            }
+
+            Spacer()
+
+            if app.isRunning {
+                HStack(spacing: 6) {
+                    Circle().fill(Theme.vermilion).frame(width: 7, height: 7)
+                    Text("기록 중")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.7))
+                }
+                .padding(.leading, 10)
+            }
+        }
+        .padding(14)
+        .frame(width: 180, alignment: .leading)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(
+            LinearGradient(colors: [Theme.sidebarTop, Theme.sidebarBottom],
+                           startPoint: .top, endPoint: .bottom)
+        )
+    }
+
+    private var isHome: Bool {
+        if case .meeting = screen { return true }   // 상세는 홈 계열로 하이라이트
+        return screen == .home
+    }
+
+    private func railItem(_ title: String, icon: String, target: ContentView.Screen,
+                          selected: Bool, dot: Color? = nil) -> some View {
+        Button {
+            screen = target
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                    .frame(width: 16)
+                Text(title)
+                    .lineLimit(1)
+                Spacer()
+                if let dot {
+                    Circle().fill(dot).frame(width: 7, height: 7)
+                }
+            }
+            .font(.callout.weight(selected ? .semibold : .regular))
+            .foregroundStyle(.white.opacity(selected ? 1.0 : 0.75))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(selected ? Color.white.opacity(0.14) : .clear)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - 홈 (Coming up + 회의 피드)
+
+struct HomeView: View {
+    @Environment(AppState.self) private var app
+    @Binding var screen: ContentView.Screen
+
+    private static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm"
         return formatter
     }()
 
-    private var sidebar: some View {
-        List(selection: $selection) {
-            Section {
-                Label(app.isRunning ? "라이브 (듣는 중)" : "라이브", systemImage: "waveform")
-                    .tag(SidebarItem.live)
+    private static let sectionFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "ko_KR")
+        formatter.dateFormat = "M월 d일 (E)"
+        return formatter
+    }()
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                Text("Coming up")
+                    .font(.system(size: 27, weight: .semibold, design: .serif))
+                comingUpCard
+
+                Text("회의 기록")
+                    .font(.title3.weight(.semibold))
+                    .padding(.top, 6)
+                meetingFeed
             }
-            if !app.calendar.todayUpcoming.isEmpty {
-                Section("오늘 일정") {
-                    ForEach(app.calendar.todayUpcoming) { item in
-                        HStack(spacing: 6) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(item.title)
-                                    .font(.callout)
-                                    .lineLimit(1)
-                                Text("\(Self.upcomingTimeFormatter.string(from: item.start)) ~ \(Self.upcomingTimeFormatter.string(from: item.end))")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            if item.isNow(), !app.isRunning {
-                                Button("지금 시작") {
-                                    selection = .live
-                                    app.startUpcomingMeeting(link: item.deepLink ?? item.webLink)
-                                }
-                                .controlSize(.small)
-                                .buttonStyle(.borderedProminent)
-                            }
-                        }
-                        .selectionDisabled(true)
+            .padding(28)
+            .frame(maxWidth: 780, alignment: .leading)
+            .frame(maxWidth: .infinity)
+        }
+    }
+
+    // MARK: Coming up 카드
+
+    private var comingUpCard: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if app.isRunning {
+                HStack(spacing: 10) {
+                    Circle().fill(Theme.vermilion).frame(width: 9, height: 9)
+                    Text("듣는 중 — 전사 \(app.rows.count)건")
+                        .font(.callout.weight(.medium))
+                    Spacer()
+                    Button("열기") { screen = .live }
+                        .buttonStyle(.borderedProminent)
+                        .tint(Theme.accent)
+                        .controlSize(.small)
+                }
+                .padding(14)
+                Divider().padding(.horizontal, 14)
+            } else {
+                HStack(spacing: 10) {
+                    Image(systemName: "record.circle")
+                        .foregroundStyle(Theme.vermilion)
+                    Text("새 회의 기록")
+                        .font(.callout.weight(.medium))
+                    Spacer()
+                    Button("시작") {
+                        app.start()
+                        screen = .live
                     }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Theme.accent)
+                    .controlSize(.small)
+                }
+                .padding(14)
+                if !app.calendar.todayUpcoming.isEmpty {
+                    Divider().padding(.horizontal, 14)
                 }
             }
-            Section("저장된 회의") {
-                if app.meetingStore.meetings.isEmpty {
-                    Text("아직 저장된 회의가 없습니다")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
-                ForEach(app.meetingStore.meetings) { meeting in
+
+            ForEach(app.calendar.todayUpcoming) { item in
+                HStack(spacing: 10) {
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(item.isNow() ? Theme.vermilion : Theme.accent.opacity(0.6))
+                        .frame(width: 4, height: 30)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(meeting.title)
+                        Text(item.title)
+                            .font(.callout)
                             .lineLimit(1)
-                        Text("\(meeting.dateLabel) · \(meeting.rowCount)건 · \(meeting.durationLabel)")
+                        Text("\(Self.timeFormatter.string(from: item.start)) ~ \(Self.timeFormatter.string(from: item.end))")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                    .tag(SidebarItem.saved(meeting.url))
-                    .contextMenu {
-                        Button("Finder에서 보기") {
-                            NSWorkspace.shared.activateFileViewerSelecting([meeting.url])
+                    Spacer()
+                    if item.isNow(), !app.isRunning {
+                        Button("지금 시작") {
+                            app.startUpcomingMeeting(link: item.deepLink ?? item.webLink)
+                            screen = .live
                         }
-                        Button("삭제", role: .destructive) {
-                            if selection == .saved(meeting.url) {
-                                selection = .live
-                            }
-                            app.meetingStore.delete(meeting)
-                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(Theme.vermilion)
+                        .controlSize(.small)
                     }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+            }
+            if app.calendar.todayUpcoming.isEmpty && !app.isRunning {
+                Text("오늘 남은 일정이 없습니다")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .padding(14)
+            } else {
+                Spacer().frame(height: 8)
+            }
+        }
+        .themedCard()
+    }
+
+    // MARK: 회의 피드
+
+    private struct DaySection: Identifiable {
+        let id: Date
+        let label: String
+        let meetings: [MeetingSummary]
+    }
+
+    private var daySections: [DaySection] {
+        let calendar = Foundation.Calendar.current
+        let grouped = Dictionary(grouping: app.meetingStore.meetings) {
+            calendar.startOfDay(for: $0.startedAt)
+        }
+        return grouped.keys.sorted(by: >).map { day in
+            let label: String
+            if calendar.isDateInToday(day) {
+                label = "오늘"
+            } else if calendar.isDateInYesterday(day) {
+                label = "어제"
+            } else {
+                label = Self.sectionFormatter.string(from: day)
+            }
+            return DaySection(
+                id: day,
+                label: label,
+                meetings: (grouped[day] ?? []).sorted { $0.startedAt > $1.startedAt }
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var meetingFeed: some View {
+        if app.meetingStore.meetings.isEmpty {
+            Text("아직 저장된 회의가 없습니다. 첫 회의를 시작해 보세요.")
+                .font(.callout)
+                .foregroundStyle(.tertiary)
+                .padding(.vertical, 20)
+        }
+        ForEach(daySections) { section in
+            VStack(alignment: .leading, spacing: 8) {
+                Text(section.label)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                ForEach(section.meetings) { meeting in
+                    meetingCard(meeting)
                 }
             }
         }
-        .listStyle(.sidebar)
+    }
+
+    private func meetingCard(_ meeting: MeetingSummary) -> some View {
+        Button {
+            screen = .meeting(meeting.url)
+        } label: {
+            HStack(spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Theme.accent.opacity(0.12))
+                        .frame(width: 36, height: 36)
+                    Text(String(meeting.title.prefix(1)))
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(Theme.accent)
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(meeting.title)
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    Text("\(meeting.dateLabel) · \(meeting.rowCount)건 · \(meeting.durationLabel)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(12)
+            .themedCard()
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button("Finder에서 보기") {
+                NSWorkspace.shared.activateFileViewerSelecting([meeting.url])
+            }
+            Button("삭제", role: .destructive) {
+                app.meetingStore.delete(meeting)
+            }
+        }
+    }
+}
+
+// MARK: - 회의 상세 (요약 중심 + 하단 채팅)
+
+struct MeetingDetailView: View {
+    @Environment(AppState.self) private var app
+    let url: URL
+    @Binding var screen: ContentView.Screen
+    @State private var meeting: SavedMeeting?
+    @State private var showTranscript = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            toolbar
+            Divider()
+            if let meeting {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text(meeting.title ?? MeetingStore.resolveTitleFallback(meeting))
+                            .font(.system(size: 24, weight: .bold, design: .serif))
+                        metaLine(meeting)
+
+                        if app.summaryPhase == .generating {
+                            HStack(spacing: 10) {
+                                ProgressView().controlSize(.small)
+                                Text("회의록 생성 중…")
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(16)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .themedCard()
+                        } else if let summary = meeting.summary {
+                            SummaryRenderView(markdown: summary)
+                                .padding(18)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .themedCard()
+                        } else {
+                            VStack(spacing: 10) {
+                                Text("아직 회의록이 없습니다")
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                                Button("회의록 생성") { app.generateSummary(for: url) }
+                                    .buttonStyle(.borderedProminent)
+                                    .tint(Theme.accent)
+                            }
+                            .padding(20)
+                            .frame(maxWidth: .infinity)
+                            .themedCard()
+                        }
+
+                        if case .failed(let message) = app.summaryPhase {
+                            Text("요약 실패: \(message)")
+                                .font(.caption)
+                                .foregroundStyle(Theme.vermilion)
+                                .textSelection(.enabled)
+                        }
+
+                        if showTranscript {
+                            VStack(alignment: .leading, spacing: 12) {
+                                ForEach(meeting.rows) { row in
+                                    transcriptRow(row, meeting: meeting)
+                                }
+                            }
+                            .padding(16)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .themedCard()
+                        }
+                    }
+                    .padding(24)
+                    .frame(maxWidth: 780, alignment: .leading)
+                    .frame(maxWidth: .infinity)
+                }
+            } else {
+                ContentUnavailableView("회의를 불러올 수 없습니다", systemImage: "exclamationmark.folder")
+                    .frame(maxHeight: .infinity)
+            }
+            Divider()
+            ChatPanel(scope: .saved(url))
+        }
+        .onAppear { meeting = app.meetingStore.load(url) }
+        .onChange(of: app.summaryPhase) { _, newPhase in
+            if newPhase == .idle { meeting = app.meetingStore.load(url) }
+        }
+    }
+
+    private var toolbar: some View {
+        HStack(spacing: 12) {
+            Button {
+                screen = .home
+            } label: {
+                Label("홈", systemImage: "chevron.left")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Theme.accent)
+            Spacer()
+            Toggle("전사 보기", isOn: $showTranscript)
+                .toggleStyle(.checkbox)
+                .font(.caption)
+            Button {
+                app.generateSummary(for: url)
+            } label: {
+                Label("회의록 다시 생성", systemImage: "arrow.clockwise")
+                    .font(.caption)
+            }
+            .disabled(app.summaryPhase == .generating)
+            Button {
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            } label: {
+                Label("Finder", systemImage: "folder")
+                    .font(.caption)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+    }
+
+    private func metaLine(_ meeting: SavedMeeting) -> some View {
+        let total = Int(meeting.durationSeconds)
+        let duration = total >= 60 ? "\(total / 60)분" : "\(total)초"
+        let names = Set(meeting.rows.map {
+            MeetingStore.resolveName(row: $0, myName: meeting.myName, speakerNames: meeting.speakerNames)
+        })
+        return Text("\(MeetingStore.longDateLabel(meeting.startedAt)) · \(duration) · 참석 \(names.count)명 · 전사 \(meeting.rows.count)건")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+    }
+
+    private func transcriptRow(_ row: TranscriptRow, meeting: SavedMeeting) -> some View {
+        let name = MeetingStore.resolveName(row: row, myName: meeting.myName, speakerNames: meeting.speakerNames)
+        let color = LiveMeetingView.chipColor(channel: row.channel, slot: row.speakerSlot, name: row.speakerName)
+        return HStack(alignment: .top, spacing: 10) {
+            SpeakerChipLabel(name: name, color: color)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(row.english)
+                    .font(.callout)
+                    .textSelection(.enabled)
+                if let korean = row.korean {
+                    Text(korean)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+            }
+            Spacer(minLength: 8)
+            Text(row.timeLabel)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .monospacedDigit()
+        }
+    }
+}
+
+// MARK: - 요약 마크다운 렌더러 (경량)
+
+struct SummaryRenderView: View {
+    let markdown: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            ForEach(Array(markdown.components(separatedBy: "\n").enumerated()), id: \.offset) { _, line in
+                render(line)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func render(_ line: String) -> some View {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty {
+            Spacer().frame(height: 2)
+        } else if trimmed.hasPrefix("# ") {
+            Text(String(trimmed.dropFirst(2)))
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(Theme.accent)
+                .padding(.top, 10)
+        } else if trimmed.hasPrefix("## ") {
+            Text(String(trimmed.dropFirst(3)))
+                .font(.headline)
+                .padding(.top, 6)
+        } else if trimmed.hasPrefix("- ") {
+            let indentLevel = (line.prefix(while: { $0 == " " }).count) / 2
+            HStack(alignment: .top, spacing: 6) {
+                Text(indentLevel > 0 ? "◦" : "•")
+                    .foregroundStyle(indentLevel > 0 ? .secondary : Color.primary)
+                inline(String(trimmed.dropFirst(2)))
+            }
+            .padding(.leading, CGFloat(indentLevel) * 16)
+        } else {
+            inline(trimmed)
+        }
+    }
+
+    private func inline(_ text: String) -> some View {
+        Text((try? AttributedString(markdown: text)) ?? AttributedString(text))
+            .font(.callout)
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+// MARK: - 채팅 전용 화면 (레일의 "채팅" — 전체 아카이브 대상)
+
+struct ChatFullView: View {
+    var body: some View {
+        VStack(spacing: 0) {
+            ChatPanel(scope: .archive, expanded: true)
+        }
     }
 }
 
@@ -122,16 +593,6 @@ struct LiveMeetingView: View {
             transcript
             Divider()
             ChatPanel(scope: (app.isRunning || !app.rows.isEmpty) ? .live : .archive)
-        }
-        .background(Color(nsColor: .windowBackgroundColor))
-        .sheet(isPresented: Binding(
-            get: { app.showGeminiKeyPrompt },
-            set: { app.showGeminiKeyPrompt = $0 }
-        )) {
-            GeminiKeySheet(
-                onSave: { app.saveGeminiKey($0) },
-                onCancel: { app.showGeminiKeyPrompt = false }
-            )
         }
     }
 
@@ -166,26 +627,23 @@ struct LiveMeetingView: View {
 
             if app.isRunning {
                 HStack(spacing: 4) {
-                    // 마이크 아이콘 = 뮤트 토글. 뮤트 중엔 "나" 채널을 엔진이 통째로 버림.
                     Button {
                         app.setMicMuted(!app.micMuted)
                     } label: {
                         Label(app.micMuted ? "뮤트" : "마이크",
                               systemImage: app.micMuted ? "mic.slash.fill" : "mic.fill")
                             .font(.caption)
-                            .foregroundStyle(app.micMuted ? .red : .green)
+                            .foregroundStyle(app.micMuted ? Theme.vermilion : .green)
                     }
                     .buttonStyle(.plain)
                     .keyboardShortcut("m", modifiers: [.command, .shift])
                     .help(app.micMuted
                           ? "마이크 뮤트 중 — 내 목소리와 스피커 에코가 전사되지 않습니다. 클릭해서 해제 (⌘⇧M)"
-                          : "클릭하면 마이크를 뮤트합니다. 말하지 않을 때 켜 두면 스피커 에코가 '나'로 잘못 전사되는 일이 없습니다 (⌘⇧M)")
-                    // 입력 레벨 미터 — 말할 때 안 움직이면 마이크 신호가 안 들어오는 것.
-                    // 뮤트 중에도 입력은 보여줌 (마이크는 살아 있고 앱이 버리는 중이라는 피드백).
+                          : "클릭하면 마이크를 뮤트합니다 (⌘⇧M). Zoom 뮤트와 자동 동기화됩니다.")
                     ProgressView(value: Double(min(1.0, app.micLevel)))
                         .progressViewStyle(.linear)
                         .frame(width: 48)
-                        .tint(app.micMuted ? .red : (app.micLevel > 0.05 ? .green : .gray))
+                        .tint(app.micMuted ? Theme.vermilion : (app.micLevel > 0.05 ? .green : .gray))
                 }
                 Label("시스템 오디오", systemImage: app.systemAudioAvailable ? "speaker.wave.2.fill" : "speaker.slash.fill")
                     .font(.caption)
@@ -198,7 +656,7 @@ struct LiveMeetingView: View {
             ))
             .toggleStyle(.checkbox)
             .font(.caption)
-            .help("스피커에서 나온 상대방 소리가 마이크로 들어와 '나'로 잘못 전사되는 것을 걸러냅니다. 실행 중에도 켜고 끌 수 있습니다.")
+            .help("스피커에서 나온 상대방 소리가 마이크로 들어와 '나'로 잘못 전사되는 것을 걸러냅니다.")
 
             Toggle("번역", isOn: Binding(
                 get: { app.translationEnabled },
@@ -220,7 +678,6 @@ struct LiveMeetingView: View {
             .fixedSize()
             .help("처리 백엔드 — 번역·요약의 제공자를 결정합니다.\n로컬: Apple 번역 + Qwen 요약. 오디오가 Mac 밖으로 나가지 않습니다.\n클라우드: Gemini 번역·요약 (품질 우위). 회의 오디오가 Google로 전송됩니다. API 키 필요.")
 
-            // 클라우드 연결 표시등: 초록=연결됨, 주황=연결/재연결 중
             if app.backend == .cloud, app.translationEnabled, app.isRunning, let status = app.cloudStatus {
                 Circle()
                     .fill(status == .connected ? Color.green : Color.orange)
@@ -234,7 +691,7 @@ struct LiveMeetingView: View {
                 Button {
                     NSWorkspace.shared.activateFileViewerSelecting([savedURL])
                 } label: {
-                    Label("저장됨 — Finder에서 보기", systemImage: "folder")
+                    Label("저장됨", systemImage: "folder")
                         .font(.caption)
                 }
                 .buttonStyle(.link)
@@ -246,7 +703,7 @@ struct LiveMeetingView: View {
             }
             .keyboardShortcut("r", modifiers: .command)
             .buttonStyle(.borderedProminent)
-            .tint(app.isRunning ? .red : .accentColor)
+            .tint(app.isRunning ? Theme.vermilion : Theme.accent)
             .disabled(isPreparing)
         }
         .padding(.horizontal, 16)
@@ -271,9 +728,6 @@ struct LiveMeetingView: View {
         }
         if let translationIssue = app.translator.issueMessage {
             BannerView(text: translationIssue, color: .orange)
-        }
-        if let calendarIssue = app.calendar.issueMessage {
-            BannerView(text: calendarIssue, color: .orange)
         }
         if let cloudIssue = app.cloudTranslationMessage {
             BannerView(text: cloudIssue, color: .orange)
@@ -338,14 +792,13 @@ struct LiveMeetingView: View {
         }
     }
 
-    // MARK: 화자 칩 (클릭해서 이름 변경)
+    // MARK: 화자 칩
 
     @ViewBuilder
     private func speakerChip(for row: TranscriptRow) -> some View {
         let name = app.displayName(for: row)
         let color = Self.chipColor(channel: row.channel, slot: row.speakerSlot, name: row.speakerName)
         if row.speakerName != nil {
-            // Zoom 태그로 자동 인식된 화자: 편집 불필요 (클릭 없음)
             SpeakerChipLabel(name: name, color: color)
                 .help("Zoom에서 자동 인식된 화자")
         } else {
@@ -376,7 +829,6 @@ struct LiveMeetingView: View {
                 .frame(width: 200)
                 .onSubmit { commitRename(for: row) }
 
-            // 캘린더 참석자 원클릭 후보 (상대방 화자에만)
             if row.channel == .them, !app.attendeeCandidates.isEmpty {
                 Divider()
                 Text("캘린더 참석자")
@@ -391,7 +843,7 @@ struct LiveMeetingView: View {
                             .font(.callout)
                     }
                     .buttonStyle(.plain)
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(Theme.accent)
                 }
             }
 
@@ -424,7 +876,6 @@ struct LiveMeetingView: View {
         case .me:
             return .blue
         case .them:
-            // 자동 인식 이름: 이름 기반 안정 해시로 색 고정 (세션·재실행 간 일관)
             if let name, !name.isEmpty {
                 return slotColors[Self.stableHash(name) % slotColors.count]
             }
@@ -433,7 +884,6 @@ struct LiveMeetingView: View {
         }
     }
 
-    /// 실행 간 안정적인 문자열 해시 (Swift hashValue는 시드가 매번 달라짐)
     private static func stableHash(_ text: String) -> Int {
         var hash: UInt32 = 5381
         for scalar in text.unicodeScalars {
@@ -471,19 +921,18 @@ struct LiveMeetingView: View {
         VStack(spacing: 8) {
             Image(systemName: "waveform")
                 .font(.largeTitle)
-                .foregroundStyle(.tertiary)
-            Text("시작을 누르면 영어 음성을 전사하고 한국어로 번역합니다.\n마이크는 '\(app.myName)', 시스템 오디오(Zoom 등)는 화자별로 '상대방 1/2/3…'으로 나뉩니다.\n중지하면 ~/Documents/livenote2/ 에 en.md · ko.md · combined.md로 저장됩니다.")
+                .foregroundStyle(Theme.accent.opacity(0.5))
+            Text("시작을 누르면 영어 음성을 전사하고 한국어로 번역합니다.\nZoom 회의에서는 화자 이름이 자동으로 붙습니다.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity)
-        .padding(.top, 120)
+        .padding(.top, 100)
     }
 
     // MARK: 헬퍼
 
-    /// "번역 중…" 표시 여부 (모드별 정상 동작 조건)
     private var translationPending: Bool {
         guard app.translationEnabled else { return false }
         switch app.backend {
@@ -508,7 +957,7 @@ struct LiveMeetingView: View {
         case .idle: return .gray
         case .preparing: return .orange
         case .listening: return .green
-        case .error: return .red
+        case .error: return Theme.vermilion
         }
     }
 
@@ -538,95 +987,7 @@ struct LiveMeetingView: View {
     }
 }
 
-// MARK: - 저장된 회의 뷰 (읽기 전용)
-
-struct SavedMeetingView: View {
-    @Environment(AppState.self) private var app
-    let url: URL
-    @State private var meeting: SavedMeeting?
-
-    var body: some View {
-        Group {
-            if let meeting {
-                VStack(spacing: 0) {
-                    savedHeader(meeting)
-                    Divider()
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 14) {
-                            SummaryCard(
-                                summary: meeting.summary,
-                                phase: app.summaryPhase,
-                                onGenerate: { app.generateSummary(for: url) }
-                            )
-                            ForEach(meeting.rows) { row in
-                                savedRow(row, meeting: meeting)
-                            }
-                        }
-                        .padding(16)
-                    }
-                    Divider()
-                    ChatPanel(scope: .saved(url))
-                }
-            } else {
-                ContentUnavailableView("회의를 불러올 수 없습니다", systemImage: "exclamationmark.folder")
-            }
-        }
-        .background(Color(nsColor: .windowBackgroundColor))
-        .onAppear {
-            meeting = app.meetingStore.load(url)
-        }
-        .onChange(of: app.summaryPhase) { _, newPhase in
-            // 요약 생성이 끝나면 디스크에서 다시 읽어 화면 갱신
-            if newPhase == .idle {
-                meeting = app.meetingStore.load(url)
-            }
-        }
-    }
-
-    private func savedHeader(_ meeting: SavedMeeting) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: "doc.text")
-                .foregroundStyle(.secondary)
-            Text("전사 \(meeting.rows.count)건")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-            Spacer()
-            Button {
-                NSWorkspace.shared.activateFileViewerSelecting([url])
-            } label: {
-                Label("Finder에서 보기", systemImage: "folder")
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-    }
-
-    private func savedRow(_ row: TranscriptRow, meeting: SavedMeeting) -> some View {
-        let name = MeetingStore.resolveName(row: row, myName: meeting.myName, speakerNames: meeting.speakerNames)
-        let color = LiveMeetingView.chipColor(channel: row.channel, slot: row.speakerSlot, name: row.speakerName)
-        return HStack(alignment: .top, spacing: 10) {
-            SpeakerChipLabel(name: name, color: color)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(row.english)
-                    .font(.body)
-                    .textSelection(.enabled)
-                if let korean = row.korean {
-                    Text(korean)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                }
-            }
-            Spacer(minLength: 8)
-            Text(row.timeLabel)
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-                .monospacedDigit()
-        }
-    }
-}
-
-// MARK: - 요약 카드
+// MARK: - 요약 카드 (라이브 뷰 중지 직후용)
 
 struct SummaryCard: View {
     let summary: String?
@@ -636,63 +997,67 @@ struct SummaryCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Label("회의 요약", systemImage: "sparkles")
+                Label("회의록", systemImage: "sparkles")
                     .font(.headline)
+                    .foregroundStyle(Theme.accent)
                 Spacer()
                 if phase == .generating {
                     ProgressView()
                         .controlSize(.small)
-                    Text("생성 중… (최초 실행 시 모델 ~2.3GB 다운로드)")
+                    Text("생성 중…")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
-                    Button(summary == nil ? "요약 생성" : "다시 생성", action: onGenerate)
+                    Button(summary == nil ? "생성" : "다시 생성", action: onGenerate)
                         .controlSize(.small)
                 }
             }
             if case .failed(let message) = phase {
                 Text("요약 실패: \(message)")
                     .font(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(Theme.vermilion)
                     .textSelection(.enabled)
             }
             if let summary {
                 Divider()
-                Text(summary)
-                    .font(.callout)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                SummaryRenderView(markdown: summary)
             }
         }
-        .padding(12)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(Color.primary.opacity(0.08))
-        )
+        .padding(14)
+        .themedCard()
     }
 }
 
-// MARK: - AI 채팅 패널 (Granola식 하단 대화창)
+// MARK: - AI 채팅 패널
 
-/// 회의 기록에 대한 질의응답. 범위: 라이브(진행 중 회의 실시간 질문 가능) /
-/// 저장 회의 / 전체 아카이브. 모델은 상단 백엔드와 독립적으로 선택.
 struct ChatPanel: View {
     @Environment(AppState.self) private var app
     let scope: AppState.ChatScope
+    var expanded = false
     @State private var input = ""
 
     var body: some View {
         VStack(spacing: 10) {
             HStack(spacing: 6) {
                 Label("AI에게 질문", systemImage: "sparkles")
-                    .font(.callout.weight(.semibold))
-                    .foregroundStyle(.secondary)
+                    .font(expanded ? .title3.weight(.semibold) : .callout.weight(.semibold))
+                    .foregroundStyle(expanded ? Theme.accent : Color.secondary)
                 Text(scopeHint)
                     .font(.caption)
                     .foregroundStyle(.tertiary)
                 Spacer()
+            }
+            if app.chatMessages.isEmpty, expanded {
+                VStack(spacing: 8) {
+                    Image(systemName: "bubble.left.and.bubble.right")
+                        .font(.largeTitle)
+                        .foregroundStyle(Theme.accent.opacity(0.4))
+                    Text("저장된 모든 회의 기록에 대해 물어보세요.\n예: \"이번 주 Pangobooks 논의 요점은?\", \"columnar 관련 결정이 뭐였지?\"")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             if !app.chatMessages.isEmpty {
                 ScrollViewReader { proxy in
@@ -705,7 +1070,8 @@ struct ChatPanel: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.top, 4)
                     }
-                    .frame(minHeight: 60, maxHeight: 320)
+                    .frame(minHeight: expanded ? nil : 60,
+                           maxHeight: expanded ? .infinity : 320)
                     .onChange(of: app.chatMessages.count) {
                         if let last = app.chatMessages.last {
                             proxy.scrollTo(last.id, anchor: .bottom)
@@ -742,6 +1108,7 @@ struct ChatPanel: View {
                         .controlSize(.small)
                 } else {
                     Button("질문", action: send)
+                        .tint(Theme.accent)
                         .disabled(input.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
                 if !app.chatMessages.isEmpty {
@@ -756,10 +1123,10 @@ struct ChatPanel: View {
                 }
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 12)
-        .padding(.bottom, 14)
-        .background(Color(nsColor: .controlBackgroundColor))
+        .padding(.horizontal, expanded ? 28 : 16)
+        .padding(.top, expanded ? 24 : 12)
+        .padding(.bottom, expanded ? 20 : 14)
+        .background(expanded ? Theme.canvas : Color(nsColor: .controlBackgroundColor))
         .onAppear { app.ensureChatScope(scope) }
         .onChange(of: scope.key) {
             app.ensureChatScope(scope)
@@ -800,8 +1167,8 @@ struct ChatPanel: View {
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
                 .background(message.role == .user
-                            ? Color.accentColor.opacity(0.15)
-                            : Color.primary.opacity(0.06))
+                            ? Theme.accent.opacity(0.12)
+                            : Color.primary.opacity(0.05))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
             if message.role == .assistant { Spacer(minLength: 60) }
         }
@@ -819,7 +1186,7 @@ struct GeminiKeySheet: View {
         VStack(alignment: .leading, spacing: 12) {
             Label("Gemini API 키", systemImage: "key.fill")
                 .font(.headline)
-            Text("클라우드 번역(Gemini Live Translate)에 사용됩니다. 키는 macOS 키체인에만 저장되며, 클라우드 모드에서는 회의 오디오가 Google로 전송됩니다.\n키 발급: aistudio.google.com/apikey")
+            Text("클라우드 백엔드(번역·요약·채팅)에 사용됩니다. 키는 macOS 키체인에만 저장되며, 클라우드 모드에서는 회의 오디오가 Google로 전송됩니다.\n키 발급: aistudio.google.com/apikey")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

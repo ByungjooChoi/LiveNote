@@ -190,6 +190,16 @@ final class MeetingStore {
         }
     }
 
+    /// 제목이 없는 회의의 표시 폴백 (날짜 문자열).
+    static func resolveTitleFallback(_ meeting: SavedMeeting) -> String {
+        titleFormatter.string(from: meeting.startedAt)
+    }
+
+    /// 상세 화면용 긴 일시 라벨.
+    static func longDateLabel(_ date: Date) -> String {
+        titleFormatter.string(from: date)
+    }
+
     // MARK: - 마크다운 생성
 
     private static func header(_ meeting: SavedMeeting, resolve: (TranscriptRow) -> String) -> String {
