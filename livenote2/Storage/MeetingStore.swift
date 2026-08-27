@@ -176,6 +176,8 @@ final class MeetingStore {
         case .me:
             return myName
         case .them:
+            // Zoom 태그 등 자동 인식 이름이 있으면 최우선
+            if let name = row.speakerName, !name.isEmpty { return name }
             guard let slot = row.speakerSlot else { return "상대방" }
             return speakerNames[slot] ?? "상대방 \(slot + 1)"
         }

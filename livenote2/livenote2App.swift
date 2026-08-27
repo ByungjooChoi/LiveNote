@@ -57,6 +57,11 @@ struct MenuBarView: View {
                 set: { app.calendar.setEnabled($0) }
             ))
 
+            Toggle("Zoom 뮤트와 마이크 동기화", isOn: Binding(
+                get: { app.syncMuteWithZoom },
+                set: { app.setSyncMuteWithZoom($0) }
+            ))
+
             Divider()
 
             Button("livenote2 종료") {

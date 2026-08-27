@@ -53,6 +53,14 @@ final class AppState {
     let meetingStore = MeetingStore()
     /// 캘린더 회의 임박 알림 (1분 전 팝업 + Zoom 참가)
     let calendar = CalendarMonitor()
+    /// Zoom 활성 화자 태그 (AX) — 화자 자동 명명 + 뮤트 동기화
+    @ObservationIgnored let zoomTagger = ZoomSpeakerTagger()
+    /// Zoom 뮤트와 마이크 캡처 동기화 (기본 켜짐)
+    private(set) var syncMuteWithZoom = true
+    /// Zoom 태그용 손쉬운 사용 권한 안내 배너
+    var zoomTagMessage: String?
+    /// Zoom 동기화로 뮤트된 상태 (수동 뮤트와 구분 — 발화 경고 억제용)
+    @ObservationIgnored private var micMutedByZoom = false
     /// 클라우드 번역 (Gemini Live Translate) — 번역 모드가 .cloud일 때만 동작
     @ObservationIgnored let gemini = GeminiLiveTranslator()
 
@@ -107,6 +115,8 @@ final class AppState {
     @ObservationIgnored private var lastSpeechAt = Date()
     @ObservationIgnored private var mutedSpeechMonitor: Task<Void, Never>?
     @ObservationIgnored private var lastMutedSpeechWarningAt: Date?
+    /// 오디오 캡처가 실제로 시작된 시각 (행 초 ↔ 실시각 매핑 기준)
+    @ObservationIgnored private var captureStartedAt: Date?
 
     // 번역 요청 큐
     struct TranslationRequest: Sendable {
@@ -140,11 +150,24 @@ final class AppState {
             echoFilterEnabled = defaults.bool(forKey: "echoFilter")
         }
         autoStartOnMeetingApp = defaults.bool(forKey: "autoStartOnMeetingApp")
+        if defaults.object(forKey: "syncMuteWithZoom") != nil {
+            syncMuteWithZoom = defaults.bool(forKey: "syncMuteWithZoom")
+        }
         if let savedMode = defaults.string(forKey: "translationMode"),
            let mode = TranslationMode(rawValue: savedMode) {
             translationMode = mode
         }
         registerMeetingAppLaunchObserver()
+
+        // Zoom 뮤트 동기화: 내 Zoom 타일의 음소거 상태를 따라 마이크 캡처를 켜고 끔
+        zoomTagger.onSelfMuteChange = { [weak self] muted in
+            guard let self, self.syncMuteWithZoom, self.isRunning else { return }
+            guard muted != self.micMuted else { return }
+            self.setMicMuted(muted, fromZoomSync: true)
+            self.noticeMessage = muted
+                ? "Zoom 음소거를 감지해 마이크 기록을 함께 뮤트했습니다."
+                : "Zoom 음소거 해제를 감지해 마이크 기록을 재개했습니다."
+        }
 
         // 클라우드 번역 문제 배너·상태 표시등 배선
         let geminiRef = gemini
@@ -203,8 +226,9 @@ final class AppState {
 
     // MARK: - 마이크 뮤트
 
-    func setMicMuted(_ muted: Bool) {
+    func setMicMuted(_ muted: Bool, fromZoomSync: Bool = false) {
         micMuted = muted
+        micMutedByZoom = fromZoomSync && muted
         if muted {
             volatileText[.me] = ""
             startMutedSpeechMonitor()
@@ -220,6 +244,11 @@ final class AppState {
         }
     }
 
+    func setSyncMuteWithZoom(_ enabled: Bool) {
+        syncMuteWithZoom = enabled
+        UserDefaults.standard.set(enabled, forKey: "syncMuteWithZoom")
+    }
+
     /// 뮤트 중 발화 감지: 뮤트 상태에서 마이크 레벨이 지속적으로 올라가면 경고 배너.
     /// (실측 사고: 뮤트를 켠 채 발화해 "나" 채널이 통째로 소실된 회의가 있었음 — 2026-08-21)
     private func startMutedSpeechMonitor() {
@@ -228,7 +257,8 @@ final class AppState {
             var loudTicks = 0
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 500_000_000)
-                guard let self, self.isRunning, self.micMuted else {
+                // Zoom 동기화 뮤트 중의 발화는 회의 밖 발화라 경고하지 않음
+                guard let self, self.isRunning, self.micMuted, !self.micMutedByZoom else {
                     loudTicks = 0
                     continue
                 }
@@ -306,8 +336,21 @@ final class AppState {
         resaveTask?.cancel()
         lastSpeechAt = Date()
         micMuted = false
+        micMutedByZoom = false
+        zoomTagMessage = nil
+        captureStartedAt = nil
         // 진행 중인 캘린더 일정의 참석자 → 화자 이름 원클릭 후보
         attendeeCandidates = calendar.attendeeNamesForOngoingMeeting()
+
+        // Zoom 화자 태그: Zoom이 떠 있으면 폴링 시작 (권한 없으면 요청 다이얼로그 + 안내)
+        if ZoomSpeakerTagger.zoomRunning() {
+            if ZoomSpeakerTagger.accessibilityTrusted(prompt: false) {
+                zoomTagger.start(myName: myName)
+            } else {
+                _ = ZoomSpeakerTagger.accessibilityTrusted(prompt: true)
+                zoomTagMessage = "Zoom 화자 자동 인식에는 손쉬운 사용 권한이 필요합니다. 시스템 설정 > 개인정보 보호 및 보안 > 손쉬운 사용에서 livenote2를 켜면 다음 시작부터 적용됩니다."
+            }
+        }
 
         let newEngine = TranscriptionEngine(
             onVolatile: { [weak self] channel, text in
@@ -365,15 +408,24 @@ final class AppState {
                 return
             }
 
-            // 3) 화자구분 모델 준비 (실패해도 전사는 계속 — 라벨만 "상대방" 단일)
-            phase = .preparing("화자구분 모델 준비 중… (최초 실행 시 다운로드)")
-            let diarizer = SpeakerDiarizer()
-            do {
-                try await diarizer.prepare()
-                speakerDiarizer = diarizer
-            } catch {
+            // 3) 화자구분 준비. Zoom 태그가 잡히면 LS-EEND는 기동하지 않음 (부하 절감 —
+            //    Zoom 회의에서는 타일의 활성 화자 이름이 슬롯보다 정확하고 이름까지 공짜)
+            if ZoomSpeakerTagger.zoomRunning(), !zoomTagger.permissionMissing {
+                // 첫 폴 결과를 잠깐 기다려 타일 존재 확인
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+            }
+            if zoomTagger.zoomDetected {
                 speakerDiarizer = nil
-                diarizerMessage = "화자구분 모델을 불러오지 못해 상대방을 단일 라벨로 표시합니다. (\(error.localizedDescription))"
+            } else {
+                phase = .preparing("화자구분 모델 준비 중… (최초 실행 시 다운로드)")
+                let diarizer = SpeakerDiarizer()
+                do {
+                    try await diarizer.prepare()
+                    speakerDiarizer = diarizer
+                } catch {
+                    speakerDiarizer = nil
+                    diarizerMessage = "화자구분 모델을 불러오지 못해 상대방을 단일 라벨로 표시합니다. (\(error.localizedDescription))"
+                }
             }
 
             // 4) 오디오 스트림 → 엔진/화자구분/클라우드 번역 소비 루프
@@ -449,12 +501,17 @@ final class AppState {
             // 8) 회의 자동 종료 감지
             startAutoStopMonitoring()
 
+            // 오디오 타임라인 기준 시각 (Zoom 태그 매칭용 — 모델 준비 시간만큼
+            // sessionStartedAt과 어긋나므로 캡처 시작 시각을 별도 기록)
+            captureStartedAt = Date()
             phase = .listening
         }
     }
 
     func stop() {
         guard isRunning else { return }
+        zoomTagger.stop()
+        micMutedByZoom = false
         mic?.stop()
         systemTap?.stop()
         mic = nil
@@ -676,10 +733,21 @@ final class AppState {
         // 참석자 이름 교정: ASR이 뭉갠 고유명사를 캘린더 참석자 이름으로 보정
         let stabilizedText = correctedAttendeeNames(stabilized)
 
+        // Zoom 태그: 행 구간에서 가장 오래 활성 화자였던 이름 (슬롯보다 우선)
+        var autoName: String?
+        if segment.channel == .them, let captureStart = captureStartedAt {
+            autoName = zoomTagger.dominantName(
+                fromSeconds: segment.startSeconds,
+                toSeconds: segment.endSeconds,
+                sessionStart: captureStart
+            )
+        }
+
         let row = TranscriptRow(
             id: UUID(),
             channel: segment.channel,
             speakerSlot: segment.channel == .them ? slot : nil,
+            speakerName: autoName,
             english: stabilizedText,
             korean: nil,
             startSeconds: segment.startSeconds,

@@ -186,7 +186,17 @@
 
 트레이드오프(문서화된 한계): 사용자가 상대방 말을 수 초 내 그대로 복창하면 ③이 오탐할 수 있음. 완전 동시발화 중 일부 사용자 발화가 ①에 씹힐 수 있음.
 
-### 5.3 화자 슬롯 매핑
+### 5.3 화자 식별 — Zoom 태그(1순위) + LS-EEND 슬롯(폴백)
+
+**Zoom 활성 화자 태그 (2026-08-27 추가, `ZoomSpeakerTagger`)**: 손쉬운 사용(AX) 권한으로 Zoom 회의 창의 참가자 타일을 1초 주기 폴링. 타일 구조(실회의 덤프로 검증): AXTabGroup description에 "이름, 음소거 상태, Video 상태[, active speaker]", 자식 AXButton description에 이름만. 활성 화자 타임라인을 누적하고, `.them` 행 확정 시 구간 겹침 최대 이름(겹침 ≥ max(0.5s, 15%))을 `row.speakerName`에 자동 부여 (직함 꼬리는 `shortName`으로 제거: " @ ", " | ", ", " 앞까지). 시간 기준은 sessionStartedAt이 아니라 **captureStartedAt**(모델 준비 시간만큼 어긋나므로 캡처 시작 시각 별도 기록). resolveName 우선순위: speakerName > speakerNames[slot] > "상대방 N". 자동 인식 행의 칩은 편집 불가(이름 기반 안정 해시 색), 무명 행만 기존 클릭 편집 유지.
+
+**LS-EEND 기동 조건**: 시작 시 Zoom 타일이 감지되면(첫 폴 1.5s 대기) **LS-EEND를 아예 기동하지 않음** (모델 로드·추론 부하 0 — Zoom에선 태그가 더 정확하고 이름까지 제공). Zoom이 없을 때만 기존 §5.3 슬롯 매핑 가동 (Teams/Meet/대면 폴백).
+
+**Zoom 뮤트 동기화 (에코 방어 ⓪의 자동화)**: 내 타일(표시명에 myName 포함으로 식별)의 음소거 상태 변화를 감지해 마이크 캡처 뮤트를 자동 추종 (`syncMuteWithZoom`, 기본 켜짐, 메뉴바 토글). Zoom 뮤트 습관 그대로 에코 유입이 차단되고, 동기화 뮤트 중에는 발화 경고를 억제 (회의 밖 발화가 정상이므로). 수동 뮤트 버튼은 그대로 동작.
+
+**한계 (문서화)**: Zoom 데스크톱(macOS) 전용 — Teams/Meet은 폴백 경로. Zoom UI 구조 변경에 취약 (파싱은 "active speaker" 영어 토큰과 자식 버튼 이름에 의존해 로케일 영향 최소화). 화면 공유·발표자 보기에서 타일 노출이 줄면 태그 공백 → 해당 행은 무명 폴백. 동시 발화 시 1명만 표시. 손쉬운 사용 권한 필요 (미허용 시 배너 안내, 태그 없이 진행).
+
+### 5.3-구 화자 슬롯 매핑 (LS-EEND 폴백 경로)
 
 `.them` 문장이 확정되면 `SpeakerDiarizer.dominantSlot(from:to:)` — 타임라인의 각 화자(`finalizedSegments + tentativeSegments`)와 [start,end] 겹침 시간 합산, 최대 화자 선택. 신뢰 조건: 겹침 ≥ max(0.3s, 구간의 15%). 미달이면 nil → UI에 "상대방"(무색). 슬롯 라벨은 "상대방 N"(slot+1), `speakerNames[slot]`으로 사용자 개명 가능(전 행 즉시 반영, 세션 간 유지... 단 slot 번호는 세션별 리셋됨에 유의).
 
@@ -250,6 +260,7 @@
 | `Engine/SpeakerDiarizer.swift` | actor. FluidAudio diarizer API를 만지는 **유일한** 파일(시그니처 드리프트 격리 목적). prepare/ingest/dominantSlot/finish. 실패 시 failed 플래그 → 라벨만 포기 |
 | `Engine/TranslationCoordinator.swift` | @MainActor @Observable. config 보유, `serve(session:state:)` 루프, issueMessage 배너 |
 | `Engine/GeminiLiveTranslator.swift` | actor. §5.4 클라우드 번역: 채널별 WebSocket 2개, PCM 변환·무음 게이트·전송, outputTranscription 누적·claim, 재연결. + `GeminiKeychain`(API 키 Keychain 보관) |
+| `Engine/ZoomSpeakerTagger.swift` | @MainActor. §5.3 Zoom AX 폴링: 타일 파싱(이름·active speaker·뮤트), 활성 화자 타임라인, dominantName, 내 뮤트 변화 콜백. AX API를 만지는 유일한 파일 |
 | `Calendar/CalendarMonitor.swift` | @MainActor @Observable. §5.8 감시 루프·자격 판정·Zoom 링크 파싱(`firstZoomLink`/`zoomDeepLink` static)·참가 실행. EventKit을 만지는 유일한 파일 |
 | `Calendar/MeetingAlertPanel.swift` | `MeetingAlertPanelController`(NSPanel 생성·우상단 배치·닫기) + `MeetingAlertView`(SwiftUI: 제목·시간·카운트다운·참가/닫기) |
 | `Engine/SummaryService.swift` | actor. §5.5. 모델 ID 상수 한 줄로 교체 가능하게 유지할 것 |

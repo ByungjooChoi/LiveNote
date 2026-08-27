@@ -237,6 +237,9 @@ struct LiveMeetingView: View {
         if let cloudIssue = app.cloudTranslationMessage {
             BannerView(text: cloudIssue, color: .orange)
         }
+        if let zoomTagIssue = app.zoomTagMessage {
+            BannerView(text: zoomTagIssue, color: .orange)
+        }
     }
 
     // MARK: 전사 목록
@@ -296,22 +299,29 @@ struct LiveMeetingView: View {
 
     // MARK: 화자 칩 (클릭해서 이름 변경)
 
+    @ViewBuilder
     private func speakerChip(for row: TranscriptRow) -> some View {
         let name = app.displayName(for: row)
-        let color = Self.chipColor(channel: row.channel, slot: row.speakerSlot)
-        return Button {
-            draftName = name
-            editingRowID = row.id
-        } label: {
+        let color = Self.chipColor(channel: row.channel, slot: row.speakerSlot, name: row.speakerName)
+        if row.speakerName != nil {
+            // Zoom 태그로 자동 인식된 화자: 편집 불필요 (클릭 없음)
             SpeakerChipLabel(name: name, color: color)
-        }
-        .buttonStyle(.plain)
-        .help("클릭해서 화자 이름 변경")
-        .popover(isPresented: Binding(
-            get: { editingRowID == row.id },
-            set: { if !$0 { editingRowID = nil } }
-        )) {
-            renamePopover(for: row)
+                .help("Zoom에서 자동 인식된 화자")
+        } else {
+            Button {
+                draftName = name
+                editingRowID = row.id
+            } label: {
+                SpeakerChipLabel(name: name, color: color)
+            }
+            .buttonStyle(.plain)
+            .help("클릭해서 화자 이름 변경")
+            .popover(isPresented: Binding(
+                get: { editingRowID == row.id },
+                set: { if !$0 { editingRowID = nil } }
+            )) {
+                renamePopover(for: row)
+            }
         }
     }
 
@@ -368,14 +378,27 @@ struct LiveMeetingView: View {
         editingRowID = nil
     }
 
-    static func chipColor(channel: AudioChannel, slot: Int?) -> Color {
+    static func chipColor(channel: AudioChannel, slot: Int?, name: String? = nil) -> Color {
         switch channel {
         case .me:
             return .blue
         case .them:
+            // 자동 인식 이름: 이름 기반 안정 해시로 색 고정 (세션·재실행 간 일관)
+            if let name, !name.isEmpty {
+                return slotColors[Self.stableHash(name) % slotColors.count]
+            }
             guard let slot else { return Color.primary.opacity(0.55) }
             return slotColors[slot % slotColors.count]
         }
+    }
+
+    /// 실행 간 안정적인 문자열 해시 (Swift hashValue는 시드가 매번 달라짐)
+    private static func stableHash(_ text: String) -> Int {
+        var hash: UInt32 = 5381
+        for scalar in text.unicodeScalars {
+            hash = hash &* 33 &+ scalar.value
+        }
+        return Int(hash % 1_000_000)
     }
 
     // MARK: 잠정(volatile) 행
@@ -538,7 +561,7 @@ struct SavedMeetingView: View {
 
     private func savedRow(_ row: TranscriptRow, meeting: SavedMeeting) -> some View {
         let name = MeetingStore.resolveName(row: row, myName: meeting.myName, speakerNames: meeting.speakerNames)
-        let color = LiveMeetingView.chipColor(channel: row.channel, slot: row.speakerSlot)
+        let color = LiveMeetingView.chipColor(channel: row.channel, slot: row.speakerSlot, name: row.speakerName)
         return HStack(alignment: .top, spacing: 10) {
             SpeakerChipLabel(name: name, color: color)
             VStack(alignment: .leading, spacing: 4) {
