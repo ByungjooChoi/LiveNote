@@ -101,7 +101,7 @@ actor GeminiLiveTranslator {
     func start() async {
         guard !running else { return }
         guard let apiKey, !apiKey.isEmpty else {
-            issueHandler?("Gemini API 키가 없어 클라우드 번역을 시작하지 못했습니다.")
+            issueHandler?("Cloud translation not started — no Gemini API key.")
             return
         }
         running = true
@@ -267,7 +267,7 @@ actor GeminiLiveTranslator {
         // 연속 실패가 쌓이면 배너로 알리되, 재연결은 세션이 사는 동안 계속 시도
         // (과거: 5회 후 영구 중단 → 네트워크 순단 한 번에 세션이 죽는 문제)
         if count == Self.reconnectWarnThreshold {
-            issueHandler?("클라우드 번역 연결이 불안정해 재연결을 계속 시도 중입니다. 네트워크를 확인해 주세요. (\(error.localizedDescription))")
+            issueHandler?("Cloud translation connection is unstable — retrying continuously. Check your network. (\(error.localizedDescription))")
         }
         // 지수 백오프: 2s, 4s, … 상한 30s
         let delaySeconds = min(Double(count) * 2.0, 30.0)

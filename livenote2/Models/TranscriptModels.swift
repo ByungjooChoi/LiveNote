@@ -51,7 +51,7 @@ enum ChatModelChoice: String, Sendable, CaseIterable {
     var displayName: String {
         switch self {
         case .cloudGemini: return "Gemini 3.7 Flash"
-        case .localQwen: return "Qwen3.5 4B (로컬)"
+        case .localQwen: return "Qwen (local)"
         }
     }
 }

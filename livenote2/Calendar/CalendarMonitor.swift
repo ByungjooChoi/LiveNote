@@ -88,10 +88,10 @@ final class CalendarMonitor {
                 issueMessage = nil
                 startMonitoring()
             } else {
-                issueMessage = "캘린더 접근이 거부되어 회의 참가 알림이 꺼져 있습니다. 시스템 설정 > 개인정보 보호 및 보안 > 캘린더에서 livenote2에 전체 접근을 허용해 주세요."
+                issueMessage = "Calendar access denied — meeting alerts are off. Allow full access for livenote2 in System Settings > Privacy & Security > Calendars."
             }
         default:
-            issueMessage = "캘린더 접근 권한이 없어 회의 참가 알림이 동작하지 않습니다. 시스템 설정 > 개인정보 보호 및 보안 > 캘린더에서 livenote2에 전체 접근을 허용해 주세요."
+            issueMessage = "No calendar access — meeting alerts are disabled. Allow full access for livenote2 in System Settings > Privacy & Security > Calendars."
         }
     }
 
@@ -166,7 +166,7 @@ final class CalendarMonitor {
 
             return MeetingAlert(
                 key: key,
-                title: event.title ?? "회의",
+                title: event.title ?? "Meeting",
                 start: start,
                 end: event.endDate ?? start.addingTimeInterval(30 * 60),
                 webLink: webLink,
@@ -241,7 +241,7 @@ final class CalendarMonitor {
             let web = Self.firstZoomLink(in: [event.url?.absoluteString, event.location, event.notes])
             items.append(UpcomingMeetingItem(
                 id: key,
-                title: event.title ?? "회의",
+                title: event.title ?? "Meeting",
                 start: start,
                 end: end,
                 webLink: web,

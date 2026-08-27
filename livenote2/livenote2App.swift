@@ -32,7 +32,7 @@ struct MenuBarView: View {
 
             Divider()
 
-            Button(app.isRunning ? "중지하고 저장" : "시작") {
+            Button(app.isRunning ? "Stop & Save" : "Start") {
                 if app.isRunning {
                     app.stop()
                 } else {
@@ -40,31 +40,31 @@ struct MenuBarView: View {
                 }
             }
 
-            Button("메인 창 열기") {
+            Button("Open main window") {
                 openWindow(id: "main")
                 NSApp.activate(ignoringOtherApps: true)
             }
 
             Divider()
 
-            Toggle("회의 앱 실행 시 자동 시작", isOn: Binding(
+            Toggle("Auto-start with meeting apps", isOn: Binding(
                 get: { app.autoStartOnMeetingApp },
                 set: { app.setAutoStart($0) }
             ))
 
-            Toggle("회의 1분 전 Zoom 참가 알림", isOn: Binding(
+            Toggle("Meeting alerts (1 min before)", isOn: Binding(
                 get: { app.calendar.isEnabled },
                 set: { app.calendar.setEnabled($0) }
             ))
 
-            Toggle("Zoom 뮤트와 마이크 동기화", isOn: Binding(
+            Toggle("Sync mute with Zoom", isOn: Binding(
                 get: { app.syncMuteWithZoom },
                 set: { app.setSyncMuteWithZoom($0) }
             ))
 
             Divider()
 
-            Button("livenote2 종료") {
+            Button("Quit livenote2") {
                 if app.isRunning {
                     // 저장이 끝날 시간을 준 뒤 종료
                     app.stop()
@@ -82,13 +82,13 @@ struct MenuBarView: View {
     private var statusLine: String {
         switch app.phase {
         case .idle:
-            return "대기 중"
+            return "Idle"
         case .preparing(let message):
             return message
         case .listening:
-            return "듣는 중 — 전사 \(app.rows.count)건"
+            return "Listening — \(app.rows.count) segments"
         case .error:
-            return "오류 — 메인 창 확인"
+            return "Error — check main window"
         }
     }
 }

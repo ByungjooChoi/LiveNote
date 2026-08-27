@@ -59,6 +59,10 @@ final class AppState {
     private(set) var syncMuteWithZoom = true
     /// Zoom 태그용 손쉬운 사용 권한 안내 배너
     var zoomTagMessage: String?
+    /// Internal jargon (쉼표 구분) — ASR 고유명사 교정 풀에 참석자 이름과 함께 사용
+    private(set) var internalJargon: String = ""
+    /// 로컬 LLM 선택 (요약·로컬 채팅 공유)
+    private(set) var localModelID: String = SummaryService.defaultModelID
     /// Zoom 동기화로 뮤트된 상태 (수동 뮤트와 구분 — 발화 경고 억제용)
     @ObservationIgnored private var micMutedByZoom = false
     /// 클라우드 번역 (Gemini Live Translate) — 번역 모드가 .cloud일 때만 동작
@@ -131,7 +135,7 @@ final class AppState {
                 case .cloudGemini:
                     guard let key = GeminiKeychain.load() else {
                         throw NSError(domain: "livenote2.chat", code: 1, userInfo: [
-                            NSLocalizedDescriptionKey: "Gemini API 키가 없습니다. 백엔드를 클라우드로 한 번 선택해 키를 등록해 주세요."])
+                            NSLocalizedDescriptionKey: "No Gemini API key. Select the Cloud backend once in Settings to register a key."])
                     }
                     answer = try await GeminiChat.respond(
                         context: context, history: Array(history), question: trimmed, apiKey: key)
@@ -140,7 +144,7 @@ final class AppState {
                         context: context, history: Array(history), question: trimmed)
                 }
             } catch {
-                answer = "답변 실패: \(error.localizedDescription)"
+                answer = "Failed: \(error.localizedDescription)"
             }
             await MainActor.run {
                 guard let self else { return }
@@ -299,13 +303,16 @@ final class AppState {
            let value = ChatModelChoice(rawValue: savedChatModel) {
             chatModel = value
         }
+        internalJargon = defaults.string(forKey: "internalJargon") ?? ""
+        localModelID = defaults.string(forKey: "localModelID") ?? SummaryService.defaultModelID
+        ModelSeeder.seedIfNeeded()
         registerMeetingAppLaunchObserver()
 
         // Zoom 뮤트 동기화: 내 Zoom 타일의 음소거 상태를 따라 마이크 캡처를 켜고 끔
         // Zoom 회의 종료 즉시 감지 → 자동 중지·저장·요약 (Granola식, 4분 무음 대기 불필요)
         zoomTagger.onMeetingEnded = { [weak self] in
             guard let self, self.isRunning else { return }
-            self.noticeMessage = "Zoom 회의 종료를 감지해 자동으로 저장하고 요약을 시작합니다."
+            self.noticeMessage = "Zoom meeting ended — saving and generating minutes."
             self.stop()
         }
 
@@ -314,8 +321,8 @@ final class AppState {
             guard muted != self.micMuted else { return }
             self.setMicMuted(muted, fromZoomSync: true)
             self.noticeMessage = muted
-                ? "Zoom 음소거를 감지해 마이크 기록을 함께 뮤트했습니다."
-                : "Zoom 음소거 해제를 감지해 마이크 기록을 재개했습니다."
+                ? "Zoom muted — mic recording paused."
+                : "Zoom unmuted — mic recording resumed."
         }
 
         // 클라우드 번역 문제 배너·상태 표시등 배선
@@ -337,7 +344,7 @@ final class AppState {
         calendar.onJoinRequested = { [weak self] in
             guard let self, !self.isActive else { return }
             self.start()
-            self.noticeMessage = "캘린더 알림에서 Zoom 참가 — 기록을 시작합니다."
+            self.noticeMessage = "Joining Zoom from the calendar alert — recording started."
         }
     }
 
@@ -348,7 +355,7 @@ final class AppState {
     }
 
     func volatileName(for channel: AudioChannel) -> String {
-        channel == .me ? myName : "상대방"
+        channel == .me ? myName : "Them"
     }
 
     func renameMe(to name: String) {
@@ -398,6 +405,16 @@ final class AppState {
         UserDefaults.standard.set(enabled, forKey: "syncMuteWithZoom")
     }
 
+    func setInternalJargon(_ text: String) {
+        internalJargon = text
+        UserDefaults.standard.set(text, forKey: "internalJargon")
+    }
+
+    func setLocalModelID(_ id: String) {
+        localModelID = id
+        UserDefaults.standard.set(id, forKey: "localModelID")
+    }
+
     /// 뮤트 중 발화 감지: 뮤트 상태에서 마이크 레벨이 지속적으로 올라가면 경고 배너.
     /// (실측 사고: 뮤트를 켠 채 발화해 "나" 채널이 통째로 소실된 회의가 있었음 — 2026-08-21)
     private func startMutedSpeechMonitor() {
@@ -423,7 +440,7 @@ final class AppState {
                     let throttled = self.lastMutedSpeechWarningAt.map { now.timeIntervalSince($0) < 60 } ?? false
                     if !throttled {
                         self.lastMutedSpeechWarningAt = now
-                        self.noticeMessage = "마이크가 뮤트된 상태에서 발화가 감지됩니다. 내 발언을 기록하려면 뮤트(⌘⇧M)를 해제하세요."
+                        self.noticeMessage = "Speech detected while the mic is muted. Unmute (⌘⇧M) to record your voice."
                     }
                 }
             }
@@ -481,7 +498,7 @@ final class AppState {
 
     func start() {
         guard !isActive else { return }
-        phase = .preparing("준비 중…")
+        phase = .preparing("Preparing…")
         rows.removeAll()
         volatileText = [.me: "", .them: ""]
         systemAudioAvailable = true
@@ -509,7 +526,7 @@ final class AppState {
                 zoomTagger.start(myName: myName)
             } else {
                 _ = ZoomSpeakerTagger.accessibilityTrusted(prompt: true)
-                zoomTagMessage = "Zoom 화자 자동 인식에는 손쉬운 사용 권한이 필요합니다. 시스템 설정 > 개인정보 보호 및 보안 > 손쉬운 사용에서 livenote2를 켜면 다음 시작부터 적용됩니다."
+                zoomTagMessage = "Zoom speaker recognition needs Accessibility permission. Enable livenote2 in System Settings > Privacy & Security > Accessibility (applies from the next session)."
             }
         }
 
@@ -557,7 +574,7 @@ final class AppState {
             // 1) 마이크 권한
             let granted = await MicCapture.requestPermission()
             guard granted else {
-                phase = .error("마이크 권한이 거부되었습니다. 시스템 설정 > 개인정보 보호 및 보안 > 마이크에서 livenote2를 허용해 주세요.")
+                phase = .error("Microphone access denied. Allow livenote2 in System Settings > Privacy & Security > Microphone.")
                 return
             }
 
@@ -565,7 +582,7 @@ final class AppState {
             do {
                 try await newEngine.prepare()
             } catch {
-                phase = .error("모델 준비 실패: \(error.localizedDescription)\n네트워크 연결을 확인한 뒤 다시 시도해 주세요.")
+                phase = .error("Model preparation failed: \(error.localizedDescription)\nCheck your network and try again.")
                 return
             }
 
@@ -578,14 +595,14 @@ final class AppState {
             if zoomTagger.zoomDetected {
                 speakerDiarizer = nil
             } else {
-                phase = .preparing("화자구분 모델 준비 중… (최초 실행 시 다운로드)")
+                phase = .preparing("Preparing speaker diarization model… (downloads on first run)")
                 let diarizer = SpeakerDiarizer()
                 do {
                     try await diarizer.prepare()
                     speakerDiarizer = diarizer
                 } catch {
                     speakerDiarizer = nil
-                    diarizerMessage = "화자구분 모델을 불러오지 못해 상대방을 단일 라벨로 표시합니다. (\(error.localizedDescription))"
+                    diarizerMessage = "Speaker diarization unavailable — remote speakers use a single label. (\(error.localizedDescription))"
                 }
             }
 
@@ -618,7 +635,7 @@ final class AppState {
             do {
                 try startMicCapture()
             } catch {
-                phase = .error("마이크 시작 실패: \(error.localizedDescription)")
+                phase = .error("Microphone start failed: \(error.localizedDescription)")
                 teardownAudio()
                 return
             }
@@ -634,7 +651,7 @@ final class AppState {
                 systemTap = tap
             } catch {
                 systemAudioAvailable = false
-                systemAudioMessage = "시스템 오디오를 캡처할 수 없어 마이크만 전사합니다.\n\(error.localizedDescription)"
+                systemAudioMessage = "System audio capture unavailable — transcribing microphone only.\n\(error.localizedDescription)"
             }
 
             // 7) 번역 활성화. Apple 세션은 번역 켬+로컬일 때만 준비
@@ -642,7 +659,7 @@ final class AppState {
             cloudTranslationMessage = nil
             if translationEnabled, backend == .cloud, GeminiKeychain.load() == nil {
                 backend = .local
-                cloudTranslationMessage = "Gemini API 키가 없어 로컬 백엔드로 시작했습니다. 백엔드 메뉴에서 클라우드를 다시 선택해 키를 입력할 수 있습니다."
+                cloudTranslationMessage = "No Gemini API key — started with the local backend. Select Cloud again in Settings to add a key."
             }
             applyTranslationPipeline()
 
@@ -721,7 +738,7 @@ final class AppState {
                 guard let self, self.isRunning else { continue }
                 if Date().timeIntervalSince(self.lastSpeechAt) > Self.autoStopAfterSilence {
                     let minutes = Int(Self.autoStopAfterSilence / 60)
-                    self.noticeMessage = "\(minutes)분간 발화가 없어 자동으로 중지하고 저장했습니다."
+                    self.noticeMessage = "Auto-stopped and saved after \(minutes) minutes of silence."
                     self.stop()
                     return
                 }
@@ -737,10 +754,10 @@ final class AppState {
             guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
                   let bundleID = app.bundleIdentifier,
                   meetingAppBundleIDs.contains(bundleID) else { return }
-            let appName = app.localizedName ?? "회의 앱"
+            let appName = app.localizedName ?? "meeting app"
             Task { @MainActor [weak self] in
                 guard let self, self.isRunning else { return }
-                self.noticeMessage = "\(appName) 종료를 감지해 자동으로 중지하고 저장했습니다."
+                self.noticeMessage = "\(appName) quit — auto-stopped and saved."
                 self.stop()
             }
         }
@@ -800,11 +817,11 @@ final class AppState {
             guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
                   let bundleID = app.bundleIdentifier,
                   meetingAppBundleIDs.contains(bundleID) else { return }
-            let appName = app.localizedName ?? "회의 앱"
+            let appName = app.localizedName ?? "meeting app"
             Task { @MainActor [weak self] in
                 guard let self, self.autoStartOnMeetingApp, !self.isRunning else { return }
                 self.start()
-                self.noticeMessage = "\(appName) 실행을 감지해 자동으로 시작했습니다."
+                self.noticeMessage = "\(appName) launched — recording started automatically."
             }
         }
     }
@@ -1027,7 +1044,7 @@ final class AppState {
         return changed ? corrected.joined(separator: " ") : text
     }
 
-    /// 참석자 후보 + 내 이름에서 4자 이상 이름 토큰 추출.
+    /// 참석자 후보 + 내 이름 + internal jargon에서 4자 이상 토큰 추출 (ASR 교정 풀).
     private func attendeeNameTokens() -> [String] {
         var tokens = Set<String>()
         for candidate in attendeeCandidates {
@@ -1037,6 +1054,13 @@ final class AppState {
         }
         for part in myName.split(separator: " ") where part.count >= 4 {
             tokens.insert(String(part))
+        }
+        // Internal jargon (쉼표 구분): 단어 단위로 교정 풀에 추가
+        for term in internalJargon.split(separator: ",") {
+            for part in term.trimmingCharacters(in: .whitespaces).split(separator: " ")
+            where part.count >= 4 {
+                tokens.insert(String(part))
+            }
         }
         return Array(tokens)
     }

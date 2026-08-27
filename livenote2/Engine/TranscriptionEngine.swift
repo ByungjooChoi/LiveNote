@@ -122,12 +122,12 @@ actor TranscriptionEngine {
 
     /// Parakeet v2 모델 다운로드(최초 1회) 및 로드.
     func prepare() async throws {
-        onStatus("Parakeet 영어 모델 준비 중… 첫 실행은 약 500MB를 다운로드합니다.")
+        onStatus("Preparing Parakeet English model… first run downloads ~500MB.")
         let models = try await AsrModels.downloadAndLoad(version: .v2)
         let manager = AsrManager(config: .default)
         try await manager.loadModels(models)
         asrManager = manager
-        onStatus("모델 준비 완료")
+        onStatus("Models ready")
     }
 
     // MARK: - 오디오 유입

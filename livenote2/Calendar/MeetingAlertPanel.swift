@@ -67,7 +67,7 @@ struct MeetingAlertView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Label("회의 시작", systemImage: "calendar.badge.clock")
+                Label("Meeting starting", systemImage: "calendar.badge.clock")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -83,13 +83,13 @@ struct MeetingAlertView: View {
                 .font(.title3.weight(.semibold))
                 .lineLimit(2)
 
-            Text("\(Self.timeFormatter.string(from: meeting.start)) ~ \(Self.timeFormatter.string(from: meeting.end)) · 참가하면 기록도 시작됩니다")
+            Text("\(Self.timeFormatter.string(from: meeting.start)) ~ \(Self.timeFormatter.string(from: meeting.end)) · recording starts when you join")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
             HStack(spacing: 10) {
                 Button(action: onJoin) {
-                    Label(meeting.deepLink != nil ? "Zoom 참가" : "회의 링크 열기", systemImage: "video.fill")
+                    Label(meeting.deepLink != nil ? "Join Zoom" : "Open meeting link", systemImage: "video.fill")
                         .frame(minWidth: 120)
                 }
                 .buttonStyle(.borderedProminent)
@@ -98,7 +98,7 @@ struct MeetingAlertView: View {
 
                 Spacer()
 
-                Button("닫기", action: onDismiss)
+                Button("Dismiss", action: onDismiss)
                     .controlSize(.large)
             }
         }
@@ -108,8 +108,8 @@ struct MeetingAlertView: View {
 
     private func countdown(now: Date) -> String {
         let remaining = meeting.start.timeIntervalSince(now)
-        if remaining > 5 { return "\(Int(remaining))초 후" }
-        if remaining > -60 { return "곧 시작" }
-        return "진행 중"
+        if remaining > 5 { return "in \(Int(remaining))s" }
+        if remaining > -60 { return "starting now" }
+        return "in progress"
     }
 }

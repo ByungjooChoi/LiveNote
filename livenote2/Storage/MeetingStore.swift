@@ -16,9 +16,9 @@ struct MeetingSummary: Identifiable, Hashable {
     var durationLabel: String {
         let total = Int(durationSeconds)
         if total >= 60 {
-            return "\(total / 60)분 \(total % 60)초"
+            return "\(total / 60)m \(total % 60)s"
         }
-        return "\(total)초"
+        return "\(total)s"
     }
 }
 
@@ -185,8 +185,8 @@ final class MeetingStore {
         case .them:
             // Zoom 태그 등 자동 인식 이름이 있으면 최우선
             if let name = row.speakerName, !name.isEmpty { return name }
-            guard let slot = row.speakerSlot else { return "상대방" }
-            return speakerNames[slot] ?? "상대방 \(slot + 1)"
+            guard let slot = row.speakerSlot else { return "Them" }
+            return speakerNames[slot] ?? "Speaker \(slot + 1)"
         }
     }
 

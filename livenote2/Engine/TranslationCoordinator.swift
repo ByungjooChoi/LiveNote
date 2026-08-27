@@ -32,7 +32,7 @@ final class TranslationCoordinator {
             try await session.prepareTranslation()
             issueMessage = nil
         } catch {
-            issueMessage = "번역 언어팩 준비 실패 — 영어 전사는 계속 동작합니다. (\(error.localizedDescription))"
+            issueMessage = "Translation language pack unavailable — English transcription continues. (\(error.localizedDescription))"
         }
 
         for await request in state.translationRequests() {
@@ -42,7 +42,7 @@ final class TranslationCoordinator {
                 if issueMessage != nil { issueMessage = nil }
             } catch {
                 state.applyTranslation(nil, to: request.rowID)
-                issueMessage = "번역 실패 — 영어 전사는 계속 동작합니다. (\(error.localizedDescription))"
+                issueMessage = "Translation failed — English transcription continues. (\(error.localizedDescription))"
             }
         }
     }

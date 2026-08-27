@@ -16,7 +16,13 @@ import Tokenizers
 /// 이후에는 디스크 캐시에서 로드합니다 (수 초).
 actor SummaryService {
 
-    static let modelID = "mlx-community/Qwen3.5-4B-4bit"
+    static let defaultModelID = "mlx-community/Qwen3.5-4B-4bit"
+
+    /// 로컬 LLM 모델 ID — Settings에서 선택 (4B 기본 / 9B 품질 우선).
+    /// 요약과 로컬 채팅이 공유.
+    static var modelID: String {
+        UserDefaults.standard.string(forKey: "localModelID") ?? defaultModelID
+    }
 
     /// 전사본(영어, 화자 라벨 포함)을 받아 한국어 회의 요약을 생성.
     func generateSummary(transcript: String) async throws -> String {

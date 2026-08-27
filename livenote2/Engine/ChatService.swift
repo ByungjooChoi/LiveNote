@@ -18,10 +18,10 @@ enum ChatPrompt {
     static func composed(context: String, history: [(isUser: Bool, text: String)], question: String) -> String {
         var lines: [String] = ["--- 회의 기록 ---", context, "--- 기록 끝 ---", ""]
         for turn in history {
-            lines.append("\(turn.isUser ? "사용자" : "비서"): \(turn.text)")
+            lines.append("\(turn.isUser ? "User" : "Assistant"): \(turn.text)")
         }
-        lines.append("사용자: \(question)")
-        lines.append("비서:")
+        lines.append("User: \(question)")
+        lines.append("Assistant:")
         return lines.joined(separator: "\n")
     }
 }
@@ -31,17 +31,21 @@ enum ChatPrompt {
 actor LocalChatEngine {
 
     private var container: ModelContainer?
+    private var loadedModelID: String?
 
     func respond(context: String, history: [(isUser: Bool, text: String)], question: String) async throws -> String {
-        if container == nil {
-            AppLog.write("chat", "로컬 Qwen 로드 시작")
+        let modelID = SummaryService.modelID
+        if container == nil || loadedModelID != modelID {
+            AppLog.write("chat", "로컬 모델 로드 시작 (\(modelID))")
             let loadStart = Date()
-            let configuration = ModelConfiguration(id: SummaryService.modelID)
+            container = nil   // 모델 교체 시 기존 컨테이너 해제
+            let configuration = ModelConfiguration(id: modelID)
             container = try await #huggingFaceLoadModelContainer(configuration: configuration)
-            AppLog.write("chat", "로컬 Qwen 로드 완료 \(String(format: "%.1f", Date().timeIntervalSince(loadStart)))s")
+            loadedModelID = modelID
+            AppLog.write("chat", "로컬 모델 로드 완료 \(String(format: "%.1f", Date().timeIntervalSince(loadStart)))s")
         }
         guard let container else { throw NSError(domain: "livenote2.chat", code: 2,
-            userInfo: [NSLocalizedDescriptionKey: "로컬 모델 로드 실패"]) }
+            userInfo: [NSLocalizedDescriptionKey: "Local model load failed"]) }
         let started = Date()
         let session = ChatSession(container, instructions: ChatPrompt.system)
         let answer = try await session.respond(

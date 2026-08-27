@@ -32,7 +32,9 @@ final class ZoomSpeakerTagger {
     private(set) var permissionMissing = false
     /// 내 Zoom 뮤트 상태 변화 콜백 (AppState가 마이크 동기화 배선)
     var onSelfMuteChange: ((Bool) -> Void)?
-    /// Zoom 회의 종료 감지 콜백 (회의 창·타일이 12초간 사라지면 1회 호출 — 즉시 저장·요약용)
+    /// Zoom 회의 종료 감지 콜백 (회의 창·타일이 5초간 사라지면 1회 호출 — 즉시 저장·요약용).
+    /// 즉시(1초)로 안 하는 이유: 창 전환·레이아웃 재구성 순간 AX 트리에서 잠깐 사라질 수 있어
+    /// 진행 중 회의를 오탐으로 끊는 것을 방지하는 최소 버퍼. 실제 종료 체감은 5~6초.
     var onMeetingEnded: (() -> Void)?
 
     /// 종료 감지 상태
@@ -146,9 +148,9 @@ final class ZoomSpeakerTagger {
             endedFired = false
         } else if meetingWasPresent, !endedFired {
             absentStreak += 1
-            if absentStreak >= 12 {
+            if absentStreak >= 5 {
                 endedFired = true
-                AppLog.write("zoomtag", "회의 종료 감지 (창·타일 12초 부재)")
+                AppLog.write("zoomtag", "회의 종료 감지 (창·타일 5초 부재)")
                 onMeetingEnded?()
             }
         }
