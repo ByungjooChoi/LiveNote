@@ -43,17 +43,51 @@ enum ProcessingBackend: String, Sendable {
     case cloud
 }
 
-/// AI 채팅 모델 선택 (상단 백엔드와 독립).
+/// AI 채팅 모델 선택 (번역 백엔드와 독립, Granola식 Standard/Thinking 구분).
+/// 전체 채팅·회의 중 채팅이 하나의 선택을 공유하고 영속됨.
 enum ChatModelChoice: String, Sendable, CaseIterable {
-    case cloudGemini
+    case gemini37Flash            // 기본
+    case gemini35FlashLite
+    case gemini37FlashThinkingHigh
+    case gemini37FlashThinkingMedium
+    case gemini31Pro
     case localQwen
 
     var displayName: String {
         switch self {
-        case .cloudGemini: return "Gemini 3.7 Flash"
+        case .gemini37Flash: return "Gemini 3.7 Flash"
+        case .gemini35FlashLite: return "Gemini 3.5 Flash-Lite"
+        case .gemini37FlashThinkingHigh: return "3.7 Flash Thinking (high)"
+        case .gemini37FlashThinkingMedium: return "3.7 Flash Thinking (medium)"
+        case .gemini31Pro: return "Gemini 3.1 Pro"
         case .localQwen: return "Qwen (local)"
         }
     }
+
+    /// generateContent 모델 ID (로컬이면 nil)
+    var apiModel: String? {
+        switch self {
+        case .gemini37Flash, .gemini37FlashThinkingHigh, .gemini37FlashThinkingMedium:
+            return "gemini-3.7-flash"
+        case .gemini35FlashLite: return "gemini-3.5-flash-lite"
+        case .gemini31Pro: return "gemini-3.1-pro"
+        case .localQwen: return nil
+        }
+    }
+
+    /// generationConfig.thinkingConfig.thinkingLevel (해당 시)
+    var thinkingLevel: String? {
+        switch self {
+        case .gemini37FlashThinkingHigh: return "high"
+        case .gemini37FlashThinkingMedium: return "medium"
+        default: return nil
+        }
+    }
+
+    static let standardChoices: [ChatModelChoice] = [.gemini37Flash, .gemini35FlashLite]
+    static let thinkingChoices: [ChatModelChoice] = [
+        .gemini37FlashThinkingHigh, .gemini37FlashThinkingMedium, .gemini31Pro,
+    ]
 }
 
 /// AI 채팅 말풍선.

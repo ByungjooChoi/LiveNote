@@ -71,10 +71,12 @@ enum GeminiChat {
         context: String,
         history: [(isUser: Bool, text: String)],
         question: String,
-        apiKey: String
+        apiKey: String,
+        model: String = GeminiSummarizer.model,
+        thinkingLevel: String? = nil
     ) async throws -> String {
         guard let url = URL(string:
-            "https://generativelanguage.googleapis.com/v1beta/models/\(GeminiSummarizer.model):generateContent"
+            "https://generativelanguage.googleapis.com/v1beta/models/\(model):generateContent"
         ) else { throw Self.error("잘못된 URL") }
 
         var contents: [[String: Any]] = [[
@@ -97,12 +99,16 @@ enum GeminiChat {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
         request.timeoutInterval = 150
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "systemInstruction": ["parts": [["text": ChatPrompt.system]]],
             "contents": contents,
         ]
+        // Gemini 3.x thinking 제어 (thinkingLevel: high/medium — thinkingBudget은 레거시)
+        if let thinkingLevel {
+            body["generationConfig"] = ["thinkingConfig": ["thinkingLevel": thinkingLevel]]
+        }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        AppLog.write("chat", "Gemini 요청 ctx=\(context.count)자 hist=\(history.count)턴 body=\(request.httpBody?.count ?? 0)B")
+        AppLog.write("chat", "Gemini 요청 model=\(model) thinking=\(thinkingLevel ?? "-") ctx=\(context.count)자 hist=\(history.count)턴 body=\(request.httpBody?.count ?? 0)B")
 
         let data = try await GeminiREST.send(request, logCategory: "chat")
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],

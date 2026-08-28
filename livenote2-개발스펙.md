@@ -220,6 +220,8 @@
 
 **이원화 (2026-08-21)**: 클라우드 번역 모드 + API 키 보유 시 요약은 **Gemini 3.7 Flash**(`gemini-3.7-flash`, 2026-08-13 GA, generateContent REST, 프롬프트는 Qwen과 공유)로 실행 — 모델 로드 없이 수 초, 품질 우위, 비용 회의당 수 센트 미만. 실패 시 로컬 Qwen 자동 폴백 (`AppState.runSummary`). 로컬/끔 모드에서는 기존 Qwen 경로.
 
+**로컬 모델 선택 (Settings, UserDefaults `localModelID`, 2026-08-28 확장)**: Qwen3.5 4B(기본)·9B, Qwen3.8 4B·9B(experimental — `SiddhJagani/Qwen3.8-{4B,9B}-mlx-4Bit`). Qwen3.8은 공식 mlx-community 변환이 아직 없어 커뮤니티 변환본 사용, config의 `model_type: "qwen3_5"`라 mlx-swift-lm 레지스트리(qwen3_5)로 로드 가능함을 확인 (2026-08-28). 품질 미검증이라 experimental 표기.
+
 온디맨드 원칙(로컬 경로): 모델을 상주시키지 않고 요청 시 로드 → 생성 → 참조 해제(메모리 반환). 로드: `#huggingFaceLoadModelContainer(configuration: ModelConfiguration(id:))` (§7.6) → `ChatSession(container, instructions: 시스템프롬프트)` → `respond(to:)`. 입력: `MeetingStore.transcriptForSummary` = `[mm:ss] 화자: 영어원문` 행들, suffix 60,000자 컷. 프롬프트: 한국어 시스템 프롬프트(ASR 오류 보정 지시 + 사고 과정 출력 금지 + 첫 줄 "## 개요" 강제 포함) + 출력 형식 지정(개요/핵심 논의/결정 사항/액션 아이템). **thinking 억제 (2026-08-06 개정)**: `/no_think` 소프트 스위치는 Qwen3 전용이라 Qwen3.5에서 무시됨(실측: 평문 "Thinking Process:" 누출) → 제거함. 후처리 `cleaned()`: ① `<think>...</think>` 블록 제거, ② 줄 시작이 "## 개요"인 첫 줄 앞을 전부 절단(태그 없는 평문 사고 제거; 정상 출력이면 no-op). 결과는 현재 세션이면 재저장, 저장 회의면 `updateSummary` → session.json + summary.md 갱신.
 
 ### 5.6 자동 시작/종료
@@ -237,7 +239,7 @@
 
 라이브/저장 회의 뷰 하단에 상주하는 질의응답 패널. **범위 자동 전환**: 저장 회의를 열면 그 회의의 전사+요약, 라이브 뷰에서 회의 중(또는 직후)이면 현재 세션의 실시간 전사("회의가 지금 진행 중" 힌트 포함 — 회의 중 캐치업 질문 가능), 둘 다 아니면 전체 아카이브(최근 15개 회의의 요약 또는 전사 앞부분, 총 60K자 상한). 범위 키가 바뀌면 대화 초기화.
 
-**모델은 상단 백엔드와 독립 선택** (패널 내 메뉴, UserDefaults `chatModel`): `Gemini 3.7 Flash`(generateContent 멀티턴 contents, 컨텍스트는 첫 user 턴으로 주입) / `Qwen3.5 4B (로컬)`. 로컬은 `LocalChatEngine` actor가 첫 질문 때 컨테이너를 로드 후 **상주** (요약과 달리 연속 사용이 잦아 온디맨드 해제 안 함 — 메모리 +2.3GB, 문서화된 예외). 이력은 최근 8턴을 프롬프트에 포함. 시스템 프롬프트: 기록 근거 답변, 없는 내용 추측 금지, 질문 언어 추종.
+**모델은 번역 백엔드와 독립 선택** (`ChatModelMenu`, UserDefaults `chatModel`, 홈 히어로·채팅 패널 공용, 전 범위 전역 유지 — 2026-08-28 v1.1.2 확장): Standard = `Gemini 3.7 Flash`(기본)·`3.5 Flash-Lite`, Thinking = `3.7 Flash Thinking high/medium`·`3.1 Pro`, Local = `Qwen`. Thinking 레벨은 `generationConfig.thinkingConfig.thinkingLevel`("high"/"medium")로 전달 (thinkingBudget은 레거시, 병행 금지). Gemini 경로는 generateContent 멀티턴 contents, 컨텍스트는 첫 user 턴으로 주입. 로컬은 `LocalChatEngine` actor가 첫 질문 때 컨테이너를 로드 후 **상주** (요약과 달리 연속 사용이 잦아 온디맨드 해제 안 함, 메모리 +2.3GB, 문서화된 예외). 이력은 최근 8턴을 프롬프트에 포함. 시스템 프롬프트: 기록 근거 답변, 없는 내용 추측 금지, 질문 언어 추종. 구 rawValue(`cloudGemini`)는 디코드 실패 시 기본값으로 자동 폴백.
 
 ### 5.8 캘린더 회의 임박 알림 (CalendarMonitor + MeetingAlertPanel, 2026-08-06 추가)
 
@@ -249,7 +251,7 @@
 - **참가 동작**: 딥링크(또는 웹 링크) open + `onJoinRequested` 콜백 → AppState가 기록 시작(`isActive`가 아니면 start()). 설정: 메뉴바 토글 "회의 1분 전 Zoom 참가 알림", UserDefaults `calendarAlerts`, **기본 켜짐**. 최초 활성 시 캘린더 권한 프롬프트, 거부 시 주황 배너 안내.
 - **Zoom 회의 종료 즉시 감지 (2026-08-27 추가, Granola식)**: ZoomSpeakerTagger가 회의 창(제목 "Zoom 회의"/"Zoom Meeting")·타일의 존재를 추적, 존재했다가 **12초 연속 부재**면 `onMeetingEnded` 1회 발화 → 기록 중이면 즉시 자동 중지·저장·요약 (4분 무음 대기 불필요). 화면 공유로 타일이 일시 감소해도 회의 창 제목이 남아 있어 오탐 방지.
 
-**UI 구조 (2026-08-27 전면 개편, Granola식)**: NavigationSplitView 폐기 → 좌측 고정 레일(180px, 먹남 그라데이션: 홈/채팅/라이브) + 메인 콘텐츠 전환(`Screen` enum). **홈** = Coming up 카드(오늘 일정+지금 시작+새 회의 시작) + 날짜별 회의 카드 피드. **회의 상세** = 요약(회의록) 중심 + 경량 마크다운 렌더러(`SummaryRenderView`: #/##/불릿/인라인 굵게) + "전사 보기" 토글(기본 접힘) + 하단 채팅(.saved). **채팅** = 전체 화면 아카이브 채팅(ChatPanel expanded). 테마 `Theme`: 한지 캔버스·쪽빛 액센트·주홍 포인트 (앱 아이콘과 동일 계열), 라이트 고정(`preferredColorScheme(.light)`).
+**UI 구조 (2026-08-27 전면 개편, Granola식)**: NavigationSplitView 폐기 → 좌측 고정 레일(180px, 먹남 그라데이션: 홈/채팅/라이브) + 메인 콘텐츠 전환(`Screen` enum). **홈 (2026-08-28 v1.1.2 재배치)** = 중앙 히어로 "Hi {myName}, ask anything" + ask 박스(제출 → Chat 화면 전환 + 아카이브 범위 질문, `ChatModelMenu` 칩 포함) → Coming up 카드(오늘 일정+지금 시작+새 회의 시작) → Recents **최근 3건** + "See all" 토글(전체 날짜 섹션 피드 확장). **회의 상세** = 요약(회의록) 중심 + 경량 마크다운 렌더러(`SummaryRenderView`: #/##/불릿/인라인 굵게) + "전사 보기" 토글(기본 접힘) + 하단 채팅(.saved). **채팅** = 전체 화면 아카이브 채팅(ChatPanel expanded). 테마 `Theme`: 한지 캔버스·쪽빛 액센트·주홍 포인트 (앱 아이콘과 동일 계열), 라이트 고정(`preferredColorScheme(.light)`).
 - **참석자 이름 후보 (2026-08-21 추가)**: `attendeeNamesForOngoingMeeting()` — 진행 중(시작 10분 전~종료)인 일정의 참석자(사람만, 본인 제외, 최대 10명)를 start() 시점에 `AppState.attendeeCandidates`로 캡처. 화자 칩 rename 팝오버(.them 전용)에 원클릭 후보로 표시. 이름이 이메일이면 로컬 파트를 사람 이름처럼 정리(`prettyName`).
 - **참석자 이름 교정 (2026-08-21 추가, Granola 어휘 힌트의 후처리판)**: 확정 텍스트의 대문자 시작 5자 이상 토큰을 참석자 이름 토큰(4자 이상, 내 이름 포함)과 대조해 편집거리 ≤ 2 & 길이차 ≤ 2면 교체 (Herminder→Harvinder류). Granola 대비 열세였던 고유명사 정확도 격차 대응 (WD 회의 실측 비교에서 도입 결정). 디코더 수준 어휘 부스팅(FluidAudio CustomVocabulary, SlidingWindowAsrManager 전환 필요)은 백로그.
 - **이중 시작 가드**: 참가로 start()한 직후 Zoom 실행 감지 자동 시작이 겹칠 수 있어 start() 가드를 `!isRunning`(listening만 차단)에서 `!isActive`(preparing 포함 차단)로 강화. 기존에도 있던 잠재 레이스의 수정임.

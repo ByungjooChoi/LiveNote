@@ -98,8 +98,8 @@ final class AppState {
 
     var chatMessages: [ChatMessage] = []
     var chatBusy = false
-    /// 채팅 모델 (상단 백엔드와 독립, 영속)
-    private(set) var chatModel: ChatModelChoice = .cloudGemini
+    /// 채팅 모델 (번역 백엔드와 독립, 전 범위 공유·영속). 기본 3.7 Flash (thinking 없음).
+    private(set) var chatModel: ChatModelChoice = .gemini37Flash
     @ObservationIgnored private var chatScopeKey: String?
     @ObservationIgnored private let localChat = LocalChatEngine()
 
@@ -131,15 +131,15 @@ final class AppState {
         Task { [weak self] in
             var answer: String
             do {
-                switch model {
-                case .cloudGemini:
+                if let apiModel = model.apiModel {
                     guard let key = GeminiKeychain.load() else {
                         throw NSError(domain: "livenote2.chat", code: 1, userInfo: [
                             NSLocalizedDescriptionKey: "No Gemini API key. Select the Cloud backend once in Settings to register a key."])
                     }
                     answer = try await GeminiChat.respond(
-                        context: context, history: Array(history), question: trimmed, apiKey: key)
-                case .localQwen:
+                        context: context, history: Array(history), question: trimmed,
+                        apiKey: key, model: apiModel, thinkingLevel: model.thinkingLevel)
+                } else {
                     answer = try await localRef.respond(
                         context: context, history: Array(history), question: trimmed)
                 }

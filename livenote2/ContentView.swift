@@ -165,11 +165,13 @@ struct SidebarRail: View {
     }
 }
 
-// MARK: - 홈 (Coming up + 회의 피드)
+// MARK: - 홈 (Granola식: 중앙 ask 박스 + Coming up + Recents 3건)
 
 struct HomeView: View {
     @Environment(AppState.self) private var app
     @Binding var screen: ContentView.Screen
+    @State private var ask = ""
+    @State private var showAllMeetings = false
 
     private static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -187,19 +189,73 @@ struct HomeView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
-                Text("Coming up")
-                    .font(.system(size: 27, weight: .semibold, design: .serif))
-                comingUpCard
+                heroSection
 
-                Text("Meetings")
+                Text("Coming up")
                     .font(.title3.weight(.semibold))
                     .padding(.top, 6)
+                comingUpCard
+
+                HStack {
+                    Text("Recents")
+                        .font(.title3.weight(.semibold))
+                    Spacer()
+                    if app.meetingStore.meetings.count > 3 {
+                        Button(showAllMeetings ? "Show less" : "See all") {
+                            withAnimation(.easeInOut(duration: 0.15)) { showAllMeetings.toggle() }
+                        }
+                        .buttonStyle(.plain)
+                        .font(.callout)
+                        .foregroundStyle(Theme.accent)
+                    }
+                }
+                .padding(.top, 6)
                 meetingFeed
             }
             .padding(28)
             .frame(maxWidth: 780, alignment: .leading)
             .frame(maxWidth: .infinity)
         }
+    }
+
+    // MARK: 중앙 ask 히어로 (질문 제출 → Chat 화면으로 이동, 전체 회의 범위)
+
+    private var heroSection: some View {
+        VStack(spacing: 16) {
+            Text("Hi \(app.myName), ask anything")
+                .font(.system(size: 30, weight: .semibold, design: .serif))
+                .foregroundStyle(.primary)
+            HStack(spacing: 8) {
+                Image(systemName: "sparkles")
+                    .foregroundStyle(Theme.accent)
+                TextField("Ask across all your meetings…", text: $ask)
+                    .textFieldStyle(.plain)
+                    .font(.body)
+                    .onSubmit(submitAsk)
+                ChatModelMenu()
+                Button("Ask", action: submitAsk)
+                    .buttonStyle(.borderedProminent)
+                    .tint(Theme.accent)
+                    .controlSize(.small)
+                    .disabled(ask.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
+            .themedCard()
+            .frame(maxWidth: 560)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 30)
+        .padding(.bottom, 6)
+    }
+
+    private func submitAsk() {
+        let question = ask.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !question.isEmpty else { return }
+        ask = ""
+        app.ensureChatScope(.archive)
+        screen = .chat
+        app.askChat(question, scope: .archive)
     }
 
     // MARK: Coming up 카드
@@ -309,6 +365,7 @@ struct HomeView: View {
         }
     }
 
+    /// 최근 3건 (See all이면 전체 날짜 섹션 피드).
     @ViewBuilder
     private var meetingFeed: some View {
         if app.meetingStore.meetings.isEmpty {
@@ -316,13 +373,23 @@ struct HomeView: View {
                 .font(.callout)
                 .foregroundStyle(.tertiary)
                 .padding(.vertical, 20)
-        }
-        ForEach(daySections) { section in
+        } else if showAllMeetings {
+            ForEach(daySections) { section in
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(section.label)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    ForEach(section.meetings) { meeting in
+                        meetingCard(meeting)
+                    }
+                }
+            }
+        } else {
+            let recent = app.meetingStore.meetings
+                .sorted { $0.startedAt > $1.startedAt }
+                .prefix(3)
             VStack(alignment: .leading, spacing: 8) {
-                Text(section.label)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                ForEach(section.meetings) { meeting in
+                ForEach(Array(recent)) { meeting in
                     meetingCard(meeting)
                 }
             }
@@ -1007,6 +1074,44 @@ struct SummaryCard: View {
     }
 }
 
+// MARK: - AI 채팅 모델 메뉴 (홈·채팅 패널 공용, 선택은 전역 영속)
+
+struct ChatModelMenu: View {
+    @Environment(AppState.self) private var app
+
+    var body: some View {
+        Menu {
+            Section("Standard") {
+                ForEach(ChatModelChoice.standardChoices, id: \.self) { modelButton($0) }
+            }
+            Section("Thinking") {
+                ForEach(ChatModelChoice.thinkingChoices, id: \.self) { modelButton($0) }
+            }
+            Section("Local") {
+                modelButton(.localQwen)
+            }
+        } label: {
+            Text(app.chatModel.displayName)
+                .font(.caption)
+        }
+        .fixedSize()
+        .controlSize(.small)
+    }
+
+    @ViewBuilder
+    private func modelButton(_ choice: ChatModelChoice) -> some View {
+        Button {
+            app.setChatModel(choice)
+        } label: {
+            if choice == app.chatModel {
+                Label(choice.displayName, systemImage: "checkmark")
+            } else {
+                Text(choice.displayName)
+            }
+        }
+    }
+}
+
 // MARK: - AI 채팅 패널
 
 struct ChatPanel: View {
@@ -1064,24 +1169,7 @@ struct ChatPanel: View {
                     .controlSize(.large)
                     .onSubmit(send)
                     .disabled(app.chatBusy)
-                Menu {
-                    ForEach(ChatModelChoice.allCases, id: \.self) { choice in
-                        Button {
-                            app.setChatModel(choice)
-                        } label: {
-                            if choice == app.chatModel {
-                                Label(choice.displayName, systemImage: "checkmark")
-                            } else {
-                                Text(choice.displayName)
-                            }
-                        }
-                    }
-                } label: {
-                    Text(app.chatModel.displayName)
-                        .font(.caption)
-                }
-                .fixedSize()
-                .controlSize(.small)
+                ChatModelMenu()
                 if app.chatBusy {
                     ProgressView()
                         .controlSize(.small)
@@ -1261,10 +1349,12 @@ struct SettingsView: View {
                     )) {
                         Text("Qwen3.5 4B — 2.3 GB, fast").tag(SummaryService.defaultModelID)
                         Text("Qwen3.5 9B — 5.2 GB, higher quality").tag("mlx-community/Qwen3.5-9B-MLX-4bit")
+                        Text("Qwen3.8 4B — 2.3 GB, experimental").tag("SiddhJagani/Qwen3.8-4B-mlx-4Bit")
+                        Text("Qwen3.8 9B — 5.2 GB, experimental").tag("SiddhJagani/Qwen3.8-9B-mlx-4Bit")
                     }
                     .pickerStyle(.radioGroup)
                     .labelsHidden()
-                    Text("Used for minutes and local chat. A newly selected model downloads on first use.")
+                    Text("Used for minutes and local chat. A newly selected model downloads on first use. Qwen3.8 builds are community MLX conversions; quality is unverified.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -1295,7 +1385,7 @@ struct SettingsView: View {
                 }
 
                 settingsCard("Internal jargon") {
-                    TextField("Elastic, ECK, Pangobooks, ERU…", text: $jargonDraft, axis: .vertical)
+                    TextField("ECK, ECH, SA, Elastic, ECU", text: $jargonDraft, axis: .vertical)
                         .textFieldStyle(.roundedBorder)
                         .lineLimit(2...5)
                         .onSubmit { app.setInternalJargon(jargonDraft) }
