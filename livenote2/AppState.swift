@@ -43,8 +43,15 @@ final class AppState {
     /// 세션 시작 시 항상 해제 상태로 리셋 (지난 회의의 뮤트를 잊는 사고 방지).
     private(set) var micMuted = false
 
-    /// 화자 이름. 세션이 바뀌어도 유지됩니다.
-    var myName = "Philip"
+    /// 화자 이름 (전사 라벨·홈 인사말·Zoom 자기 타일 매칭 공용). 세션이 바뀌어도 유지됩니다.
+    /// 기본값은 macOS 계정 이름 자동 인식, Settings에서 덮어쓰기 가능.
+    var myName = AppState.detectedAccountName()
+
+    /// macOS 계정 전체 이름 (예: "Byung joo Choi"). 비어 있으면 "Me".
+    static func detectedAccountName() -> String {
+        let full = NSFullUserName().trimmingCharacters(in: .whitespaces)
+        return full.isEmpty ? "Me" : full
+    }
     var speakerNames: [Int: String] = [:]
     /// 현재 회의의 캘린더 참석자 이름 후보 (화자 rename 원클릭용, 시작 시점에 조회)
     private(set) var attendeeCandidates: [String] = []

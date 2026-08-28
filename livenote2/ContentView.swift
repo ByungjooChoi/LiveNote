@@ -222,7 +222,7 @@ struct HomeView: View {
 
     private var heroSection: some View {
         VStack(spacing: 16) {
-            Text("Hi \(app.myName), ask anything")
+            Text(greeting)
                 .font(.system(size: 30, weight: .semibold, design: .serif))
                 .foregroundStyle(.primary)
             HStack(spacing: 8) {
@@ -247,6 +247,13 @@ struct HomeView: View {
         .frame(maxWidth: .infinity)
         .padding(.top, 30)
         .padding(.bottom, 6)
+    }
+
+    /// 이름 첫 단어로 인사. 계정 이름 인식 실패("Me") 시 인사 생략.
+    private var greeting: String {
+        let first = app.myName.split(separator: " ").first.map(String.init) ?? ""
+        if first.isEmpty || first == "Me" { return "Ask anything" }
+        return "Hi \(first), ask anything"
     }
 
     private func submitAsk() {
@@ -1315,6 +1322,7 @@ struct BannerView: View {
 struct SettingsView: View {
     @Environment(AppState.self) private var app
     @State private var jargonDraft = ""
+    @State private var nameDraft = ""
 
     var body: some View {
         ScrollView {
@@ -1373,6 +1381,21 @@ struct SettingsView: View {
                     ))
                 }
 
+                settingsCard("Profile") {
+                    TextField(AppState.detectedAccountName(), text: $nameDraft)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 260)
+                        .onSubmit { commitName() }
+                    Text("Detected from your macOS account. Used for the home greeting and your speaker label. Edit to override.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        Spacer()
+                        Button("Save") { commitName() }
+                            .controlSize(.small)
+                    }
+                }
+
                 settingsCard("Meetings") {
                     Toggle("Meeting alerts (1 min before)", isOn: Binding(
                         get: { app.calendar.isEnabled },
@@ -1403,7 +1426,16 @@ struct SettingsView: View {
             .frame(maxWidth: 640, alignment: .leading)
             .frame(maxWidth: .infinity)
         }
-        .onAppear { jargonDraft = app.internalJargon }
+        .onAppear {
+            jargonDraft = app.internalJargon
+            nameDraft = app.myName
+        }
+    }
+
+    private func commitName() {
+        let trimmed = nameDraft.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        app.renameMe(to: trimmed)
     }
 
     private func settingsCard(_ title: String, @ViewBuilder content: () -> some View) -> some View {
