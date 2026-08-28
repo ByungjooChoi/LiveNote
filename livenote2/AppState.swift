@@ -533,7 +533,8 @@ final class AppState {
                 zoomTagger.start(myName: myName)
             } else {
                 _ = ZoomSpeakerTagger.accessibilityTrusted(prompt: true)
-                zoomTagMessage = "Zoom speaker recognition needs Accessibility permission. Enable livenote2 in System Settings > Privacy & Security > Accessibility (applies from the next session)."
+                zoomTagMessage = "Zoom speaker recognition needs Accessibility permission. Enable livenote2 in System Settings > Privacy & Security > Accessibility."
+                watchForAccessibilityGrant()
             }
         }
 
@@ -678,6 +679,23 @@ final class AppState {
             captureStartedAt = Date()
             AppLog.write("app", "세션 시작 backend=\(backend.rawValue) 번역=\(translationEnabled) zoom태그=\(zoomTagger.zoomDetected) 다이어라이저=\(speakerDiarizer != nil) 제목=\(meetingTitle ?? "-")")
             phase = .listening
+        }
+    }
+
+    /// 녹음 중 손쉬운 사용 권한이 부여되면 즉시 Zoom 태거 시작 (재시작·다음 세션 대기 불필요).
+    /// ad-hoc 재설치 후 사용자가 권한을 다시 켜는 시나리오 대응. 5초 간격, 최대 20분 감시.
+    private func watchForAccessibilityGrant() {
+        Task { [weak self] in
+            for _ in 0..<240 {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                guard let self, self.isActive else { return }
+                guard ZoomSpeakerTagger.accessibilityTrusted(prompt: false) else { continue }
+                self.zoomTagger.start(myName: self.myName)
+                self.zoomTagMessage = nil
+                self.noticeMessage = "Accessibility granted — Zoom speaker names active."
+                AppLog.write("app", "손쉬운 사용 권한 사후 감지 → Zoom 태거 시작")
+                return
+            }
         }
     }
 
