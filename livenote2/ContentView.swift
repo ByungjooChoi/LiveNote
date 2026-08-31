@@ -1322,7 +1322,6 @@ struct BannerView: View {
 struct SettingsView: View {
     @Environment(AppState.self) private var app
     @State private var jargonDraft = ""
-    @State private var nameDraft = ""
 
     var body: some View {
         ScrollView {
@@ -1330,11 +1329,7 @@ struct SettingsView: View {
                 Text("Settings")
                     .font(.system(size: 27, weight: .semibold, design: .serif))
 
-                settingsCard("Translation") {
-                    Toggle("Show Korean translation", isOn: Binding(
-                        get: { app.translationEnabled },
-                        set: { app.setTranslationEnabled($0) }
-                    ))
+                settingsCard("General") {
                     Picker("Backend", selection: Binding(
                         get: { app.backend },
                         set: { app.setBackend($0) }
@@ -1348,9 +1343,11 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                     Button("Set Gemini API Key…") { app.showGeminiKeyPrompt = true }
                         .controlSize(.small)
-                }
 
-                settingsCard("Local model") {
+                    Divider().padding(.vertical, 4)
+
+                    Text("Local model")
+                        .font(.subheadline.weight(.semibold))
                     Picker("", selection: Binding(
                         get: { app.localModelID },
                         set: { app.setLocalModelID($0) }
@@ -1367,6 +1364,65 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
+                settingsCard("Language") {
+                    languageRow("Transcription language") {
+                        Picker("", selection: .constant("English")) {
+                            Text("English (best quality)").tag("English")
+                        }
+                        .fixedSize()
+                        .labelsHidden()
+                    }
+                    languageRow("Summary language") {
+                        Picker("", selection: Binding(
+                            get: { app.summaryLanguage },
+                            set: { app.setSummaryLanguage($0) }
+                        )) {
+                            ForEach(LanguagePrefs.summaryOptions, id: \.self) { Text($0).tag($0) }
+                        }
+                        .fixedSize()
+                        .labelsHidden()
+                    }
+
+                    Divider().padding(.vertical, 4)
+
+                    Toggle("Translate transcripts", isOn: Binding(
+                        get: { app.translationEnabled },
+                        set: { app.setTranslationEnabled($0) }
+                    ))
+                    if app.translationEnabled {
+                        languageRow("Translation language") {
+                            Picker("", selection: Binding(
+                                get: { app.translationLanguage },
+                                set: { app.setTranslationLanguage($0) }
+                            )) {
+                                ForEach(LanguagePrefs.translationOptions, id: \.self) { Text($0).tag($0) }
+                            }
+                            .fixedSize()
+                            .labelsHidden()
+                        }
+                    }
+                    Text("Translation is off when the app starts. Turn it on per meeting when you need it.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Divider().padding(.vertical, 4)
+
+                    Text("Internal jargon")
+                        .font(.subheadline.weight(.semibold))
+                    TextField("ECK, ECH, SA, Elastic, ECU", text: $jargonDraft, axis: .vertical)
+                        .textFieldStyle(.roundedBorder)
+                        .lineLimit(2...5)
+                        .onSubmit { app.setInternalJargon(jargonDraft) }
+                    Text("Comma separated words. Used to correct misheard names and terms in transcripts.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        Spacer()
+                        Button("Save") { app.setInternalJargon(jargonDraft) }
+                            .controlSize(.small)
+                    }
+                }
+
                 settingsCard("Audio") {
                     Toggle("Echo filter", isOn: Binding(
                         get: { app.echoFilterEnabled },
@@ -1381,21 +1437,6 @@ struct SettingsView: View {
                     ))
                 }
 
-                settingsCard("Profile") {
-                    TextField(AppState.detectedAccountName(), text: $nameDraft)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 260)
-                        .onSubmit { commitName() }
-                    Text("Detected from your macOS account. Used for the home greeting and your speaker label. Edit to override.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    HStack {
-                        Spacer()
-                        Button("Save") { commitName() }
-                            .controlSize(.small)
-                    }
-                }
-
                 settingsCard("Meetings") {
                     Toggle("Meeting alerts (1 min before)", isOn: Binding(
                         get: { app.calendar.isEnabled },
@@ -1407,20 +1448,6 @@ struct SettingsView: View {
                     ))
                 }
 
-                settingsCard("Internal jargon") {
-                    TextField("ECK, ECH, SA, Elastic, ECU", text: $jargonDraft, axis: .vertical)
-                        .textFieldStyle(.roundedBorder)
-                        .lineLimit(2...5)
-                        .onSubmit { app.setInternalJargon(jargonDraft) }
-                    Text("Comma separated words. Used to correct misheard names and terms in transcripts.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    HStack {
-                        Spacer()
-                        Button("Save") { app.setInternalJargon(jargonDraft) }
-                            .controlSize(.small)
-                    }
-                }
             }
             .padding(28)
             .frame(maxWidth: 640, alignment: .leading)
@@ -1428,14 +1455,16 @@ struct SettingsView: View {
         }
         .onAppear {
             jargonDraft = app.internalJargon
-            nameDraft = app.myName
         }
     }
 
-    private func commitName() {
-        let trimmed = nameDraft.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return }
-        app.renameMe(to: trimmed)
+    /// 라벨 왼쪽 + 컨트롤 오른쪽 정렬 행 (Granola식)
+    private func languageRow(_ label: String, @ViewBuilder control: () -> some View) -> some View {
+        HStack {
+            Text(label)
+            Spacer()
+            control()
+        }
     }
 
     private func settingsCard(_ title: String, @ViewBuilder content: () -> some View) -> some View {

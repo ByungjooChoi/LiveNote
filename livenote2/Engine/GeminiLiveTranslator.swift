@@ -165,7 +165,7 @@ actor GeminiLiveTranslator {
                 "generationConfig": [
                     "responseModalities": ["AUDIO"],
                     "translationConfig": [
-                        "targetLanguageCode": "ko",
+                        "targetLanguageCode": LanguagePrefs.translationCode,
                         // 입력이 이미 한국어면 침묵 (한국어 혼잣말이 다시 번역되어 나오는 것 방지)
                         "echoTargetLanguage": false,
                     ],

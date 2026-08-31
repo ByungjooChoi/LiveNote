@@ -18,10 +18,12 @@ final class TranslationCoordinator {
     var issueMessage: String?
 
     func activate() {
-        guard config == nil else { return }
+        let target = LanguagePrefs.translationCode
+        // 언어 설정이 바뀌었으면 세션 재구성
+        if let config, config.target == Locale.Language(identifier: target) { return }
         config = TranslationSession.Configuration(
             source: Locale.Language(identifier: "en"),
-            target: Locale.Language(identifier: "ko")
+            target: Locale.Language(identifier: target)
         )
     }
 

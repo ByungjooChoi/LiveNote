@@ -90,6 +90,26 @@ enum ChatModelChoice: String, Sendable, CaseIterable {
     ]
 }
 
+/// 언어 설정 (Settings > Language). UserDefaults 직접 읽기 — 엔진(actor)에서도 접근.
+enum LanguagePrefs {
+    static let translationOptions = ["Korean", "Japanese", "Chinese", "Spanish", "French", "German"]
+    static let summaryOptions = ["English", "Korean"]
+    private static let codes: [String: String] = [
+        "Korean": "ko", "Japanese": "ja", "Chinese": "zh",
+        "Spanish": "es", "French": "fr", "German": "de",
+    ]
+
+    static var translationLanguage: String {
+        UserDefaults.standard.string(forKey: "translationLanguage") ?? "Korean"
+    }
+    /// BCP-47 코드 (Apple Translation·Gemini translationConfig 공용)
+    static var translationCode: String { codes[translationLanguage] ?? "ko" }
+
+    static var summaryLanguage: String {
+        UserDefaults.standard.string(forKey: "summaryLanguage") ?? "English"
+    }
+}
+
 /// AI 채팅 말풍선.
 struct ChatMessage: Identifiable, Sendable {
     enum Role: Sendable { case user, assistant }

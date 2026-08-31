@@ -39,16 +39,23 @@ actor SummaryService {
 
     // MARK: - 프롬프트
 
-    static let systemPrompt = """
+    /// 요약 출력 언어 (Settings > Language > Summary language, 기본 English)
+    static var systemPrompt: String {
+        let korean = LanguagePrefs.summaryLanguage == "Korean"
+        let langRule = korean
+            ? "반드시 한국어로만 작성하세요 (고유명사와 기술 용어는 영문 유지)."
+            : "반드시 영어(English)로만 작성하세요."
+        return """
         당신은 숙련된 회의록(meeting minutes) 작성자입니다. 영어 회의 전사본을 받아
-        한국어 회의록을 작성합니다. 회의록은 대화의 중계가 아니라, 논의를 주제별로
+        \(korean ? "한국어" : "영어") 회의록을 작성합니다. 회의록은 대화의 중계가 아니라, 논의를 주제별로
         재구성해 결론과 근거를 압축한 문서입니다.
         전사본은 자동 음성인식 결과라 오타나 어색한 문장이 있으니 문맥으로 보정해서 이해하세요.
         고유명사(사람·제품·회사명)와 수치는 원문 그대로 보존하세요.
-        반드시 한국어로만 작성하세요 (고유명사와 기술 용어는 영문 유지).
+        \(langRule)
         사고 과정, 분석 과정, 계획(Thinking Process 등)을 절대 출력하지 마세요.
         응답의 첫 줄은 반드시 "# "(마크다운 H1)로 시작해야 합니다.
         """
+    }
 
     // 주의: /no_think 소프트 스위치는 Qwen3 전용이라 Qwen3.5에서는 무시됨 (2026-08 확인).
     // enable_thinking=false 템플릿 kwarg도 mlx-swift-lm에서 전달되지 않는 이슈(#154)가 있어
@@ -56,8 +63,9 @@ actor SummaryService {
     static func userPrompt(transcript: String) -> String {
         // 컨텍스트 안전 상한: 뒤쪽(최신) 우선으로 자름
         let capped = String(transcript.suffix(60_000))
+        let outputLang = LanguagePrefs.summaryLanguage == "Korean" ? "한국어" : "영어(English)"
         return """
-        다음 회의 전사본으로 "회의록(meeting minutes)"을 작성해 주세요.
+        다음 회의 전사본으로 "회의록(meeting minutes)"을 \(outputLang)로 작성해 주세요.
 
         회의록의 정의 (가장 중요):
         - 대화를 시간 순서로 따라가며 "~라고 말했다 / ~를 물었다 / ~라고 답했다"를 나열하는 것은 회의록이 아닙니다. 절대 금지.
@@ -69,7 +77,7 @@ actor SummaryService {
         - 각 섹션: 핵심 결론·사실을 불릿(-)으로, 근거·수치·세부는 들여쓴 하위 불릿으로.
         - 수치와 고유명사는 원문 보존 (예: "디스크 50% 절감", "9.6 GA").
         - 특정인의 입장이 중요할 때만 이름을 붙인다 (예: "- Steve: 전원 한 달간 실험 권고").
-        - 마지막 섹션은 "# Next Steps": "- **할 일** (담당자)" 형식.
+        - 마지막 섹션은 "# Next Steps": \(LanguagePrefs.summaryLanguage == "Korean" ? "\"- **할 일** (담당자)\"" : "\"- **Task** (owner)\"") 형식.
         - 인사말·잡담·진행 멘트 제외. 응답 첫 줄은 반드시 "# "로 시작.
 
         --- 전사본 시작 ---

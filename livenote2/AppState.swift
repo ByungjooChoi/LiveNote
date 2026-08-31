@@ -43,8 +43,8 @@ final class AppState {
     /// 세션 시작 시 항상 해제 상태로 리셋 (지난 회의의 뮤트를 잊는 사고 방지).
     private(set) var micMuted = false
 
-    /// 화자 이름 (전사 라벨·홈 인사말·Zoom 자기 타일 매칭 공용). 세션이 바뀌어도 유지됩니다.
-    /// 기본값은 macOS 계정 이름 자동 인식, Settings에서 덮어쓰기 가능.
+    /// 화자 이름 (전사 라벨·홈 인사말·Zoom 자기 타일 매칭 공용).
+    /// macOS 계정 이름 자동 인식 (설정 UI 없음 — 2026-08-30 Profile 카드 삭제).
     var myName = AppState.detectedAccountName()
 
     /// macOS 계정 전체 이름 (예: "Byung joo Choi"). 비어 있으면 "Me".
@@ -75,8 +75,13 @@ final class AppState {
     /// 클라우드 번역 (Gemini Live Translate) — 번역 모드가 .cloud일 때만 동작
     @ObservationIgnored let gemini = GeminiLiveTranslator()
 
-    /// 번역 사용 여부 (체크박스). 백엔드와 독립 — 꺼도 백엔드 선택은 요약·채팅에 계속 적용.
-    private(set) var translationEnabled = true
+    /// 번역 사용 여부. 백엔드와 독립 — 꺼도 백엔드 선택은 요약·채팅에 계속 적용.
+    /// 앱은 항상 번역 끔으로 시작 (영속 안 함). 켰을 때 대상 언어는 translationLanguage.
+    private(set) var translationEnabled = false
+    /// 번역 대상 언어 (기본 Korean, 영속)
+    private(set) var translationLanguage = LanguagePrefs.translationLanguage
+    /// 회의록 출력 언어 (기본 English, 영속)
+    private(set) var summaryLanguage = LanguagePrefs.summaryLanguage
     /// 처리 백엔드 (번역·요약 제공자). 로컬=Apple+Qwen, 클라우드=Gemini.
     private(set) var backend: ProcessingBackend = .local
     /// 클라우드 번역 문제 안내 배너 (nil이면 정상)
@@ -284,9 +289,7 @@ final class AppState {
 
     init() {
         let defaults = UserDefaults.standard
-        if let savedName = defaults.string(forKey: "myName"), !savedName.isEmpty {
-            myName = savedName
-        }
+        // myName은 macOS 계정 이름 자동 인식만 사용 (저장값 무시 — Profile 설정 삭제됨)
         if defaults.object(forKey: "echoFilter") != nil {
             echoFilterEnabled = defaults.bool(forKey: "echoFilter")
         }
@@ -294,12 +297,7 @@ final class AppState {
         if defaults.object(forKey: "syncMuteWithZoom") != nil {
             syncMuteWithZoom = defaults.bool(forKey: "syncMuteWithZoom")
         }
-        // 신규 키 우선, 없으면 구 translationMode(off/local/cloud)에서 이행
-        if defaults.object(forKey: "translationEnabled") != nil {
-            translationEnabled = defaults.bool(forKey: "translationEnabled")
-        } else if let legacy = defaults.string(forKey: "translationMode") {
-            translationEnabled = legacy != "off"
-        }
+        // 번역 토글은 영속하지 않음 — 앱은 항상 끔으로 시작 (2026-08-30 정책)
         if let savedBackend = defaults.string(forKey: "backend"),
            let value = ProcessingBackend(rawValue: savedBackend) {
             backend = value
@@ -458,10 +456,23 @@ final class AppState {
 
     func setTranslationEnabled(_ enabled: Bool) {
         translationEnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: "translationEnabled")
         cloudTranslationMessage = nil
         guard isRunning else { return }
         applyTranslationPipeline()
+    }
+
+    func setTranslationLanguage(_ language: String) {
+        translationLanguage = language
+        UserDefaults.standard.set(language, forKey: "translationLanguage")
+        // 로컬(Apple) 세션은 activate()가 언어 변경을 감지해 재구성.
+        // 클라우드는 다음 연결(시작/로테이션)부터 새 언어 적용.
+        guard isRunning, translationEnabled else { return }
+        applyTranslationPipeline()
+    }
+
+    func setSummaryLanguage(_ language: String) {
+        summaryLanguage = language
+        UserDefaults.standard.set(language, forKey: "summaryLanguage")
     }
 
     func setBackend(_ newBackend: ProcessingBackend) {
