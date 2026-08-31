@@ -112,6 +112,10 @@ final class AppState {
     var chatBusy = false
     /// 채팅 모델 (번역 백엔드와 독립, 전 범위 공유·영속). 기본 3.7 Flash (thinking 없음).
     private(set) var chatModel: ChatModelChoice = .gemini37Flash
+    /// 채팅 대화 저장소 (Chat 화면 Recents)
+    let chatStore = ChatStore()
+    /// 현재 진행 중인 대화의 저장 ID (첫 질문 때 발급)
+    @ObservationIgnored private var currentChatID: UUID?
     @ObservationIgnored private var chatScopeKey: String?
     @ObservationIgnored private let localChat = LocalChatEngine()
 
@@ -125,6 +129,39 @@ final class AppState {
         guard chatScopeKey != scope.key else { return }
         chatScopeKey = scope.key
         chatMessages = []
+        currentChatID = nil
+    }
+
+    /// 새 대화 시작 (Chat 화면 New chat)
+    func startNewChat() {
+        chatMessages = []
+        currentChatID = nil
+    }
+
+    /// 저장된 대화 열기 (Chat 화면 Recents)
+    func openChat(_ saved: SavedChat) {
+        chatScopeKey = ChatScope.archive.key
+        currentChatID = saved.id
+        chatMessages = saved.messages.map {
+            ChatMessage(role: $0.isUser ? .user : .assistant, text: $0.text)
+        }
+    }
+
+    /// 현재 대화를 디스크에 반영 (질문·답변 때마다 호출)
+    private func persistCurrentChat() {
+        guard !chatMessages.isEmpty else { return }
+        let id = currentChatID ?? UUID()
+        currentChatID = id
+        let firstQuestion = chatMessages.first(where: { $0.role == .user })?.text ?? "Chat"
+        let existing = chatStore.chats.first(where: { $0.id == id })
+        chatStore.upsert(SavedChat(
+            id: id,
+            title: String(firstQuestion.prefix(40)),
+            createdAt: existing?.createdAt ?? Date(),
+            updatedAt: Date(),
+            scopeKey: chatScopeKey ?? ChatScope.archive.key,
+            messages: chatMessages.map { .init(isUser: $0.role == .user, text: $0.text) }
+        ))
     }
 
     func askChat(_ question: String, scope: ChatScope) {
@@ -132,6 +169,7 @@ final class AppState {
         guard !trimmed.isEmpty, !chatBusy else { return }
         ensureChatScope(scope)
         chatMessages.append(ChatMessage(role: .user, text: trimmed))
+        persistCurrentChat()
         chatBusy = true
         AppLog.write("chat", "질문 scope=\(scope.key.prefix(40)) model=\(chatModel.rawValue) 질문=\(trimmed.count)자")
 
@@ -162,6 +200,7 @@ final class AppState {
                 guard let self else { return }
                 self.chatMessages.append(ChatMessage(role: .assistant, text: answer))
                 self.chatBusy = false
+                self.persistCurrentChat()
             }
         }
     }

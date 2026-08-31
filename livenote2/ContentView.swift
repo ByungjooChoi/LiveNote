@@ -165,13 +165,11 @@ struct SidebarRail: View {
     }
 }
 
-// MARK: - 홈 (Granola식: 중앙 ask 박스 + Coming up + Recents 3건)
+// MARK: - 홈 (Granola식: Coming up 상단 + 전체 회의 피드)
 
 struct HomeView: View {
     @Environment(AppState.self) private var app
     @Binding var screen: ContentView.Screen
-    @State private var ask = ""
-    @State private var showAllMeetings = false
 
     private static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -189,80 +187,19 @@ struct HomeView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
-                heroSection
-
                 Text("Coming up")
-                    .font(.title3.weight(.semibold))
-                    .padding(.top, 6)
+                    .font(.system(size: 27, weight: .semibold, design: .serif))
                 comingUpCard
 
-                HStack {
-                    Text("Recents")
-                        .font(.title3.weight(.semibold))
-                    Spacer()
-                    if app.meetingStore.meetings.count > 3 {
-                        Button(showAllMeetings ? "Show less" : "See all") {
-                            withAnimation(.easeInOut(duration: 0.15)) { showAllMeetings.toggle() }
-                        }
-                        .buttonStyle(.plain)
-                        .font(.callout)
-                        .foregroundStyle(Theme.accent)
-                    }
-                }
-                .padding(.top, 6)
+                Text("Meetings")
+                    .font(.title3.weight(.semibold))
+                    .padding(.top, 6)
                 meetingFeed
             }
             .padding(28)
             .frame(maxWidth: 780, alignment: .leading)
             .frame(maxWidth: .infinity)
         }
-    }
-
-    // MARK: 중앙 ask 히어로 (질문 제출 → Chat 화면으로 이동, 전체 회의 범위)
-
-    private var heroSection: some View {
-        VStack(spacing: 16) {
-            Text(greeting)
-                .font(.system(size: 30, weight: .semibold, design: .serif))
-                .foregroundStyle(.primary)
-            HStack(spacing: 8) {
-                Image(systemName: "sparkles")
-                    .foregroundStyle(Theme.accent)
-                TextField("Ask across all your meetings…", text: $ask)
-                    .textFieldStyle(.plain)
-                    .font(.body)
-                    .onSubmit(submitAsk)
-                ChatModelMenu()
-                Button("Ask", action: submitAsk)
-                    .buttonStyle(.borderedProminent)
-                    .tint(Theme.accent)
-                    .controlSize(.small)
-                    .disabled(ask.trimmingCharacters(in: .whitespaces).isEmpty)
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 11)
-            .themedCard()
-            .frame(maxWidth: 560)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 30)
-        .padding(.bottom, 6)
-    }
-
-    /// 이름 첫 단어로 인사. 계정 이름 인식 실패("Me") 시 인사 생략.
-    private var greeting: String {
-        let first = app.myName.split(separator: " ").first.map(String.init) ?? ""
-        if first.isEmpty || first == "Me" { return "Ask anything" }
-        return "Hi \(first), ask anything"
-    }
-
-    private func submitAsk() {
-        let question = ask.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !question.isEmpty else { return }
-        ask = ""
-        app.ensureChatScope(.archive)
-        screen = .chat
-        app.askChat(question, scope: .archive)
     }
 
     // MARK: Coming up 카드
@@ -372,7 +309,7 @@ struct HomeView: View {
         }
     }
 
-    /// 최근 3건 (See all이면 전체 날짜 섹션 피드).
+    /// 전체 회의 피드 (날짜 섹션별)
     @ViewBuilder
     private var meetingFeed: some View {
         if app.meetingStore.meetings.isEmpty {
@@ -380,23 +317,13 @@ struct HomeView: View {
                 .font(.callout)
                 .foregroundStyle(.tertiary)
                 .padding(.vertical, 20)
-        } else if showAllMeetings {
-            ForEach(daySections) { section in
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(section.label)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    ForEach(section.meetings) { meeting in
-                        meetingCard(meeting)
-                    }
-                }
-            }
-        } else {
-            let recent = app.meetingStore.meetings
-                .sorted { $0.startedAt > $1.startedAt }
-                .prefix(3)
+        }
+        ForEach(daySections) { section in
             VStack(alignment: .leading, spacing: 8) {
-                ForEach(Array(recent)) { meeting in
+                Text(section.label)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                ForEach(section.meetings) { meeting in
                     meetingCard(meeting)
                 }
             }
@@ -647,10 +574,139 @@ struct SummaryRenderView: View {
 // MARK: - 채팅 전용 화면 (레일의 "채팅" — 전체 아카이브 대상)
 
 struct ChatFullView: View {
+    @Environment(AppState.self) private var app
+    @State private var ask = ""
+    @State private var showAllChats = false
+
     var body: some View {
-        VStack(spacing: 0) {
-            ChatPanel(scope: .archive, expanded: true)
+        if app.chatMessages.isEmpty {
+            chatHome
+        } else {
+            VStack(spacing: 0) {
+                HStack {
+                    Button {
+                        app.startNewChat()
+                    } label: {
+                        Label("New chat", systemImage: "square.and.pencil")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Theme.accent)
+                    Spacer()
+                }
+                .padding(.horizontal, 28)
+                .padding(.top, 14)
+                .background(Theme.canvas)
+                ChatPanel(scope: .archive, expanded: true)
+            }
         }
+    }
+
+    // MARK: 채팅 홈 (Granola식: 중앙 위 히어로 + 최근 대화 목록)
+
+    private var chatHome: some View {
+        ScrollView {
+            VStack(spacing: 24) {
+                Text(greeting)
+                    .font(.system(size: 30, weight: .semibold, design: .serif))
+                    .padding(.top, 64)
+
+                HStack(spacing: 8) {
+                    Image(systemName: "sparkles")
+                        .foregroundStyle(Theme.accent)
+                    TextField("Ask across all your meetings…", text: $ask)
+                        .textFieldStyle(.plain)
+                        .font(.body)
+                        .onSubmit(submitAsk)
+                    ChatModelMenu()
+                    Button("Ask", action: submitAsk)
+                        .buttonStyle(.borderedProminent)
+                        .tint(Theme.accent)
+                        .controlSize(.small)
+                        .disabled(ask.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+                .themedCard()
+                .frame(maxWidth: 600)
+
+                recentChats
+                    .frame(maxWidth: 600)
+                    .padding(.top, 12)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 28)
+            .padding(.bottom, 28)
+        }
+        .background(Theme.canvas)
+    }
+
+    private var visibleChats: [SavedChat] {
+        showAllChats ? app.chatStore.chats : Array(app.chatStore.chats.prefix(3))
+    }
+
+    private var recentChats: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Recents")
+                    .font(.title3.weight(.semibold))
+                Spacer()
+                if app.chatStore.chats.count > 3 {
+                    Button(showAllChats ? "Show less" : "See all") {
+                        withAnimation(.easeInOut(duration: 0.15)) { showAllChats.toggle() }
+                    }
+                    .buttonStyle(.plain)
+                    .font(.callout)
+                    .foregroundStyle(Theme.accent)
+                }
+            }
+            if app.chatStore.chats.isEmpty {
+                Text("No conversations yet. Ask your first question above.")
+                    .font(.callout)
+                    .foregroundStyle(.tertiary)
+                    .padding(.vertical, 12)
+            }
+            ForEach(visibleChats) { chat in
+                Button {
+                    app.openChat(chat)
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "bubble.left")
+                            .foregroundStyle(Theme.accent.opacity(0.7))
+                        Text(chat.title)
+                            .font(.callout)
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                        Spacer()
+                        Text(chat.ageLabel)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .themedCard()
+                }
+                .buttonStyle(.plain)
+                .contextMenu {
+                    Button("Delete", role: .destructive) {
+                        app.chatStore.delete(chat)
+                    }
+                }
+            }
+        }
+    }
+
+    private var greeting: String {
+        let first = app.myName.split(separator: " ").first.map(String.init) ?? ""
+        if first.isEmpty || first == "Me" { return "Ask anything" }
+        return "Hi \(first), ask anything"
+    }
+
+    private func submitAsk() {
+        let question = ask.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !question.isEmpty else { return }
+        ask = ""
+        app.startNewChat()
+        app.askChat(question, scope: .archive)
     }
 }
 
