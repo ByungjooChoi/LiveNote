@@ -170,6 +170,7 @@ struct SidebarRail: View {
 struct HomeView: View {
     @Environment(AppState.self) private var app
     @Binding var screen: ContentView.Screen
+    @State private var ask = ""
 
     private static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -185,21 +186,59 @@ struct HomeView: View {
     }()
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                Text("Coming up")
-                    .font(.system(size: 27, weight: .semibold, design: .serif))
-                comingUpCard
+        ZStack(alignment: .bottom) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    Text("Coming up")
+                        .font(.system(size: 27, weight: .semibold, design: .serif))
+                    comingUpCard
 
-                Text("Meetings")
-                    .font(.title3.weight(.semibold))
-                    .padding(.top, 6)
-                meetingFeed
+                    Text("Meetings")
+                        .font(.title3.weight(.semibold))
+                        .padding(.top, 6)
+                    meetingFeed
+                }
+                .padding(28)
+                .padding(.bottom, 84)   // 하단 ask 바에 가리지 않도록
+                .frame(maxWidth: 780, alignment: .leading)
+                .frame(maxWidth: .infinity)
             }
-            .padding(28)
-            .frame(maxWidth: 780, alignment: .leading)
-            .frame(maxWidth: .infinity)
+            askBar
         }
+    }
+
+    // MARK: 하단 ask 바 — Chat 화면과 같은 대화 상태를 공유 (진입 경로만 다름)
+
+    private var askBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "sparkles")
+                .foregroundStyle(Theme.accent)
+            TextField("Ask across all your meetings…", text: $ask)
+                .textFieldStyle(.plain)
+                .font(.body)
+                .onSubmit(submitAsk)
+            ChatModelMenu()
+            Button("Ask", action: submitAsk)
+                .buttonStyle(.borderedProminent)
+                .tint(Theme.accent)
+                .controlSize(.small)
+                .disabled(ask.trimmingCharacters(in: .whitespaces).isEmpty)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .themedCard()
+        .frame(maxWidth: 600)
+        .shadow(color: .black.opacity(0.08), radius: 10, y: 3)
+        .padding(.bottom, 22)
+    }
+
+    private func submitAsk() {
+        let question = ask.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !question.isEmpty else { return }
+        ask = ""
+        app.startNewChat()
+        screen = .chat
+        app.askChat(question, scope: .archive)
     }
 
     // MARK: Coming up 카드
