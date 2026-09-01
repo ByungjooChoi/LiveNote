@@ -82,6 +82,11 @@ final class AppState {
     private(set) var translationLanguage = LanguagePrefs.translationLanguage
     /// 회의록 출력 언어 (기본 English, 영속)
     private(set) var summaryLanguage = LanguagePrefs.summaryLanguage
+    /// 전사 언어 모드 (English = Parakeet v2 / Multilingual = v3, 다음 세션부터 적용, 영속)
+    private(set) var transcriptionLanguage =
+        UserDefaults.standard.string(forKey: "transcriptionLanguage") ?? "English"
+    /// 세션 오디오 임시 기록 (2-pass 재디코딩용, stop 후 삭제)
+    @ObservationIgnored private var audioRecorder: SessionAudioRecorder?
     /// 처리 백엔드 (번역·요약 제공자). 로컬=Apple+Qwen, 클라우드=Gemini.
     private(set) var backend: ProcessingBackend = .local
     /// 클라우드 번역 문제 안내 배너 (nil이면 정상)
@@ -350,6 +355,7 @@ final class AppState {
         internalJargon = defaults.string(forKey: "internalJargon") ?? ""
         localModelID = defaults.string(forKey: "localModelID") ?? SummaryService.defaultModelID
         ModelSeeder.seedIfNeeded()
+        SessionAudioRecorder.purgeStale()   // 비정상 종료가 남긴 임시 오디오 청소
         registerMeetingAppLaunchObserver()
 
         // Zoom 뮤트 동기화: 내 Zoom 타일의 음소거 상태를 따라 마이크 캡처를 켜고 끔
@@ -514,6 +520,11 @@ final class AppState {
         UserDefaults.standard.set(language, forKey: "summaryLanguage")
     }
 
+    func setTranscriptionLanguage(_ language: String) {
+        transcriptionLanguage = language
+        UserDefaults.standard.set(language, forKey: "transcriptionLanguage")
+    }
+
     func setBackend(_ newBackend: ProcessingBackend) {
         // 클라우드 전환 시 API 키가 없으면 먼저 입력받음 (저장 후 재호출됨)
         if newBackend == .cloud, GeminiKeychain.load() == nil {
@@ -669,9 +680,15 @@ final class AppState {
                 self.audioContinuation = continuation
             }
             let geminiRef = gemini
+            // 2-pass 재디코딩용 세션 오디오 임시 기록 시작
+            let recorder = SessionAudioRecorder()
+            await recorder.start()
+            audioRecorder = recorder
+
             consumerTask = Task.detached(priority: .userInitiated) {
                 for await (channel, samples) in stream {
                     await newEngine.ingest(samples, channel: channel)
+                    await recorder.append(samples, channel: channel)
                     // 클라우드 번역 활성 시에만 실제 전송 (내부에서 no-op 판정)
                     await geminiRef.ingest(samples, channel: channel)
                 }
@@ -765,6 +782,8 @@ final class AppState {
         let engineRef = engine
         let diarizerRef = speakerDiarizer
         let geminiRef = gemini
+        let recorderRef = audioRecorder
+        audioRecorder = nil
         Task {
             await engineRef?.flushAll()
             await diarizerRef?.finish()
@@ -772,8 +791,29 @@ final class AppState {
             // 마지막 문장들의 번역이 도착할 시간을 준 뒤 저장
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             await geminiRef.stop()
-            persistCurrentSession()
-            // 자동 요약: 실제 회의 규모(15행 이상)면 저장 직후 자동 생성
+            persistCurrentSession()   // 1차 저장 (라이브 전사 — 즉시 열람 가능)
+
+            // 2-pass: 세션 전체 오디오를 전체 문맥으로 재디코딩해 저장본 교체.
+            // 라이브 화면·채팅은 이미 위 저장본으로 동작하므로 영향 없음.
+            if let recorderRef, let engineRef, rows.count >= 5 {
+                let files = await recorderRef.finish()
+                if !files.isEmpty {
+                    noticeMessage = "Refining transcript (full-context second pass)…"
+                    if let refinedRows = await TranscriptRefiner.refine(
+                        files: files, liveRows: rows, engine: engineRef) {
+                        rows = refinedRows
+                        persistCurrentSession()
+                        noticeMessage = "Transcript refined and saved."
+                    } else {
+                        noticeMessage = nil
+                    }
+                }
+                await recorderRef.deleteFiles()
+            } else {
+                await recorderRef?.deleteFiles()
+            }
+
+            // 자동 요약: 정제된 전사를 입력으로 사용 (품질 ↑)
             if rows.count >= 15, currentSummary == nil {
                 generateSummaryForCurrentSession()
             }

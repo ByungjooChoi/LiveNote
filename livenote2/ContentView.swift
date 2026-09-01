@@ -1422,12 +1422,19 @@ struct SettingsView: View {
 
                 settingsCard("Language") {
                     languageRow("Transcription language") {
-                        Picker("", selection: .constant("English")) {
-                            Text("English (best quality)").tag("English")
+                        Picker("", selection: Binding(
+                            get: { app.transcriptionLanguage },
+                            set: { app.setTranscriptionLanguage($0) }
+                        )) {
+                            Text("English").tag("English")
+                            Text("Multilingual").tag("Multilingual")
                         }
                         .fixedSize()
                         .labelsHidden()
                     }
+                    Text("English is most accurate for English meetings. Multilingual auto-detects 25 languages (downloads a separate model on first use). Applies to the next recording.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     languageRow("Summary language") {
                         Picker("", selection: Binding(
                             get: { app.summaryLanguage },

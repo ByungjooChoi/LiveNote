@@ -122,12 +122,30 @@ actor TranscriptionEngine {
 
     /// Parakeet v2 모델 다운로드(최초 1회) 및 로드.
     func prepare() async throws {
-        onStatus("Preparing Parakeet English model… first run downloads ~500MB.")
-        let models = try await AsrModels.downloadAndLoad(version: .v2)
+        // Transcription language 설정: English = Parakeet v2 (영어 최고 정확도),
+        // Multilingual = Parakeet v3 (25개 언어 자동 인식, 첫 사용 시 별도 다운로드)
+        let multilingual = UserDefaults.standard.string(forKey: "transcriptionLanguage") == "Multilingual"
+        onStatus(multilingual
+            ? "Preparing Parakeet multilingual model… first run downloads ~500MB."
+            : "Preparing Parakeet English model… first run downloads ~500MB.")
+        let models = try await AsrModels.downloadAndLoad(version: multilingual ? .v3 : .v2)
         let manager = AsrManager(config: .default)
         try await manager.loadModels(models)
         asrManager = manager
         onStatus("Models ready")
+    }
+
+    /// 2-pass 재디코딩: 세션 전체 WAV를 새 디코더 상태로 다시 읽는다.
+    /// 긴 파일은 FluidAudio가 디스크 기반 청크 처리로 병합 (메모리 일정).
+    func finalPass(url: URL) async -> ASRResult? {
+        guard let asrManager else { return nil }
+        do {
+            var decoderState = try TdtDecoderState()
+            return try await asrManager.transcribe(url, decoderState: &decoderState)
+        } catch {
+            AppLog.write("app", "2-pass 재디코딩 실패: \(error.localizedDescription)")
+            return nil
+        }
     }
 
     // MARK: - 오디오 유입
