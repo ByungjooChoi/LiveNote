@@ -366,6 +366,12 @@ final class AppState {
             self.stop()
         }
 
+        // 내 타일 학습용 마이크 상관: 뮤트 아님 + 직접 발화 수준의 레벨일 때만 투표
+        zoomTagger.micActive = { [weak self] in
+            guard let self else { return false }
+            return !self.micMuted && self.micLevel > 0.12
+        }
+
         zoomTagger.onSelfMuteChange = { [weak self] muted in
             guard let self, self.syncMuteWithZoom, self.isRunning else { return }
             guard muted != self.micMuted else { return }

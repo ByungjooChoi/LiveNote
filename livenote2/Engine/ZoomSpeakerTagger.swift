@@ -48,6 +48,15 @@ final class ZoomSpeakerTagger {
     private var lastSelfMuted: Bool?
     private var myNameHint = "Philip"
 
+    /// 내 타일 식별 (v1.2.2 재설계 — 이름 매칭 실패 회귀 대응)
+    /// 1순위: 마이크 상관 학습 — 내가 말할 때(마이크 레벨 높음) 활성으로 표시되는 타일을
+    ///        3회 이상, 타 후보의 2배 이상 득표하면 내 타일로 확정. Zoom 표시명과 무관하게 동작.
+    /// 2순위(부트스트랩): myName의 단어(4자 이상)가 타일 이름에 포함되면 즉시 확정.
+    private(set) var selfTileName: String?
+    private var selfVotes: [String: Int] = [:]
+    /// 마이크에 직접 발화가 실리는 중인지 (AppState가 micLevel 기반으로 배선)
+    var micActive: (() -> Bool)?
+
     // MARK: - 수명
 
     /// AX 권한 확인. prompt=true면 시스템 다이얼로그로 요청.
@@ -69,6 +78,8 @@ final class ZoomSpeakerTagger {
         segments = []
         currentActive = nil
         lastSelfMuted = nil
+        selfTileName = nil
+        selfVotes = [:]
         zoomDetected = false
         meetingWasPresent = false
         absentStreak = 0
@@ -110,6 +121,8 @@ final class ZoomSpeakerTagger {
         }
         var overlaps: [String: TimeInterval] = [:]
         for segment in all {
+            // 내 타일은 상대방 행 이름 후보에서 제외 (에코 유입 시 내 이름이 붙는 오염 방지)
+            if let selfTileName, segment.name == selfTileName { continue }
             let start = max(from, segment.start)
             let end = min(to, segment.end)
             if end > start {
@@ -119,6 +132,16 @@ final class ZoomSpeakerTagger {
         guard let best = overlaps.max(by: { $0.value < $1.value }) else { return nil }
         let minimum = max(0.5, (toSeconds - fromSeconds) * 0.15)
         return best.value >= minimum ? Self.shortName(best.key) : nil
+    }
+
+    /// 이름 부트스트랩: myName의 4자 이상 단어가 타일 표시명에 포함되면 매칭.
+    /// (예: myName "Byung joo Choi" ↔ Zoom "Philip Choi" → "Choi" 일치)
+    static func nameMatches(tile: String, hint: String) -> Bool {
+        if tile.localizedCaseInsensitiveContains(hint) { return true }
+        for part in hint.split(separator: " ") where part.count >= 4 {
+            if tile.localizedCaseInsensitiveContains(part) { return true }
+        }
+        return false
     }
 
     /// Zoom 표시명에서 직함·소속 꼬리 제거 ("Philip Choi @ Elastic SA, Search Specialist" → "Philip Choi").
@@ -205,11 +228,31 @@ final class ZoomSpeakerTagger {
                 if desc.contains("active speaker") {
                     activeName = name
                 }
-                // 내 타일: 표시명에 내 이름 포함 (myName 설정 기반)
-                if name.localizedCaseInsensitiveContains(myNameHint) {
+
+                // 내 타일 판정: 확정된 selfTileName 우선, 미확정이면 이름 단어 부트스트랩
+                var isSelf = false
+                if let selfTileName {
+                    isSelf = (name == selfTileName)
+                } else if Self.nameMatches(tile: name, hint: myNameHint) {
+                    selfTileName = name
+                    isSelf = true
+                    AppLog.write("zoomtag", "내 타일 확정 (이름 매칭): \(Self.shortName(name))")
+                }
+                if isSelf {
                     let unmuted = desc.contains("음소거 해제") || desc.contains("unmuted")
                     selfMuted = !unmuted
                 }
+            }
+        }
+
+        // 내 타일 학습 (마이크 상관): 내가 말하는 순간의 활성 타일에 투표
+        if selfTileName == nil, let activeName, micActive?() == true {
+            selfVotes[activeName, default: 0] += 1
+            let votes = selfVotes[activeName] ?? 0
+            let rival = selfVotes.filter { $0.key != activeName }.values.max() ?? 0
+            if votes >= 3, votes >= rival * 2 {
+                selfTileName = activeName
+                AppLog.write("zoomtag", "내 타일 학습 완료 (마이크 상관, \(votes)표): \(Self.shortName(activeName))")
             }
         }
 
