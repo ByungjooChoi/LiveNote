@@ -314,18 +314,28 @@ final class CalendarMonitor {
     // MARK: - Zoom 링크 파싱
 
     /// 여러 텍스트 필드(url/location/notes)에서 첫 Zoom 링크를 찾음.
+    /// 온라인 회의 링크 탐지 — Zoom 우선, 이어서 Teams / Google Meet / Webex (2026-09-01 확장).
+    /// 패턴 순서 = 우선순위: 초대문에 여러 링크가 섞여 있으면 앞선 플랫폼을 택한다.
     static func firstZoomLink(in texts: [String?]) -> URL? {
-        let pattern = "https://[A-Za-z0-9.-]*zoom\\.us/[^\\s<>\"'\\)\\]]+"
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
-            return nil
-        }
-        for text in texts {
-            guard let text, !text.isEmpty else { continue }
-            let range = NSRange(text.startIndex..., in: text)
-            if let match = regex.firstMatch(in: text, range: range),
-               let matchRange = Range(match.range, in: text),
-               let url = URL(string: String(text[matchRange])) {
-                return url
+        let patterns = [
+            "https://[A-Za-z0-9.-]*zoom\\.us/[^\\s<>\"'\\)\\]]+",
+            "https://teams\\.microsoft\\.com/l/meetup-join/[^\\s<>\"'\\)\\]]+",
+            "https://teams\\.live\\.com/meet/[^\\s<>\"'\\)\\]]+",
+            "https://meet\\.google\\.com/[^\\s<>\"'\\)\\]]+",
+            "https://[A-Za-z0-9.-]*webex\\.com/[^\\s<>\"'\\)\\]]+",
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+                continue
+            }
+            for text in texts {
+                guard let text, !text.isEmpty else { continue }
+                let range = NSRange(text.startIndex..., in: text)
+                if let match = regex.firstMatch(in: text, range: range),
+                   let matchRange = Range(match.range, in: text),
+                   let url = URL(string: String(text[matchRange])) {
+                    return url
+                }
             }
         }
         return nil

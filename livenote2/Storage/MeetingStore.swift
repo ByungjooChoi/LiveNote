@@ -103,7 +103,7 @@ final class MeetingStore {
         if let existingURL {
             folder = existingURL
         } else {
-            folder = makeUniqueFolder(for: startedAt)
+            folder = makeUniqueFolder(for: startedAt, title: title)
         }
 
         let meeting = SavedMeeting(
@@ -298,8 +298,13 @@ final class MeetingStore {
         return formatter
     }()
 
-    private func makeUniqueFolder(for date: Date) -> URL {
-        let base = Self.folderFormatter.string(from: date)
+    /// 폴더명: "yyyy-MM-dd HHmm" + 캘린더 회의 제목 (파일명 안전화, 40자 컷).
+    /// 예: "2026-09-01 1950 Philip Craig"
+    private func makeUniqueFolder(for date: Date, title: String?) -> URL {
+        var base = Self.folderFormatter.string(from: date)
+        if let safeTitle = Self.folderSafeTitle(title), !safeTitle.isEmpty {
+            base += " \(safeTitle)"
+        }
         var candidate = rootURL.appendingPathComponent(base, isDirectory: true)
         var counter = 2
         while FileManager.default.fileExists(atPath: candidate.path) {
@@ -307,5 +312,19 @@ final class MeetingStore {
             counter += 1
         }
         return candidate
+    }
+
+    /// 회의 제목을 폴더명에 안전한 형태로: 경로 예약 문자 제거, 공백 정리, 40자 제한.
+    static func folderSafeTitle(_ title: String?) -> String? {
+        guard let title else { return nil }
+        let forbidden = CharacterSet(charactersIn: "/\\:*?\"<>|")
+        let cleaned = String(title.map { char -> Character in
+            if let scalar = char.unicodeScalars.first, forbidden.contains(scalar) { return " " }
+            return char
+        })
+        .replacingOccurrences(of: "  ", with: " ")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return nil }
+        return String(cleaned.prefix(40)).trimmingCharacters(in: .whitespaces)
     }
 }

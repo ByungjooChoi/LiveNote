@@ -1088,8 +1088,12 @@ final class AppState {
     }
 
     /// 사이드바 "오늘 일정"의 지금 시작: Zoom 미실행이면 참가 링크를 열고 기록 시작.
+    /// Home의 Start now: 회의 링크 실행 + 기록 시작을 항상 함께.
+    /// (구버전은 Zoom 프로세스가 떠 있으면 링크를 안 열었는데, Zoom은 회의 없이도
+    ///  백그라운드에 상주하므로 참가가 안 되는 버그였음 — zoommtg:// 딥링크는
+    ///  실행 중인 Zoom에 그대로 전달되어 회의 참가로 이어진다.)
     func startUpcomingMeeting(link: URL?) {
-        if !ZoomSpeakerTagger.zoomRunning(), let link {
+        if let link {
             NSWorkspace.shared.open(link)
         }
         if !isActive {
