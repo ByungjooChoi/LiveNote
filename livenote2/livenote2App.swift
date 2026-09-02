@@ -64,7 +64,7 @@ struct MenuBarView: View {
 
             Divider()
 
-            Button("Quit livenote2") {
+            Button("Quit LiveNote") {
                 if app.isRunning {
                     // 저장이 끝날 시간을 준 뒤 종료
                     app.stop()

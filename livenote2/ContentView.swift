@@ -92,7 +92,7 @@ struct SidebarRail: View {
                 Image(nsImage: NSApp.applicationIconImage)
                     .resizable()
                     .frame(width: 26, height: 26)
-                Text("livenote")
+                Text("LiveNote")
                     .font(.headline)
                     .foregroundStyle(.white)
             }
@@ -832,7 +832,7 @@ struct LiveMeetingView: View {
                     .frame(width: 8, height: 8)
                     .help(status == .connected
                           ? "Cloud translation connected"
-                          : "Cloud translation connecting or reconnecting — log: ~/Documents/livenote2/logs/cloud.log")
+                          : "Cloud translation connecting or reconnecting — log: ~/Documents/LiveNote/logs/cloud.log")
             }
 
             if !app.isRunning, let savedURL = app.currentMeetingURL {

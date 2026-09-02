@@ -39,7 +39,7 @@ final class ChatStore {
     init() {
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Documents")
-        folderURL = documents.appendingPathComponent("livenote2/chats", isDirectory: true)
+        folderURL = documents.appendingPathComponent("LiveNote/chats", isDirectory: true)
         refresh()
     }
 

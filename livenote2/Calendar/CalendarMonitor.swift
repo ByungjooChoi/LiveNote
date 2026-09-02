@@ -88,10 +88,10 @@ final class CalendarMonitor {
                 issueMessage = nil
                 startMonitoring()
             } else {
-                issueMessage = "Calendar access denied — meeting alerts are off. Allow full access for livenote2 in System Settings > Privacy & Security > Calendars."
+                issueMessage = "Calendar access denied — meeting alerts are off. Allow full access for LiveNote in System Settings > Privacy & Security > Calendars."
             }
         default:
-            issueMessage = "No calendar access — meeting alerts are disabled. Allow full access for livenote2 in System Settings > Privacy & Security > Calendars."
+            issueMessage = "No calendar access — meeting alerts are disabled. Allow full access for LiveNote in System Settings > Privacy & Security > Calendars."
         }
     }
 

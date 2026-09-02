@@ -33,7 +33,7 @@ final class SystemAudioTap {
         var status = AudioHardwareCreateProcessTap(description, &newTapID)
         guard status == noErr, newTapID != kAudioObjectUnknown else {
             throw Self.error("프로세스 탭 생성 실패", status,
-                             hint: "시스템 설정 > 개인정보 보호 및 보안 > 화면 및 시스템 오디오 녹음에서 livenote2를 허용했는지 확인하세요.")
+                             hint: "시스템 설정 > 개인정보 보호 및 보안 > 화면 및 시스템 오디오 녹음에서 LiveNote를 허용했는지 확인하세요.")
         }
         tapID = newTapID
 

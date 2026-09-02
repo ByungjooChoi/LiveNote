@@ -354,6 +354,7 @@ final class AppState {
         }
         internalJargon = defaults.string(forKey: "internalJargon") ?? ""
         localModelID = defaults.string(forKey: "localModelID") ?? SummaryService.defaultModelID
+        MeetingStore.migrateLegacyRootIfNeeded()   // livenote2 → LiveNote 데이터 폴더 이행 (1회)
         ModelSeeder.seedIfNeeded()
         SessionAudioRecorder.purgeStale()   // 비정상 종료가 남긴 임시 오디오 청소
         registerMeetingAppLaunchObserver()
@@ -600,7 +601,7 @@ final class AppState {
                 zoomTagger.start(myName: myName)
             } else {
                 _ = ZoomSpeakerTagger.accessibilityTrusted(prompt: true)
-                zoomTagMessage = "Zoom speaker recognition needs Accessibility permission. Enable livenote2 in System Settings > Privacy & Security > Accessibility."
+                zoomTagMessage = "Zoom speaker recognition needs Accessibility permission. Enable LiveNote in System Settings > Privacy & Security > Accessibility."
                 watchForAccessibilityGrant()
             }
         }
@@ -649,7 +650,7 @@ final class AppState {
             // 1) 마이크 권한
             let granted = await MicCapture.requestPermission()
             guard granted else {
-                phase = .error("Microphone access denied. Allow livenote2 in System Settings > Privacy & Security > Microphone.")
+                phase = .error("Microphone access denied. Allow LiveNote in System Settings > Privacy & Security > Microphone.")
                 return
             }
 
@@ -784,6 +785,20 @@ final class AppState {
         micLevel = 0
         phase = .idle
         stopAutoStopMonitoring()
+
+        // 이름 백필: 세션 중 이름을 못 받은 them 행에 1:1 폴백 이름을 소급 적용
+        // (폴백 확정(10폴)이 첫 행들보다 늦을 수 있어 종료 시점에 한 번 더)
+        if let fallback = zoomTagger.fallbackOtherName() {
+            var updated = 0
+            for index in rows.indices
+            where rows[index].channel == .them && rows[index].speakerName == nil {
+                rows[index].speakerName = fallback
+                updated += 1
+            }
+            if updated > 0 {
+                AppLog.write("zoomtag", "이름 백필: \(updated)개 행 → \(fallback)")
+            }
+        }
 
         let engineRef = engine
         let diarizerRef = speakerDiarizer
@@ -1027,14 +1042,15 @@ final class AppState {
         // 참석자 이름 교정: ASR이 뭉갠 고유명사를 캘린더 참석자 이름으로 보정
         let stabilizedText = correctedAttendeeNames(stabilized)
 
-        // Zoom 태그: 행 구간에서 가장 오래 활성 화자였던 이름 (슬롯보다 우선)
+        // Zoom 태그: 행 구간에서 가장 오래 활성 화자였던 이름 (슬롯보다 우선).
+        // 활성 화자 이벤트가 없으면(1:1 발표자 보기, Zoom AX 변경) "나 외 유일 타일" 폴백.
         var autoName: String?
         if segment.channel == .them, let captureStart = captureStartedAt {
             autoName = zoomTagger.dominantName(
                 fromSeconds: segment.startSeconds,
                 toSeconds: segment.endSeconds,
                 sessionStart: captureStart
-            )
+            ) ?? zoomTagger.fallbackOtherName()
         }
 
         let row = TranscriptRow(

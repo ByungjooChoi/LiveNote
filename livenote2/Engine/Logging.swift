@@ -1,6 +1,6 @@
 import Foundation
 
-/// 앱 공용 파일 로거 — `~/Documents/livenote2/logs/{카테고리}.log`
+/// 앱 공용 파일 로거 — `~/Documents/LiveNote/logs/{카테고리}.log`
 ///
 /// 카테고리: app(세션 수명), cloud(클라우드 번역 연결), chat(AI 채팅),
 /// summary(요약), zoomtag(Zoom 화자 태그).
@@ -11,7 +11,7 @@ enum AppLog {
 
     private static let dir: URL = {
         let dir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Documents/livenote2/logs", isDirectory: true)
+            .appendingPathComponent("Documents/LiveNote/logs", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }()

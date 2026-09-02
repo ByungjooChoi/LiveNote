@@ -9,7 +9,7 @@ cd "$(dirname "$0")/.."
 VERSION=${1:-1.0.0}
 ARCHIVE=/tmp/livenote2.xcarchive
 DIST=dist
-APP_NAME=livenote2
+APP_NAME=LiveNote
 
 echo "==> Release 아카이브 빌드"
 rm -rf "$ARCHIVE"
@@ -47,11 +47,11 @@ echo "==> 체크섬"
 ( cd "$DIST" && shasum -a 256 "$(basename "$DMG")" > "$(basename "$DMG").sha256" )
 
 cat > "$DIST/INSTALL.md" <<'EOF'
-# livenote2 설치 가이드
+# LiveNote 설치 가이드
 
-1. DMG를 열고 `livenote2.app`을 `Applications` 폴더로 드래그합니다.
-2. 첫 실행: Applications에서 `livenote2.app`을 우클릭 → 열기 → 경고 대화상자에서 다시 열기.
-   (ad-hoc 서명 빌드라 최초 1회 필요. Developer ID 서명·노터라이즈는 추후 단계)
+1. DMG를 열고 `LiveNote.app`을 `Applications` 폴더로 드래그합니다.
+2. 첫 실행: Applications에서 `LiveNote.app`을 우클릭 → 열기 → 경고 대화상자에서 다시 열기.
+   (Personal Team 서명 빌드라 최초 1회 필요. Developer ID 서명·노터라이즈는 추후 단계)
 3. 첫 시작 시 권한 허용 (모두 1회):
    - 마이크
    - 화면 및 시스템 오디오 녹음

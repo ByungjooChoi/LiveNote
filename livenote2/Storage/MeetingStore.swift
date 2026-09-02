@@ -56,8 +56,19 @@ final class MeetingStore {
     init() {
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Documents")
-        rootURL = documents.appendingPathComponent("livenote2", isDirectory: true)
+        rootURL = documents.appendingPathComponent("LiveNote", isDirectory: true)
         refresh()
+    }
+
+    /// 구 데이터 폴더 이행: ~/Documents/livenote2 → ~/Documents/LiveNote (1회, 앱 기동 최우선 실행)
+    static func migrateLegacyRootIfNeeded() {
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Documents")
+        let legacy = documents.appendingPathComponent("livenote2", isDirectory: true)
+        let current = documents.appendingPathComponent("LiveNote", isDirectory: true)
+        guard FileManager.default.fileExists(atPath: legacy.path),
+              !FileManager.default.fileExists(atPath: current.path) else { return }
+        try? FileManager.default.moveItem(at: legacy, to: current)
     }
 
     // MARK: - 목록

@@ -313,6 +313,7 @@
 				DEVELOPMENT_TEAM = W48965CX9B;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = livenote2/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = LiveNote;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -320,7 +321,7 @@
 				);
 				MARKETING_VERSION = 0.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.byungjoo.livenote2;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = LiveNote;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 			};
@@ -337,6 +338,7 @@
 				DEVELOPMENT_TEAM = W48965CX9B;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = livenote2/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = LiveNote;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -344,7 +346,7 @@
 				);
 				MARKETING_VERSION = 0.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.byungjoo.livenote2;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = LiveNote;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 			};
