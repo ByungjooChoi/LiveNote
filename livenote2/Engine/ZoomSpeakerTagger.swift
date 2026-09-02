@@ -56,12 +56,16 @@ final class ZoomSpeakerTagger {
     private var selfVotes: [String: Int] = [:]
     /// 마이크에 직접 발화가 실리는 중인지 (AppState가 micLevel 기반으로 배선)
     var micActive: (() -> Bool)?
+    /// 내 타일이 확정되면 Zoom 표시명(원문)을 전달 — AppState가 myName을 Zoom 이름으로 맞춤
+    var onSelfTileConfirmed: ((String) -> Void)?
 
     /// 상대방 이름 폴백 (v1.3.0): Zoom이 active speaker 표시를 안 줄 때(1:1 발표자 보기,
     /// Zoom AX 변경 등)를 위해 내 타일이 아닌 타일 이름의 등장 횟수를 집계.
     /// "나 외에 단 한 명"이 10폴 이상 관찰되면 그 이름을 them 채널 전체의 폴백으로 쓴다.
     /// 3인 이상(타 이름 2개 이상 유의미)이면 폴백하지 않음 (오명명 방지).
     private var otherTileCounts: [String: Int] = [:]
+    /// 세션 중 관측된 최대 타일 수 (3 이상이면 1:1 폴백 비활성 — 그룹 회의 오명명 방지)
+    private var maxTileCount = 0
     /// 진단: 다음 폴에서 타일 desc 원문을 로그로 남김 (타일 수 변화 시 1회)
     private var dumpNextPoll = false
 
@@ -89,6 +93,7 @@ final class ZoomSpeakerTagger {
         selfTileName = nil
         selfVotes = [:]
         otherTileCounts = [:]
+        maxTileCount = 0
         dumpNextPoll = true
         zoomDetected = false
         meetingWasPresent = false
@@ -147,6 +152,7 @@ final class ZoomSpeakerTagger {
     /// 활성 화자 이벤트가 없을 때의 상대방 이름 폴백.
     /// 조건: 내가 아닌 타일 이름이 정확히 하나뿐이고 10폴 이상 관찰됨 (사실상 1:1 회의).
     func fallbackOtherName() -> String? {
+        guard maxTileCount <= 2 else { return nil }   // 3인 이상 회의였으면 추측하지 않음
         let others = otherTileCounts.filter { $0.value >= 10 }
         guard others.count == 1, let only = others.first else { return nil }
         return Self.shortName(only.key)
@@ -245,6 +251,17 @@ final class ZoomSpeakerTagger {
 
                 if dumpNextPoll {
                     AppLog.write("zoomtag", "타일 desc 원문: \(desc)")
+                    // 활성 화자 표시가 desc에서 사라진 Zoom 버전 대응: 자식 요소 구조를 1회 채집
+                    // (다음 설계 근거용. role/desc/value/title만, 최대 8개)
+                    if let tileChildren = attr(tile, kAXChildrenAttribute) as? [AXUIElement] {
+                        for child in tileChildren.prefix(8) {
+                            let role = attr(child, kAXRoleAttribute) as? String ?? "?"
+                            let childDesc = attr(child, kAXDescriptionAttribute) as? String ?? ""
+                            let value = attr(child, kAXValueAttribute).map { "\($0)" } ?? ""
+                            let title = attr(child, kAXTitleAttribute) as? String ?? ""
+                            AppLog.write("zoomtag", "  ↳ \(role) desc=\(childDesc.prefix(60)) value=\(value.prefix(40)) title=\(title.prefix(40))")
+                        }
+                    }
                 }
 
                 // active speaker 토큰 (Zoom UI 언어·버전에 따라 표기가 다를 수 있어 다중 매칭)
@@ -262,6 +279,7 @@ final class ZoomSpeakerTagger {
                     selfTileName = name
                     isSelf = true
                     AppLog.write("zoomtag", "내 타일 확정 (이름 매칭): \(Self.shortName(name))")
+                    onSelfTileConfirmed?(name)
                 }
                 if isSelf {
                     let unmuted = desc.contains("음소거 해제") || desc.contains("unmuted")
@@ -282,11 +300,13 @@ final class ZoomSpeakerTagger {
             if votes >= 3, votes >= rival * 2 {
                 selfTileName = activeName
                 AppLog.write("zoomtag", "내 타일 학습 완료 (마이크 상관, \(votes)표): \(Self.shortName(activeName))")
+                onSelfTileConfirmed?(activeName)
             }
         }
 
         let wasDetected = zoomDetected
         zoomDetected = tileCount > 0
+        maxTileCount = max(maxTileCount, tileCount)
         if zoomDetected != wasDetected {
             AppLog.write("zoomtag", zoomDetected ? "타일 감지 (\(tileCount)개)" : "타일 사라짐 (화면 공유/창 닫힘?)")
             dumpNextPoll = zoomDetected   // 타일 재등장 시 desc 원문 1회 채집 (진단)

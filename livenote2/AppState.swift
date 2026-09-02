@@ -44,8 +44,9 @@ final class AppState {
     private(set) var micMuted = false
 
     /// 화자 이름 (전사 라벨·홈 인사말·Zoom 자기 타일 매칭 공용).
-    /// macOS 계정 이름 자동 인식 (설정 UI 없음 — 2026-08-30 Profile 카드 삭제).
-    var myName = AppState.detectedAccountName()
+    /// 우선순위 (v1.3.1): 이번 세션에서 확정된 Zoom 타일 이름 > 마지막으로 확정됐던 Zoom 이름(영속)
+    /// > macOS 계정 이름. Zoom 회의 간 일관성과 빌린 Mac 사용을 위해 Zoom 표시명이 최우선.
+    var myName = UserDefaults.standard.string(forKey: "zoomSelfName") ?? AppState.detectedAccountName()
 
     /// macOS 계정 전체 이름 (예: "Byung joo Choi"). 비어 있으면 "Me".
     static func detectedAccountName() -> String {
@@ -357,6 +358,10 @@ final class AppState {
         MeetingStore.migrateLegacyRootIfNeeded()   // livenote2 → LiveNote 데이터 폴더 이행 (1회)
         ModelSeeder.seedIfNeeded()
         SessionAudioRecorder.purgeStale()   // 비정상 종료가 남긴 임시 오디오 청소
+        // 2-pass 도입(2026-08-31) 이후 저장본의 에코 중복 소급 정리 (1회)
+        if let since = ISO8601DateFormatter().date(from: "2026-08-31T00:00:00Z") {
+            meetingStore.cleanupEchoDuplicates(since: since)
+        }
         registerMeetingAppLaunchObserver()
 
         // Zoom 뮤트 동기화: 내 Zoom 타일의 음소거 상태를 따라 마이크 캡처를 켜고 끔
@@ -367,10 +372,23 @@ final class AppState {
             self.stop()
         }
 
-        // 내 타일 학습용 마이크 상관: 뮤트 아님 + 직접 발화 수준의 레벨일 때만 투표
+        // 내 타일 학습용 마이크 상관: 뮤트 아님 + 직접 발화 수준의 레벨 + 상대 채널이 조용할 때만 투표
+        // (스피커 에코로 상대 목소리가 마이크에 실리는 순간에 상대 타일에 투표하는 오염 방지)
         zoomTagger.micActive = { [weak self] in
             guard let self else { return false }
-            return !self.micMuted && self.micLevel > 0.12
+            let themQuiet = (self.volatileText[.them] ?? "").isEmpty
+            return !self.micMuted && self.micLevel > 0.12 && themQuiet
+        }
+
+        // Zoom 타일 이름 확정 → 내 표시 이름을 Zoom 표시명으로 통일 (회의 간 일관성, 빌린 Mac 대응)
+        zoomTagger.onSelfTileConfirmed = { [weak self] rawName in
+            guard let self else { return }
+            let short = ZoomSpeakerTagger.shortName(rawName)
+            guard !short.isEmpty, short != self.myName else { return }
+            self.myName = short
+            UserDefaults.standard.set(short, forKey: "zoomSelfName")
+            AppLog.write("zoomtag", "내 표시 이름을 Zoom 이름으로 갱신")
+            self.scheduleResave()
         }
 
         zoomTagger.onSelfMuteChange = { [weak self] muted in
@@ -1124,6 +1142,23 @@ final class AppState {
 
     /// 안정화된 확정 텍스트. nil이면 유사 중복으로 판단해 통째로 폐기.
     private func stabilizedFinalText(_ segment: FinalSegment) -> String? {
+        // ⓪ 채널 간 에코 (v1.3.1): 상대 채널의 최근 행과 같은 문장이면 마이크 사본을 버린다.
+        //    에너지 게이트가 놓친 스피커→마이크 재유입 대응. them이 원본, me가 사본.
+        if let echoRow = rows.suffix(8).last(where: { other in
+            other.channel != segment.channel && EchoDedup.isEcho(
+                textA: segment.text, startA: segment.startSeconds, endA: segment.endSeconds,
+                textB: other.english, startB: other.startSeconds, endB: other.endSeconds)
+        }) {
+            if segment.channel == .me {
+                AppLog.write("app", "에코 사본 폐기 (me, them 행과 유사)")
+                return nil
+            } else {
+                // 마이크 사본이 먼저 확정된 경우: 그 행을 제거하고 them 원본을 채택
+                rows.removeAll { $0.id == echoRow.id }
+                AppLog.write("app", "에코 사본 제거 (먼저 확정된 me 행)")
+            }
+        }
+
         guard let prev = rows.last(where: { $0.channel == segment.channel }) else { return segment.text }
         let gap = segment.startSeconds - prev.endSeconds
         let prevTokens = Self.normalizedTokens(prev.english)

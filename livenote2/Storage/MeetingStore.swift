@@ -136,6 +136,25 @@ final class MeetingStore {
         }
     }
 
+    /// 채널 간 에코 중복·빈 행 소급 정리 (v1.3.1, 2-pass 도입 이후 저장본 대상, 1회).
+    /// 마이크 사본 행과 구두점만 남은 행을 제거하고 변경된 회의만 다시 쓴다.
+    func cleanupEchoDuplicates(since date: Date) {
+        let key = "echoCleanupDone.v1"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        var cleaned = 0
+        for summary in meetings where summary.startedAt >= date {
+            guard var meeting = load(summary.url) else { continue }
+            let result = EchoDedup.removeEchoRows(meeting.rows)
+            guard result.removed > 0 else { continue }
+            meeting.rows = result.rows
+            try? writeAll(meeting, to: summary.url)
+            cleaned += 1
+            AppLog.write("app", "에코 소급 정리: \(summary.url.lastPathComponent) \(result.removed)행 제거")
+        }
+        UserDefaults.standard.set(true, forKey: key)
+        if cleaned > 0 { refresh() }
+    }
+
     /// 저장된 회의에 요약만 갱신.
     func updateSummary(at url: URL, summary: String) {
         guard var meeting = load(url) else { return }

@@ -18,7 +18,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		AB1200000000000000000006 /* livenote2.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = livenote2.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		AB1200000000000000000006 /* LiveNote.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LiveNote.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -80,7 +80,7 @@
 		AB1200000000000000000003 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				AB1200000000000000000006 /* livenote2.app */,
+				AB1200000000000000000006 /* LiveNote.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -115,7 +115,7 @@
 				8BA66806302550DB003F050F /* MLXHuggingFace */,
 			);
 			productName = livenote2;
-			productReference = AB1200000000000000000006 /* livenote2.app */;
+			productReference = AB1200000000000000000006 /* LiveNote.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */

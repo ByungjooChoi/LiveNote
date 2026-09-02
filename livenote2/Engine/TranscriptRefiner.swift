@@ -65,8 +65,12 @@ enum TranscriptRefiner {
         }
 
         refined.sort { $0.startSeconds < $1.startSeconds }
-        AppLog.write("app", "2-pass 재디코딩 \(String(format: "%.1f", Date().timeIntervalSince(started)))s — rows \(liveRows.count)→\(refined.count), \(liveLength)→\(refinedLength)자")
-        return refined
+
+        // 채널 간 에코 중복 제거 (마이크 WAV는 게이트 없이 재디코딩되므로 여기서 걸러야 함)
+        // + 구두점만 남은 빈 행 제거
+        let deduped = EchoDedup.removeEchoRows(refined)
+        AppLog.write("app", "2-pass 재디코딩 \(String(format: "%.1f", Date().timeIntervalSince(started)))s — rows \(liveRows.count)→\(deduped.rows.count) (에코·빈행 \(deduped.removed)개 제거), \(liveLength)→\(refinedLength)자")
+        return deduped.rows
     }
 
     // MARK: - 문장 분리 (토큰 타임스탬프 기반)
