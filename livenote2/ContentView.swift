@@ -432,6 +432,7 @@ struct MeetingDetailView: View {
     @Binding var screen: ContentView.Screen
     @State private var meeting: SavedMeeting?
     @State private var showTranscript = false
+    @State private var selectedRecipe: Recipe?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -506,6 +507,11 @@ struct MeetingDetailView: View {
         .onChange(of: app.summaryPhase) { _, newPhase in
             if newPhase == .idle { meeting = app.meetingStore.load(url) }
         }
+        .sheet(item: $selectedRecipe) { recipe in
+            RecipeRunSheet(recipe: recipe, currentMeeting: url) {
+                screen = .chat
+            }
+        }
     }
 
     private var toolbar: some View {
@@ -518,6 +524,21 @@ struct MeetingDetailView: View {
             .buttonStyle(.plain)
             .foregroundStyle(Theme.accent)
             Spacer()
+            let meetingRecipes = app.recipeStore.recipes.filter { $0.scopeDefault == .currentMeeting }
+            if !meetingRecipes.isEmpty {
+                Menu {
+                    ForEach(meetingRecipes) { recipe in
+                        Button {
+                            selectedRecipe = recipe
+                        } label: {
+                            Label(recipe.title, systemImage: recipe.icon.isEmpty ? "doc.text" : recipe.icon)
+                        }
+                    }
+                } label: {
+                    Label("Recipes", systemImage: "sparkles")
+                        .font(.caption)
+                }
+            }
             Toggle("Show transcript", isOn: $showTranscript)
                 .toggleStyle(.checkbox)
                 .font(.caption)
@@ -629,26 +650,33 @@ struct ChatFullView: View {
     @Environment(AppState.self) private var app
     @State private var ask = ""
     @State private var showAllChats = false
+    @State private var selectedRecipe: Recipe?
 
     var body: some View {
-        if app.chatMessages.isEmpty {
-            chatHome
-        } else {
-            VStack(spacing: 0) {
-                HStack {
-                    Button {
-                        app.startNewChat()
-                    } label: {
-                        Label("New chat", systemImage: "square.and.pencil")
+        Group {
+            if app.chatMessages.isEmpty {
+                chatHome
+            } else {
+                VStack(spacing: 0) {
+                    HStack {
+                        Button {
+                            app.startNewChat()
+                        } label: {
+                            Label("New chat", systemImage: "square.and.pencil")
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Theme.accent)
+                        Spacer()
                     }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(Theme.accent)
-                    Spacer()
+                    .padding(.horizontal, 28)
+                    .padding(.top, 14)
+                    .background(Theme.canvas)
+                    ChatPanel(scope: .archive, expanded: true)
                 }
-                .padding(.horizontal, 28)
-                .padding(.top, 14)
-                .background(Theme.canvas)
-                ChatPanel(scope: .archive, expanded: true)
+            }
+        }
+        .sheet(item: $selectedRecipe) { recipe in
+            RecipeRunSheet(recipe: recipe, currentMeeting: nil) {
             }
         }
     }
@@ -679,6 +707,16 @@ struct ChatFullView: View {
                 .padding(.horizontal, 14)
                 .padding(.vertical, 12)
                 .themedCard()
+                .frame(maxWidth: 600)
+
+                RecipesRow(
+                    onSelect: { recipe in
+                        selectedRecipe = recipe
+                    },
+                    onSeeAll: {
+                        app.pendingScreen = .settings
+                    }
+                )
                 .frame(maxWidth: 600)
 
                 recentChats
@@ -1435,6 +1473,8 @@ struct BannerView: View {
 struct SettingsView: View {
     @Environment(AppState.self) private var app
     @State private var jargonDraft = ""
+    @State private var editingRecipe: Recipe?
+    @State private var isCreatingRecipe = false
 
     var body: some View {
         ScrollView {
@@ -1579,6 +1619,80 @@ struct SettingsView: View {
                     ))
                 }
 
+                settingsCard("Recipes") {
+                    Text("Predefined prompt templates for batch or meeting analysis.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    VStack(spacing: 8) {
+                        ForEach(app.recipeStore.recipes) { recipe in
+                            HStack(spacing: 10) {
+                                Image(systemName: recipe.icon.isEmpty ? "doc.text" : recipe.icon)
+                                    .frame(width: 20)
+                                    .foregroundStyle(Theme.accent)
+
+                                VStack(alignment: .leading, spacing: 2) {
+                                    HStack(spacing: 6) {
+                                        Text(recipe.title)
+                                            .font(.body.weight(.medium))
+                                        if recipe.builtin {
+                                            Text("Built-in")
+                                                .font(.caption2.weight(.semibold))
+                                                .padding(.horizontal, 5)
+                                                .padding(.vertical, 1)
+                                                .background(Color.secondary.opacity(0.15))
+                                                .clipShape(Capsule())
+                                        }
+                                    }
+                                    Text(recipe.scopeDefault.label)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                Spacer()
+
+                                Button("Edit") {
+                                    editingRecipe = recipe
+                                }
+                                .controlSize(.small)
+
+                                Button("Duplicate") {
+                                    duplicateRecipe(recipe)
+                                }
+                                .controlSize(.small)
+
+                                if !recipe.builtin {
+                                    Button("Delete", role: .destructive) {
+                                        app.recipeStore.delete(id: recipe.id)
+                                    }
+                                    .controlSize(.small)
+                                }
+                            }
+                            .padding(.vertical, 4)
+                            if recipe.id != app.recipeStore.recipes.last?.id {
+                                Divider()
+                            }
+                        }
+                    }
+
+                    HStack {
+                        Button {
+                            isCreatingRecipe = true
+                        } label: {
+                            Label("New recipe", systemImage: "plus")
+                        }
+                        .controlSize(.small)
+
+                        Spacer()
+
+                        Button("Reset built-ins") {
+                            app.recipeStore.resetBuiltins()
+                        }
+                        .controlSize(.small)
+                    }
+                    .padding(.top, 4)
+                }
+
             }
             .padding(28)
             .frame(maxWidth: 640, alignment: .leading)
@@ -1587,6 +1701,37 @@ struct SettingsView: View {
         .onAppear {
             jargonDraft = app.internalJargon
         }
+        .sheet(isPresented: $isCreatingRecipe) {
+            RecipeEditorView(
+                recipe: nil,
+                onSave: { _ in isCreatingRecipe = false },
+                onCancel: { isCreatingRecipe = false }
+            )
+        }
+        .sheet(item: $editingRecipe) { recipe in
+            RecipeEditorView(
+                recipe: recipe,
+                onSave: { _ in editingRecipe = nil },
+                onCancel: { editingRecipe = nil }
+            )
+        }
+    }
+
+    private func duplicateRecipe(_ recipe: Recipe) {
+        let copyTitle = "\(recipe.title) copy"
+        let copyID = app.recipeStore.uniqueID(for: copyTitle)
+        let copy = Recipe(
+            id: copyID,
+            title: copyTitle,
+            icon: recipe.icon,
+            builtin: false,
+            scopeDefault: recipe.scopeDefault,
+            modelHint: recipe.modelHint,
+            outputLanguage: recipe.outputLanguage,
+            system: recipe.system,
+            prompt: recipe.prompt
+        )
+        app.recipeStore.upsert(copy)
     }
 
     /// 라벨 왼쪽 + 컨트롤 오른쪽 정렬 행 (Granola식)
