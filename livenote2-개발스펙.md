@@ -2,6 +2,7 @@
 
 작성일: 2026-08-06 · 대상: 이 문서만 보고 동일한 앱을 재구축해야 하는 제로베이스 AI/개발자
 현재 상태: **1단계 완성 + 출시 패키징 완료** (빌드·실전 사용 검증 완료, /Applications 설치본 운영 중)
+최신 갱신: v1.4.0 (2026-09-02, Phase 0: 참석자 캡처, 아카이브 컨텍스트 조립 공용화, 자동 제목, 알림 분할 버튼, 대면 회의 모드, 자동 시작 카운트다운, 테스트 타깃 신설)
 
 ---
 
@@ -66,6 +67,10 @@
 - 에코 3층 방어 (§5.2) — 스피커 사용 시 이중 전사 방지
 - 한/영 동시 라이브 뷰 (EN 즉시 + KO 2~3초 후 같은 화면)
 - 메뉴바 상주, 설정 영속화(UserDefaults), 마이크 레벨 미터, 에코 필터 실시간 토글
+- **대면 회의 모드 (2026-09-02, v1.4.0)**: 시스템 오디오 없이 마이크만으로 여러 화자를 구분 기록(§5.11)
+- **알림 팝업 분할 참가 버튼 (2026-09-02, v1.4.0)**: 플랫폼(Zoom/Teams/Meet/Webex)별 딥링크 참가 + 기록 시작, 참가만/기록만/설정 이동을 메뉴로 분리(§5.8)
+- **자동 시작 확인 카운트다운 (2026-09-02, v1.4.0)**: 오탐 기록을 막는 5초 취소 가능 지연(§5.12)
+- **캘린더 참석자 이메일 캡처 + 아카이브 컨텍스트 조립 공용화 (2026-09-02, v1.4.0)**: session.json에 참석자 저장, 여러 화면이 같은 로직으로 회의록 컨텍스트를 조립(§5.7, §5.10)
 
 ### 미완/백로그 (우선순위 순)
 1. ~~**출시 패키징**~~ ✅ 완료 (2026-08-06): `xcodebuild archive` → /Applications 설치. CLI 절차는 §8.7 참조
@@ -109,6 +114,8 @@
 - `NSCalendarsFullAccessUsageDescription` (EventKit 전체 접근 — 회의 임박 알림용, macOS 14+ 키)
 
 **모델 캐시 위치**: FluidAudio → `~/Library/Application Support/FluidAudio/Models/` · MLX/HF → HuggingFace 캐시. 빌드가 바뀌어도 재다운로드 없음.
+
+**테스트 타깃 (2026-09-02 추가, v1.4.0)**: `livenote2Tests`, hosted XCTest 타깃, `@testable import LiveNote`(모듈명은 앱 표시명이 아니라 `LiveNote`). 46개 테스트: 참석자·자동 제목·자동 시작 카운트다운·대면 모드·`ContextBuilder`·캘린더 알림 등 순수 로직 위주(오디오·모델 IO는 배제). 공유 스킴 `livenote2.xcscheme`을 신설해 `xcodebuild test`에서 테스트 타깃이 잡히게 함(기존 스킴은 앱만 빌드했음). 아카이브(`script/package.sh`)는 여전히 앱 프로덕트만 만든다. 테스트 타깃이 배포물에 섞이지 않는다.
 
 **앱 아이콘 (2026-08-06)**: 건곤감리 트라이그램, 태극기 모서리 배열(좌상 건 ☰ · 우상 감 ☵ · 좌하 리 ☲ · 우하 곤 ☷). 한지 배경에 건곤=먹색, 감(물)=파랑, 리(불)=빨강. 생성기: `script/make_icon.py` (Pillow, 1024 마스터 → AppIcon.appiconset 10종은 스크립트 하단 참조 로직으로 리사이즈). 변형 A(그래파이트)/B(남색)도 스크립트에 보존.
 
@@ -245,6 +252,10 @@
 
 루트 `~/Documents/livenote2/`, 폴더명 `yyyy-MM-dd HHmm`(충돌 시 " (2)"). 구성: `session.json`(SavedMeeting Codable: startedAt ISO8601, durationSeconds, myName, speakerNames[Int:String], rows[TranscriptRow], summary?; prettyPrinted+sortedKeys. 주의: Swift의 [Int:String]은 JSON 배열 [키,값,...]로 인코딩됨 — 같은 디코더로만 읽으면 무해) · `en.md` · `ko.md`(번역 없으면 "_(번역 없음)_ 원문") · `combined.md`(EN + `> KO`) · `summary.md`. 마크다운 헤더: 일시/길이/참석(등장 순 화자명). 오디오는 어떤 형태로도 저장하지 않음.
 
+**참석자 필드 (2026-09-02 추가, v1.4.0)**: `session.json`에 optional `attendees: [Attendee]?` 필드(`Attendee{name, email?}`) 추가. `CalendarMonitor.ongoingMeetingAttendees()`가 start() 시점 진행 중 일정의 참석자를 캡처(본인 제외, 사람만, 최대 10명)해 `AppState.meetingAttendees`로 보관, stop() 시 저장. `EKParticipant.url`의 `mailto:` 스킴에서 이메일을 뽑아 채운다(없으면 name만). 구버전 session.json은 이 필드가 없으므로 디코드 시 nil로 자동 하위 호환. 아카이브 채팅 컨텍스트(§5.10)의 헤더 "Attendees:" 줄과, 향후 Speaker Memory·Tasks 담당자 매칭의 근거 데이터가 된다.
+
+**자동 제목 (2026-09-02 추가, v1.4.0)**: 캘린더 제목 없이 시작한 회의는 폴더명이 시각만으로 만들어진다. 요약 생성이 끝나면 `MeetingStore.titleFromSummary(_:)`가 요약 본문의 첫 H1(`# 제목`, 60자 컷)을 뽑아 `MeetingStore.rename(at:title:)`을 1회 호출한다: `session.json`의 title을 갱신하고, 폴더명이 새 제목으로 바뀌어야 하면 `makeUniqueFolder` 규칙(충돌 시 " (2)")으로 실제 이동까지 수행한다. 이미 같은 이름이면 이동을 생략해 불필요한 "(2)" 접미사를 피한다.
+
 ### 5.9 AI 채팅 (ChatService + ChatPanel, 2026-08-27 추가 — Granola식 하단 대화창)
 
 라이브/저장 회의 뷰 하단에 상주하는 질의응답 패널. **범위 자동 전환**: 저장 회의를 열면 그 회의의 전사+요약, 라이브 뷰에서 회의 중(또는 직후)이면 현재 세션의 실시간 전사("회의가 지금 진행 중" 힌트 포함 — 회의 중 캐치업 질문 가능), 둘 다 아니면 전체 아카이브(최근 15개 회의의 요약 또는 전사 앞부분, 총 60K자 상한). 범위 키가 바뀌면 대화 초기화.
@@ -257,8 +268,9 @@
 
 - **감시**: EventKit 전체 접근(`requestFullAccessToEvents`, macOS 14+ API). 10초마다 `predicateForEvents(now-10분, now+30분, 전체 캘린더)` 조회 — Calendar.app에 연결된 구글 계정 일정 포함. 제외: 종일·취소·내가 거절한 초대(`EKParticipant.isCurrentUser` + `.declined`)·Zoom 링크 없는 일정. 알림 창(시작-60s ~ 시작+10분)에 든 첫 일정을 팝업. `eventIdentifier@시작시각` 키로 재알림 방지.
 - **Zoom 링크 파싱**: event의 url → location → notes 순으로 정규식 `https://[A-Za-z0-9.-]*zoom\.us/[^\s<>"')\]]+` 첫 매치. `/j/{회의번호}` 형태면 `zoommtg://{host}/join?action=join&confno=...&pwd=...` 딥링크로 변환(브라우저 안 거치고 Zoom 앱 직접 실행). 개인 링크(/my/) 등 번호 없는 경우와 Zoom 앱 미설치 시 웹 링크 폴백.
-- **팝업**: AppKit `NSPanel` — `.nonactivatingPanel`(포커스 안 뺏음), `.floating` 레벨, `[.canJoinAllSpaces, .fullScreenAuxiliary]`(전체 화면 Zoom 위에도 표시), 우상단 배치, Glass 사운드. 내용: 제목·시간·1초 카운트다운(TimelineView)·[Zoom 참가]·[닫기].
+- **팝업**: AppKit `NSPanel`, `.nonactivatingPanel`(포커스 안 뺏음), `.floating` 레벨, `[.canJoinAllSpaces, .fullScreenAuxiliary]`(전체 화면 Zoom 위에도 표시), 우상단 배치, Glass 사운드. 내용: 제목·시간·1초 카운트다운(TimelineView)·안건 한 줄(있으면)·분할 참가 버튼·[Dismiss].
 - **참가 동작**: 딥링크(또는 웹 링크) open + `onJoinRequested` 콜백 → AppState가 기록 시작(`isActive`가 아니면 start()). 설정: 메뉴바 토글 "회의 1분 전 Zoom 참가 알림", UserDefaults `calendarAlerts`, **기본 켜짐**. 최초 활성 시 캘린더 권한 프롬프트, 거부 시 주황 배너 안내.
+- **분할 버튼 (2026-09-02 추가, v1.4.0, `MeetingAlertView`)**: 주 버튼 "Join {플랫폼} & start LiveNote"(`video.fill`). 링크 host로 플랫폼 이름을 판정(`platformName(for:)`: zoom.us→Zoom, teams→Teams, meet.google→Meet, webex→Webex, 그 외 "meeting")해 라벨에 표시, 클릭 시 참가+기록 동시 시작. 오른쪽 ▾ 메뉴 3항목: **Join meeting only**(`onJoinOnly`: 링크만 열고 기록은 안 함) · **Start LiveNote only**(`onRecordOnly`: 링크는 안 열고 기록만 시작) · **Change notification settings**(`onOpenSettingsRequested` → `AppState.pendingScreen = .settings`로 신호 → 메인 창 활성화 + Settings 화면 전환, `ContentView`가 `onChange(of: pendingScreen)`으로 소비 후 nil 리셋).
 - **Zoom 회의 종료 즉시 감지 (2026-08-27 추가, Granola식)**: ZoomSpeakerTagger가 회의 창(제목 "Zoom 회의"/"Zoom Meeting")·타일의 존재를 추적, 존재했다가 **12초 연속 부재**면 `onMeetingEnded` 1회 발화 → 기록 중이면 즉시 자동 중지·저장·요약 (4분 무음 대기 불필요). 화면 공유로 타일이 일시 감소해도 회의 창 제목이 남아 있어 오탐 방지.
 
 **UI 구조 (2026-08-27 전면 개편, Granola식)**: NavigationSplitView 폐기 → 좌측 고정 레일(180px, 먹남 그라데이션: 홈/채팅/라이브) + 메인 콘텐츠 전환(`Screen` enum). **홈 (2026-08-28 v1.1.2 재배치)** = 중앙 히어로 "Hi {myName}, ask anything" + ask 박스(제출 → Chat 화면 전환 + 아카이브 범위 질문, `ChatModelMenu` 칩 포함) → Coming up 카드(오늘 일정+지금 시작+새 회의 시작) → Recents **최근 3건** + "See all" 토글(전체 날짜 섹션 피드 확장). **회의 상세** = 요약(회의록) 중심 + 경량 마크다운 렌더러(`SummaryRenderView`: #/##/불릿/인라인 굵게) + "전사 보기" 토글(기본 접힘) + 하단 채팅(.saved). **채팅** = 전체 화면 아카이브 채팅(ChatPanel expanded). 테마 `Theme`: 한지 캔버스·쪽빛 액센트·주홍 포인트 (앱 아이콘과 동일 계열), 라이트 고정(`preferredColorScheme(.light)`).
@@ -266,9 +278,34 @@
 - **참석자 이름 교정 (2026-08-21 추가, Granola 어휘 힌트의 후처리판)**: 확정 텍스트의 대문자 시작 5자 이상 토큰을 참석자 이름 토큰(4자 이상, 내 이름 포함)과 대조해 편집거리 ≤ 2 & 길이차 ≤ 2면 교체 (Herminder→Harvinder류). Granola 대비 열세였던 고유명사 정확도 격차 대응 (WD 회의 실측 비교에서 도입 결정). 디코더 수준 어휘 부스팅(FluidAudio CustomVocabulary, SlidingWindowAsrManager 전환 필요)은 백로그.
 - **이중 시작 가드**: 참가로 start()한 직후 Zoom 실행 감지 자동 시작이 겹칠 수 있어 start() 가드를 `!isRunning`(listening만 차단)에서 `!isActive`(preparing 포함 차단)로 강화. 기존에도 있던 잠재 레이스의 수정임.
 
+### 5.10 아카이브 채팅 컨텍스트 조립 (Engine/ContextBuilder.swift, 2026-09-02 추가, v1.4.0)
+
+`AppState`에 있던 "전체 아카이브" 채팅 컨텍스트 조립 로직을 `@MainActor enum ContextBuilder`로 승격. `build(meetings:store:budget:perMeetingTranscriptCap:) -> (text, used, truncated)` 하나의 함수로, 회의 목록을 순회하며 회의당 한 섹션(헤더 + 본문)을 만들고 예산을 넘기면 이후 회의는 건너뛰며 개수를 센다.
+- 헤더: `## 제목 (날짜 · 소요시간)` + 참석자가 있으면 다음 줄에 `Attendees: 이름1, 이름2, …` (§5.7 attendees 필드 활용).
+- 본문: `summary`가 있으면 요약 전문, 없으면 `MeetingStore.transcriptForSummary`로 만든 전사 앞부분을 `perMeetingTranscriptCap`자로 자름.
+- 남은 예산이 `minimumSectionBudget`(2,000자) 이하면 그 회의부터는 넣지 않고 `truncated` 카운트만 올린다. 섹션이 중간에 잘려 어색해지는 것을 방지하기 위함이다.
+- ChatService(§5.9)의 아카이브 범위 채팅이 이 함수를 그대로 쓰고, Recipes(Phase 1)·사전 브리핑(Phase 2)은 예산·cap 값만 다르게 넘겨 재사용할 설계.
+
+### 5.11 대면 회의 모드 (2026-09-02 추가, v1.4.0)
+
+봇 없는 온라인 회의(마이크=나, 시스템 오디오=상대방) 전제가 성립하지 않는 오프라인 회의를 위한 모드. `AppState.start(mode: StartMode = .online)`: `StartMode`는 `online`/`inPerson` (Codable, `Models/TranscriptModels.swift`).
+- **online (기존)**: 마이크 → `.me` 채널, `SystemAudioTap` 오픈, 화자구분은 시스템 채널에만 적용(§1 2채널 분리 설계).
+- **inPerson**: `SystemAudioTap`을 아예 열지 않음(`tap = (mode == .inPerson) ? nil : SystemAudioTap()`). 대신 마이크가 회의 음성의 유일한 소스이므로 `AppState.micIngestChannel(for:)`가 마이크 샘플을 `.them` 채널로 라우팅해 기존 `dominantSlot` 조회 경로(§5.3-구)를 그대로 태우고, 동시에 같은 샘플을 화자구분 파이프라인(`diarizerContinuation`)에도 공급한다(`startMicCapture(mode:)`의 `feedsDiarizer` 플래그). LS-EEND는 Zoom 유무와 무관하게 대면 모드에서 항상 강제로 준비된다(§5.3 "Zoom 타일 감지 시 미기동" 조건의 예외).
+- 에코 게이트(§5.2①②)는 `.me` 채널 판정 로직이라 대면 모드에서는 관여하지 않음(마이크가 `.them`으로 들어가므로). `TranscriptionEngine.micChannel`은 뮤트 게이트가 여전히 올바른 채널을 보도록 시작 시 채널 인자로 갱신됨.
+- 화자 라벨: Zoom 타일이 없으므로 항상 슬롯 폴백: "Speaker N"(1부터), 클릭 편집 가능.
+- UI: `Views/StartMenu.swift`, Home의 Start를 분할 버튼으로 바꿔, 본체 클릭은 online 시작(`primaryAction`), ▾ 메뉴의 "Start in-person"이 `onStart(.inPerson)`. 라이브 헤더에 `Views/ModeBadge.swift`("In person" 캡슐 배지, `person.2.fill`)를 표시해 현재 모드를 알림.
+
+### 5.12 자동 시작 확인 카운트다운 (Calendar/CountdownPanel.swift, 2026-09-02 추가, v1.4.0)
+
+자동 감지가 오탐(회의가 아닌데 Zoom이 켜짐 등)으로 원치 않는 회의를 기록하는 사고를 막기 위한 취소 유예. `MeetingAlertPanel`(§5.8)과 같은 nonactivating 플로팅 패널 패턴(우상단, `.floating`, 전체 화면 위 표시).
+- **UI**: 사유 한 줄(예: "Zoom launched", "{제목} is starting") + 1초 갱신 카운트다운("Starting LiveNote in Ns") + Cancel 버튼. Cancel 시 패널만 닫고 시작하지 않음.
+- **트리거**: ① `autoStartOnMeetingApp`(회의 앱 실행 감지, §5.6) ② `autoStartAtCalendarTime`(캘린더 일정의 실제 시작 시각 도달, `CalendarMonitor.onMeetingTimeReached`; 시작 후 3분 창, 폴링 10s 기반이라 최대 3분까지 유효). ②는 `calendarAlerts`(§5.8 "회의 1분 전 알림") 토글이 켜져 있을 때만 캘린더 감시 루프(`tick()`) 자체가 도는 구조라, 그 토글이 꺼져 있으면 동작하지 않음.
+- **설정 (UserDefaults, Settings > Meetings)**: `autoStartCountdown`(카운트다운 사용, **기본 켜짐**, 5초, `AppState.autoStartCountdownSeconds`) · `autoStartAtCalendarTime`(캘린더 시작 시각 트리거 사용, **기본 꺼짐**). 카운트다운을 끄면 지연 없이 즉시 start() (`AppState.autoStartDelay(countdownEnabled:)`가 0 반환).
+- **흐름**: `beginAutoStart(reason:)`가 진입점이다. `isActive`가 아니고 패널이 이미 떠 있지 않을 때만 표시, 만료 시 `start()` + notice 배너, 만료 전 다른 자동 시작 트리거가 겹치면 무시.
+
 ---
 
-## 6. 파일별 스펙 (livenote2/livenote2/ 아래 15파일)
+## 6. 파일별 스펙 (livenote2/livenote2/ 아래 주요 파일)
 
 | 파일 | 역할 · 핵심 내용 |
 |---|---|
@@ -283,12 +320,16 @@
 | `Engine/GeminiLiveTranslator.swift` | actor. §5.4 클라우드 번역: 채널별 WebSocket 2개, PCM 변환·무음 게이트·전송, outputTranscription 누적·claim, 재연결. + `GeminiKeychain`(API 키 Keychain 보관) |
 | `Engine/ZoomSpeakerTagger.swift` | @MainActor. §5.3 Zoom AX 폴링: 타일 파싱(이름·active speaker·뮤트), 활성 화자 타임라인, dominantName, 내 뮤트 변화 콜백. AX API를 만지는 유일한 파일 |
 | `Engine/ChatService.swift` | §5.9 채팅: `ChatPrompt`(공유 프롬프트·이력 합성), `LocalChatEngine` actor(Qwen 상주), `GeminiChat`(3.7 Flash 멀티턴 REST) |
-| `Calendar/CalendarMonitor.swift` | @MainActor @Observable. §5.8 감시 루프·자격 판정·Zoom 링크 파싱(`firstZoomLink`/`zoomDeepLink` static)·참가 실행. EventKit을 만지는 유일한 파일 |
-| `Calendar/MeetingAlertPanel.swift` | `MeetingAlertPanelController`(NSPanel 생성·우상단 배치·닫기) + `MeetingAlertView`(SwiftUI: 제목·시간·카운트다운·참가/닫기) |
+| `Engine/ContextBuilder.swift` | §5.10 (v1.4.0 추가) `@MainActor enum`. `build(meetings:store:budget:perMeetingTranscriptCap:)`로 아카이브 채팅·향후 Recipes/브리핑이 공용하는 컨텍스트 조립 |
+| `Calendar/CalendarMonitor.swift` | @MainActor @Observable. §5.8 감시 루프·자격 판정·Zoom 링크 파싱(`firstZoomLink`/`zoomDeepLink` static)·참가 실행. EventKit을 만지는 유일한 파일. v1.4.0: `ongoingMeetingAttendees()`가 이메일 포함 `[Attendee]` 반환(§5.7), `onMeetingTimeReached`가 캘린더 시작 시각 트리거(§5.12) 발화 |
+| `Calendar/MeetingAlertPanel.swift` | `MeetingAlertPanelController`(NSPanel 생성·우상단 배치·닫기) + `MeetingAlertView`(SwiftUI: 제목·시간·카운트다운·분할 참가 버튼/Dismiss, §5.8) |
+| `Calendar/CountdownPanel.swift` | §5.12 (v1.4.0 추가) `CountdownPanelController`(NSPanel) + `CountdownView`(사유·카운트다운·Cancel). 자동 시작 전 취소 유예 |
 | `Engine/SummaryService.swift` | actor. §5.5. 모델 ID 상수 한 줄로 교체 가능하게 유지할 것 |
-| `AppState.swift` | @MainActor @Observable 중심 허브. phase(idle/preparing/listening/error), rows, volatileText, 배너 4종(systemAudio/diarizer/translation/notice), micLevel, echoFilterEnabled·myName·autoStartOnMeetingApp(UserDefaults 영속), start()/stop() 오케스트레이션(§4 흐름), 에코 dedup(§5.2③), 저장·재저장(§5.6~7), 자동 시작/종료 옵저버, 요약 상태머신(summaryPhase). **파이프라인 내부 상태 14개 프로퍼티에 @ObservationIgnored 필수**(§7.4). 회의 앱 번들ID 목록은 **파일 스코프 상수**(§7.5) |
-| `ContentView.swift` | NavigationSplitView: 사이드바(라이브 + MeetingStore.meetings, 컨텍스트 메뉴: Finder에서 보기/삭제) / LiveMeetingView(헤더: 상태·미터·에코필터 토글·시작/중지 ⌘R, 배너들, SummaryCard, 전사 리스트: 화자칩 popover rename·EN·KO·"번역 중…"·타임스탬프·잠정 행, 자동 스크롤) / SavedMeetingView(읽기전용 + SummaryCard + onChange(summaryPhase) 재로드). 화자칩 색: me=blue, 슬롯=8색 팔레트 순환, nil=회색 |
-| `Storage/MeetingStore.swift` | §5.7 + `resolveName(row:myName:speakerNames:)` 정적 헬퍼(이름 해석 단일 소스) + 마크다운 생성기 4종 + `transcriptForSummary` |
+| `AppState.swift` | @MainActor @Observable 중심 허브. phase(idle/preparing/listening/error), rows, volatileText, 배너 4종(systemAudio/diarizer/translation/notice), micLevel, echoFilterEnabled·myName·autoStartOnMeetingApp(UserDefaults 영속), start(mode:)/stop() 오케스트레이션(§4 흐름, v1.4.0부터 online/inPerson 분기 §5.11), 에코 dedup(§5.2③), 저장·재저장(§5.6~7), 자동 시작/종료 옵저버(§5.12 카운트다운 경유), 요약 상태머신(summaryPhase), `pendingScreen`(팝업 메뉴 → Settings 화면 전환 신호). **파이프라인 내부 상태 14개 프로퍼티에 @ObservationIgnored 필수**(§7.4). 회의 앱 번들ID 목록은 **파일 스코프 상수**(§7.5) |
+| `ContentView.swift` | NavigationSplitView: 사이드바(라이브 + MeetingStore.meetings, 컨텍스트 메뉴: Finder에서 보기/삭제) / LiveMeetingView(헤더: 상태·미터·에코필터 토글·시작/중지 ⌘R·In person 배지(§5.11), 배너들, SummaryCard, 전사 리스트: 화자칩 popover rename·EN·KO·"번역 중…"·타임스탬프·잠정 행, 자동 스크롤) / SavedMeetingView(읽기전용 + SummaryCard + onChange(summaryPhase) 재로드) / Settings > Meetings(자동 시작 카운트다운·캘린더 시작 시각 트리거 토글, §5.12). 화자칩 색: me=blue, 슬롯=8색 팔레트 순환, nil=회색 |
+| `Storage/MeetingStore.swift` | §5.7 + `resolveName(row:myName:speakerNames:)` 정적 헬퍼(이름 해석 단일 소스) + 마크다운 생성기 4종 + `transcriptForSummary` + v1.4.0: `attendees` 필드, `rename(at:title:)`, `titleFromSummary(_:)`(자동 제목) |
+| `Views/StartMenu.swift` | §5.11 (v1.4.0 추가) Home Start 분할 버튼: 본체=online 시작, ▾ 메뉴="Start in-person" |
+| `Views/ModeBadge.swift` | §5.11 (v1.4.0 추가) 헤더용 캡슐 배지 (대면 모드 "In person" 표시에 사용) |
 
 ---
 
