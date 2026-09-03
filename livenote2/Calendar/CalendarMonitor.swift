@@ -367,24 +367,7 @@ final class CalendarMonitor {
         return (event.title, Self.normalizedAttendees(from: raw))
     }
 
-    /// 지금 진행 중(시작 10분 전~종료)인 일정의 제목. 온라인 회의 링크가 있는 일정 우선.
-    func ongoingMeetingTitle(now: Date = Date()) -> String? {
-        ongoingMeetingContext(now: now).title
-    }
-
-    // MARK: - 참석자 이름 후보 (화자 rename 원클릭용)
-
-    /// 지금 진행 중이거나 10분 내 시작하는 일정의 참석자 이름 목록.
-    /// 화자 칩 rename 팝오버에 원클릭 후보로 표시됨. 본인·회의실 리소스 제외, 최대 10명.
-    func attendeeNamesForOngoingMeeting(now: Date = Date()) -> [String] {
-        ongoingMeetingAttendees(now: now).map(\.name)
-    }
-
-    /// 제목과 같은 일정에서 뽑은 참석자 (이름 + 이메일).
-    /// 회의 저장(session.json)과 이후 브리핑·담당자 매칭이 쓰는 원본 데이터다.
-    func ongoingMeetingAttendees(now: Date = Date()) -> [Attendee] {
-        ongoingMeetingContext(now: now).attendees
-    }
+    // MARK: - 참석자 정규화
 
     /// 캘린더 참석자 원본(표시 이름, 이메일)을 저장용 Attendee로 정규화한다.
     /// 중복 판정 키는 이메일(소문자) 우선, 없을 때만 이름이다. 이렇게 해야 동명이인을 잃지 않는다.
@@ -415,9 +398,7 @@ final class CalendarMonitor {
     /// mailto가 아니거나 주소가 비면 nil.
     static func email(fromParticipantURL url: URL?) -> String? {
         guard let url, url.scheme?.lowercased() == "mailto" else { return nil }
-        var rest = url.absoluteString
-        guard let colon = rest.firstIndex(of: ":") else { return nil }
-        rest = String(rest[rest.index(after: colon)...])
+        var rest = String(url.absoluteString.dropFirst("mailto:".count))
         // 헤더 파라미터("?subject=…")와 다중 수신자는 버리고 첫 주소만 쓴다.
         if let question = rest.firstIndex(of: "?") { rest = String(rest[..<question]) }
         if let comma = rest.firstIndex(of: ",") { rest = String(rest[..<comma]) }

@@ -913,7 +913,7 @@ final class AppState {
         }
     }
 
-    private func startMicCapture(mode: StartMode = .online) throws {
+    private func startMicCapture(mode: StartMode) throws {
         let micCapture = MicCapture()
         let channel = Self.micIngestChannel(for: mode)
         let feedsDiarizer = (mode == .inPerson)
@@ -1054,16 +1054,17 @@ final class AppState {
 
     /// 자동 시작 전에 둘 지연 시간. 카운트다운이 꺼져 있으면 즉시 시작(0).
     nonisolated static func autoStartDelay(countdownEnabled: Bool) -> TimeInterval {
-        countdownEnabled ? AppState.autoStartCountdownSeconds : 0
+        countdownEnabled ? Self.autoStartCountdownSeconds : 0
     }
 
     /// 자동 시작 진입점. 카운트다운 설정에 따라 패널을 띄우거나 즉시 시작한다.
     private func beginAutoStart(reason: String) {
         guard !isActive else { return }
+        let notice = "Recording started automatically (\(reason))."
         let delay = Self.autoStartDelay(countdownEnabled: autoStartCountdown)
         guard delay > 0 else {
             start()
-            noticeMessage = "Recording started automatically (\(reason))."
+            noticeMessage = notice
             return
         }
         guard !countdownPanel.isVisible else { return }
@@ -1073,7 +1074,7 @@ final class AppState {
             onExpire: { [weak self] in
                 guard let self, !self.isActive else { return }
                 self.start()
-                self.noticeMessage = "Recording started automatically (\(reason))."
+                self.noticeMessage = notice
             },
             onCancel: { [weak self] in
                 self?.noticeMessage = "Auto-start canceled."
