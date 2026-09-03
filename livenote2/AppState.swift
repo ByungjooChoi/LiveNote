@@ -264,6 +264,22 @@ final class AppState {
 
     /// 회의 앱(Zoom/Teams 등) 실행 감지 시 자동 시작
     private(set) var autoStartOnMeetingApp = false
+    /// 자동 시작 전 5초 카운트다운 패널 표시 (기본 켬)
+    private(set) var autoStartCountdown = true
+    /// 캘린더 회의 시작 시각에 자동 시작 (기본 끔)
+    private(set) var autoStartAtCalendarTime = false
+    /// 자동 시작 카운트다운 길이
+    nonisolated static let autoStartCountdownSeconds: TimeInterval = 5
+
+    /// ContentView에 화면 전환을 요청하는 신호 (Screen 상태는 ContentView 소유).
+    /// 알림 팝업의 "Change notification settings" 등 창 밖에서 온 요청에 쓴다.
+    enum PendingScreen: Equatable {
+        case settings
+    }
+    var pendingScreen: PendingScreen?
+
+    /// 현재(또는 마지막) 세션의 시작 방식. 대면 모드 배지·경로 분기에 사용.
+    private(set) var currentStartMode: StartMode = .online
 
     /// 방금 끝난 회의가 저장된 폴더 (중지 후 이름 변경·늦은 번역 도착 시 재저장 대상).
     private(set) var currentMeetingURL: URL?
@@ -290,6 +306,8 @@ final class AppState {
     @ObservationIgnored private var autoStopTask: Task<Void, Never>?
     @ObservationIgnored private var appTerminateObserver: NSObjectProtocol?
     @ObservationIgnored private var meetingAppLaunchObserver: NSObjectProtocol?
+    /// 자동 시작 직전 카운트다운 패널
+    @ObservationIgnored private let countdownPanel = CountdownPanelController()
     @ObservationIgnored private var lastSpeechAt = Date()
     @ObservationIgnored private var mutedSpeechMonitor: Task<Void, Never>?
     @ObservationIgnored private var lastMutedSpeechWarningAt: Date?
@@ -330,6 +348,9 @@ final class AppState {
             echoFilterEnabled = defaults.bool(forKey: "echoFilter")
         }
         autoStartOnMeetingApp = defaults.bool(forKey: "autoStartOnMeetingApp")
+        autoStartCountdown = Self.restoredBool(defaults, key: "autoStartCountdown", default: true)
+        autoStartAtCalendarTime = Self.restoredBool(
+            defaults, key: "autoStartAtCalendarTime", default: false)
         if defaults.object(forKey: "syncMuteWithZoom") != nil {
             syncMuteWithZoom = defaults.bool(forKey: "syncMuteWithZoom")
         }
@@ -412,6 +433,26 @@ final class AppState {
             self.start()
             self.noticeMessage = "Joining Zoom from the calendar alert — recording started."
         }
+
+        // 팝업 메뉴 "Start LiveNote only" → 링크는 열지 않고 기록만 시작
+        calendar.onRecordRequested = { [weak self] in
+            guard let self, !self.isActive else { return }
+            self.start()
+            self.noticeMessage = "Recording started from the calendar alert."
+        }
+
+        // 팝업 메뉴 "Change notification settings" → 창을 앞으로 + Settings 화면 요청
+        calendar.onOpenSettingsRequested = { [weak self] in
+            guard let self else { return }
+            self.pendingScreen = .settings
+            NSApp.activate(ignoringOtherApps: true)
+        }
+
+        // 캘린더 회의 시작 시각 도달 → 설정이 켜져 있을 때만 자동 시작 (카운트다운 경유)
+        calendar.onMeetingTimeReached = { [weak self] title in
+            guard let self, self.autoStartAtCalendarTime, !self.isActive else { return }
+            self.beginAutoStart(reason: "\(title) is starting")
+        }
     }
 
     // MARK: - 화자 이름
@@ -452,7 +493,7 @@ final class AppState {
         micMuted = muted
         micMutedByZoom = fromZoomSync && muted
         if muted {
-            volatileText[.me] = ""
+            volatileText[Self.micIngestChannel(for: currentStartMode)] = ""
             startMutedSpeechMonitor()
         } else {
             mutedSpeechMonitor?.cancel()
@@ -580,8 +621,16 @@ final class AppState {
 
     // MARK: - 시작/중지
 
-    func start() {
+    /// 대면 모드에서 마이크 샘플을 어느 채널로 엔진에 넣을지.
+    /// online = .me (기존), inPerson = .them (시스템 오디오가 없으므로 화자구분 슬롯을 붙이려면
+    /// them 채널로 들어가야 dominantSlot 조회 경로를 탄다).
+    nonisolated static func micIngestChannel(for mode: StartMode) -> AudioChannel {
+        mode == .inPerson ? .them : .me
+    }
+
+    func start(mode: StartMode = .online) {
         guard !isActive else { return }
+        currentStartMode = mode
         phase = .preparing("Preparing…")
         rows.removeAll()
         volatileText = [.me: "", .them: ""]
@@ -607,7 +656,8 @@ final class AppState {
         meetingTitle = calendar.ongoingMeetingTitle()
 
         // Zoom 화자 태그: Zoom이 떠 있으면 폴링 시작 (권한 없으면 요청 다이얼로그 + 안내)
-        if ZoomSpeakerTagger.zoomRunning() {
+        // 대면 모드는 Zoom 타일과 무관하므로 태거를 띄우지 않는다.
+        if mode == .online, ZoomSpeakerTagger.zoomRunning() {
             if ZoomSpeakerTagger.accessibilityTrusted(prompt: false) {
                 zoomTagger.start(myName: myName)
             } else {
@@ -655,8 +705,9 @@ final class AppState {
         engine = newEngine
 
         Task {
-            // 0) 에코 필터 상태 전달
+            // 0) 에코 필터 상태 + 마이크 채널 전달 (대면 모드는 마이크가 them 채널로 들어감)
             await newEngine.setEchoFilter(echoFilterEnabled)
+            await newEngine.setMicChannel(Self.micIngestChannel(for: mode))
 
             // 1) 마이크 권한
             let granted = await MicCapture.requestPermission()
@@ -675,11 +726,12 @@ final class AppState {
 
             // 3) 화자구분 준비. Zoom 태그가 잡히면 LS-EEND는 기동하지 않음 (부하 절감 —
             //    Zoom 회의에서는 타일의 활성 화자 이름이 슬롯보다 정확하고 이름까지 공짜)
-            if ZoomSpeakerTagger.zoomRunning(), !zoomTagger.permissionMissing {
+            //    대면 모드는 마이크 하나로 여러 사람을 받으므로 LS-EEND를 항상 준비한다.
+            if mode == .online, ZoomSpeakerTagger.zoomRunning(), !zoomTagger.permissionMissing {
                 // 첫 폴 결과를 잠깐 기다려 타일 존재 확인
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
             }
-            if zoomTagger.zoomDetected {
+            if mode == .online, zoomTagger.zoomDetected {
                 speakerDiarizer = nil
             } else {
                 phase = .preparing("Preparing speaker diarization model… (downloads on first run)")
@@ -726,7 +778,7 @@ final class AppState {
 
             // 5) 마이크 시작 (필수)
             do {
-                try startMicCapture()
+                try startMicCapture(mode: mode)
             } catch {
                 phase = .error("Microphone start failed: \(error.localizedDescription)")
                 teardownAudio()
@@ -734,13 +786,15 @@ final class AppState {
             }
 
             // 6) 시스템 오디오 탭 (실패해도 마이크 전용으로 계속)
-            let tap = SystemAudioTap()
-            tap.onSamples = { [weak self] samples in
+            //    대면 모드는 시스템 오디오를 회의 음성으로 쓰지 않으므로 탭 자체를 열지 않는다.
+            let tap = (mode == .inPerson) ? nil : SystemAudioTap()
+            systemAudioAvailable = (tap != nil)
+            tap?.onSamples = { [weak self] samples in
                 self?.audioContinuation?.yield((.them, samples))
                 self?.diarizerContinuation?.yield(samples)
             }
             do {
-                try tap.start()
+                try tap?.start()
                 systemTap = tap
             } catch {
                 systemAudioAvailable = false
@@ -852,10 +906,16 @@ final class AppState {
         }
     }
 
-    private func startMicCapture() throws {
+    private func startMicCapture(mode: StartMode = .online) throws {
         let micCapture = MicCapture()
+        let channel = Self.micIngestChannel(for: mode)
+        let feedsDiarizer = (mode == .inPerson)
         micCapture.onSamples = { [weak self] samples in
-            self?.audioContinuation?.yield((.me, samples))
+            self?.audioContinuation?.yield((channel, samples))
+            // 대면 모드에서는 마이크가 유일한 회의 음성이므로 화자구분에도 같은 샘플을 넣는다.
+            if feedsDiarizer {
+                self?.diarizerContinuation?.yield(samples)
+            }
         }
         micCapture.onLevel = { [weak self] level in
             Task { @MainActor in self?.micLevel = level }
@@ -956,6 +1016,53 @@ final class AppState {
         UserDefaults.standard.set(enabled, forKey: "autoStartOnMeetingApp")
     }
 
+    func setAutoStartCountdown(_ enabled: Bool) {
+        autoStartCountdown = enabled
+        UserDefaults.standard.set(enabled, forKey: "autoStartCountdown")
+        if !enabled { countdownPanel.close() }
+    }
+
+    func setAutoStartAtCalendarTime(_ enabled: Bool) {
+        autoStartAtCalendarTime = enabled
+        UserDefaults.standard.set(enabled, forKey: "autoStartAtCalendarTime")
+    }
+
+    /// 저장된 적 없는 키는 fallback을 쓰는 Bool 설정 복원 (기본값이 true인 토글에 필요).
+    nonisolated static func restoredBool(
+        _ defaults: UserDefaults, key: String, default fallback: Bool
+    ) -> Bool {
+        defaults.object(forKey: key) != nil ? defaults.bool(forKey: key) : fallback
+    }
+
+    /// 자동 시작 전에 둘 지연 시간. 카운트다운이 꺼져 있으면 즉시 시작(0).
+    nonisolated static func autoStartDelay(countdownEnabled: Bool) -> TimeInterval {
+        countdownEnabled ? AppState.autoStartCountdownSeconds : 0
+    }
+
+    /// 자동 시작 진입점. 카운트다운 설정에 따라 패널을 띄우거나 즉시 시작한다.
+    private func beginAutoStart(reason: String) {
+        guard !isActive else { return }
+        let delay = Self.autoStartDelay(countdownEnabled: autoStartCountdown)
+        guard delay > 0 else {
+            start()
+            noticeMessage = "Recording started automatically (\(reason))."
+            return
+        }
+        guard !countdownPanel.isVisible else { return }
+        countdownPanel.show(
+            reason: reason,
+            seconds: delay,
+            onExpire: { [weak self] in
+                guard let self, !self.isActive else { return }
+                self.start()
+                self.noticeMessage = "Recording started automatically (\(reason))."
+            },
+            onCancel: { [weak self] in
+                self?.noticeMessage = "Auto-start canceled."
+            }
+        )
+    }
+
     private func registerMeetingAppLaunchObserver() {
         meetingAppLaunchObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didLaunchApplicationNotification,
@@ -968,8 +1075,7 @@ final class AppState {
             let appName = app.localizedName ?? "meeting app"
             Task { @MainActor [weak self] in
                 guard let self, self.autoStartOnMeetingApp, !self.isRunning else { return }
-                self.start()
-                self.noticeMessage = "\(appName) launched — recording started automatically."
+                self.beginAutoStart(reason: "\(appName) launched")
             }
         }
     }

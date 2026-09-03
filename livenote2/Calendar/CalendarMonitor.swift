@@ -36,10 +36,19 @@ final class CalendarMonitor {
 
     /// [참가] 클릭 시 호출 — AppState가 "기록 시작"을 배선합니다.
     @ObservationIgnored var onJoinRequested: (() -> Void)?
+    /// "Start LiveNote only" 선택 시 호출: 링크는 열지 않고 기록만 시작.
+    @ObservationIgnored var onRecordRequested: (() -> Void)?
+    /// "Change notification settings" 선택 시 호출: AppState가 Settings 화면을 요청.
+    @ObservationIgnored var onOpenSettingsRequested: (() -> Void)?
+    /// 캘린더 회의 시작 시각 도달 시 호출 (일정 제목 전달).
+    /// 실제 기록 시작 여부는 AppState의 autoStartAtCalendarTime 설정이 결정한다.
+    @ObservationIgnored var onMeetingTimeReached: ((String) -> Void)?
 
     @ObservationIgnored private let store = EKEventStore()
     @ObservationIgnored private var monitorTask: Task<Void, Never>?
     @ObservationIgnored private var alertedKeys: Set<String> = []
+    /// 시작 시각 도달을 이미 통지한 일정 (회의당 1회)
+    @ObservationIgnored private var startNotifiedKeys: Set<String> = []
     @ObservationIgnored private var currentAlert: MeetingAlert?
     @ObservationIgnored private let panel = MeetingAlertPanelController()
 
@@ -114,6 +123,9 @@ final class CalendarMonitor {
         // 사이드바 "오늘 일정" 갱신 (내부 60초 스로틀)
         refreshTodayUpcoming(now: now)
 
+        // 회의 시작 시각 도달 통지 (AppState의 autoStartAtCalendarTime이 실제 시작 여부 결정)
+        notifyMeetingTimeReached(now: now)
+
         // 떠 있는 팝업이 유예 시간을 넘기면 자동 닫기
         if let current = currentAlert, now > current.start.addingTimeInterval(Self.graceSeconds) {
             dismissAlert()
@@ -126,13 +138,44 @@ final class CalendarMonitor {
         currentAlert = candidate
         panel.show(
             meeting: candidate,
+            suggestedAgenda: nil,
             onJoin: { [weak self] in
                 Task { @MainActor in self?.join() }
+            },
+            onJoinOnly: { [weak self] in
+                Task { @MainActor in self?.joinOnly() }
+            },
+            onRecordOnly: { [weak self] in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.onRecordRequested?()
+                    self.dismissAlert()
+                }
+            },
+            onOpenSettings: { [weak self] in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.onOpenSettingsRequested?()
+                    self.dismissAlert()
+                }
             },
             onDismiss: { [weak self] in
                 Task { @MainActor in self?.dismissAlert() }
             }
         )
+    }
+
+    /// 오늘 일정 중 시작 시각을 막 지난 온라인 회의를 한 번씩 통지한다.
+    /// 폴링 주기(10초)와 todayUpcoming 갱신 주기(60초)를 감안해 시작 후 3분까지 유효.
+    private func notifyMeetingTimeReached(now: Date) {
+        guard onMeetingTimeReached != nil else { return }
+        for item in todayUpcoming {
+            guard item.webLink != nil else { continue }
+            guard now >= item.start, now <= item.start.addingTimeInterval(3 * 60) else { continue }
+            guard startNotifiedKeys.insert(item.id).inserted else { continue }
+            onMeetingTimeReached?(item.title)
+            return
+        }
     }
 
     /// 지금 알림을 띄워야 할 가장 가까운 회의.
@@ -179,14 +222,24 @@ final class CalendarMonitor {
     // MARK: - 참가 / 닫기
 
     private func join() {
+        openCurrentMeetingLink()
+        onJoinRequested?()
+        dismissAlert()
+    }
+
+    /// 회의 링크만 열고 기록은 시작하지 않는다 ("Join meeting only").
+    private func joinOnly() {
+        openCurrentMeetingLink()
+        dismissAlert()
+    }
+
+    private func openCurrentMeetingLink() {
         guard let meeting = currentAlert else { return }
         // Zoom 앱이 설치되어 있으면 딥링크로 직접 실행, 아니면 웹 링크 (브라우저 → Zoom 리다이렉트)
         let zoomInstalled = URL(string: "zoommtg://")
             .flatMap { NSWorkspace.shared.urlForApplication(toOpen: $0) } != nil
         let target = (zoomInstalled ? meeting.deepLink : nil) ?? meeting.webLink
         NSWorkspace.shared.open(target)
-        onJoinRequested?()
-        dismissAlert()
     }
 
     private func dismissAlert() {

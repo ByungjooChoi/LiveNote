@@ -27,6 +27,15 @@ struct TranscriptRow: Identifiable, Sendable, Codable {
     }
 }
 
+/// 회의 시작 방식.
+/// online = 기존 경로(마이크 = 나, 시스템 오디오 = 상대방).
+/// inPerson = 대면 회의. 시스템 오디오 탭을 열지 않고 마이크 하나로 여러 사람을 받으므로
+/// 마이크 샘플을 them 채널로 넣어 화자구분 슬롯(Speaker N)이 붙게 한다.
+enum StartMode: String, Sendable, Codable {
+    case online
+    case inPerson
+}
+
 /// 캘린더 일정에서 캡처한 회의 참석자 (본인 제외).
 /// session.json에 함께 저장되어 이후 브리핑·태스크 담당자 매칭의 근거가 된다.
 struct Attendee: Codable, Hashable, Sendable {

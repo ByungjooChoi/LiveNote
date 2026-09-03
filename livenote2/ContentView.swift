@@ -60,6 +60,14 @@ struct ContentView: View {
         .onChange(of: app.isRunning) { _, running in
             if running { screen = .live }
         }
+        // 창 밖(알림 팝업 등)에서 온 화면 전환 요청 반영
+        .onChange(of: app.pendingScreen) { _, pending in
+            guard let pending else { return }
+            switch pending {
+            case .settings: screen = .settings
+            }
+            app.pendingScreen = nil
+        }
     }
 
     @ViewBuilder
@@ -265,13 +273,10 @@ struct HomeView: View {
                     Text("New recording")
                         .font(.callout.weight(.medium))
                     Spacer()
-                    Button("Start") {
-                        app.start()
+                    StartMenu { mode in
+                        app.start(mode: mode)
                         screen = .live
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(Theme.accent)
-                    .controlSize(.small)
                 }
                 .padding(14)
                 if !app.calendar.todayUpcoming.isEmpty {
@@ -798,6 +803,11 @@ struct LiveMeetingView: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
+
+            if app.currentStartMode == .inPerson, app.isActive || !app.rows.isEmpty {
+                ModeBadge(text: "In person", systemImage: "person.2.fill")
+                    .help("In-person mode: microphone only, speakers separated into slots.")
+            }
 
             Spacer()
 
@@ -1547,6 +1557,17 @@ struct SettingsView: View {
                     Toggle("Auto-start with meeting apps", isOn: Binding(
                         get: { app.autoStartOnMeetingApp },
                         set: { app.setAutoStart($0) }
+                    ))
+                    Toggle("Countdown before auto-start (5s)", isOn: Binding(
+                        get: { app.autoStartCountdown },
+                        set: { app.setAutoStartCountdown($0) }
+                    ))
+                    Text("Shows a cancelable countdown instead of recording right away.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Toggle("Auto-start at calendar meeting time", isOn: Binding(
+                        get: { app.autoStartAtCalendarTime },
+                        set: { app.setAutoStartAtCalendarTime($0) }
                     ))
                 }
 

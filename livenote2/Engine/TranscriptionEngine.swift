@@ -75,6 +75,9 @@ actor TranscriptionEngine {
     private var echoFilterEnabled = true
     /// 마이크 뮤트. true면 .me 채널 오디오를 버림 (오디오 스레드가 아닌 actor에서 판정 — §7.4).
     private var micMuted = false
+    /// 마이크 샘플이 들어오는 채널. 대면 모드에서는 .them (화자구분 슬롯을 붙이기 위해).
+    /// 뮤트 판정이 어느 채널을 버릴지 결정한다.
+    private var micChannel: AudioChannel = .me
     /// 채널별 10ms 포락선 링과 프레임 조립용 잔여 샘플
     private var envelope: [AudioChannel: [Float]] = [.me: [], .them: []]
     private var envelopePending: [AudioChannel: [Float]] = [.me: [], .them: []]
@@ -110,11 +113,16 @@ actor TranscriptionEngine {
         echoFilterEnabled = enabled
     }
 
-    /// 마이크 뮤트 설정. 뮤트 시 열려 있던 "나" 문장은 즉시 확정.
+    /// 마이크 샘플이 실려 오는 채널 지정 (세션 시작 시 1회).
+    func setMicChannel(_ channel: AudioChannel) {
+        micChannel = channel
+    }
+
+    /// 마이크 뮤트 설정. 뮤트 시 열려 있던 마이크 문장은 즉시 확정.
     func setMicMuted(_ muted: Bool) async {
         micMuted = muted
         if muted {
-            await flushChannel(.me)
+            await flushChannel(micChannel)
         }
     }
 
@@ -152,7 +160,7 @@ actor TranscriptionEngine {
 
     func ingest(_ samples: [Float], channel: AudioChannel) async {
         // 뮤트 중엔 마이크 채널을 통째로 버림 (에코 유입 원천 차단)
-        if channel == .me, micMuted { return }
+        if channel == micChannel, micMuted { return }
         guard var tracker = trackers[channel], !samples.isEmpty else { return }
 
         // 포락선 갱신은 게이트 판정보다 먼저 (현재 청크 포함)
