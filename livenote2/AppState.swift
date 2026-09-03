@@ -120,6 +120,11 @@ final class AppState {
     private(set) var chatModel: ChatModelChoice = .gemini37Flash
     /// 채팅 대화 저장소 (Chat 화면 Recents)
     let chatStore = ChatStore()
+    /// 레시피 저장소 (Phase 1 Recipes)
+    let recipeStore = RecipeStore()
+    var isRecipeRunning = false
+    var lastRecipeError: String?
+    var hasGeminiKey: Bool { GeminiKeychain.load() != nil }
     /// 현재 진행 중인 대화의 저장 ID (첫 질문 때 발급)
     @ObservationIgnored private var currentChatID: UUID?
     @ObservationIgnored private var chatScopeKey: String?
@@ -149,7 +154,7 @@ final class AppState {
         chatScopeKey = ChatScope.archive.key
         currentChatID = saved.id
         chatMessages = saved.messages.map {
-            ChatMessage(role: $0.isUser ? .user : .assistant, text: $0.text)
+            ChatMessage(role: $0.isUser ? .user : .assistant, text: $0.text, promptText: $0.promptText)
         }
     }
 
@@ -166,8 +171,76 @@ final class AppState {
             createdAt: existing?.createdAt ?? Date(),
             updatedAt: Date(),
             scopeKey: chatScopeKey ?? ChatScope.archive.key,
-            messages: chatMessages.map { .init(isUser: $0.role == .user, text: $0.text) }
+            messages: chatMessages.map { .init(isUser: $0.role == .user, text: $0.text, promptText: $0.promptText) }
         ))
+    }
+
+    func recipeMeetings(for scope: RecipeScope) -> [MeetingSummary] {
+        scope.resolve(meetings: meetingStore.meetings)
+    }
+
+    /// 레시피 대화의 첫 사용자 턴 표시 문구. 예산 초과로 잘린 회의가 있으면 그 수를 덧붙인다.
+    static func recipeUserLabel(title: String, scopeLabel: String, count: Int, truncated: Int = 0) -> String {
+        let meetingCount = count == 1 ? "1 meeting" : "\(count) meetings"
+        let cut = truncated > 0 ? ", \(truncated) truncated" : ""
+        return "Recipe: \(title) (\(scopeLabel), \(meetingCount)\(cut))"
+    }
+
+    func runRecipe(
+        _ recipe: Recipe,
+        scope: RecipeScope,
+        model: ChatModelChoice,
+        language: String
+    ) async -> Bool {
+        let meetings = recipeMeetings(for: scope)
+        guard !meetings.isEmpty else {
+            lastRecipeError = "No meetings in selected scope"
+            return false
+        }
+
+        isRecipeRunning = true
+        lastRecipeError = nil
+        defer { isRecipeRunning = false }
+
+        do {
+            let result = try await RecipeRunner.run(
+                recipe: recipe,
+                meetings: meetings,
+                model: model,
+                language: language,
+                store: meetingStore,
+                localEngine: localChat
+            )
+
+            startNewChat()
+            chatScopeKey = ChatScope.archive.key
+
+            let userLabel = Self.recipeUserLabel(
+                title: recipe.title,
+                scopeLabel: scope.label,
+                count: meetings.count,
+                truncated: result.truncated
+            )
+            chatMessages.append(ChatMessage(role: .user, text: userLabel, promptText: result.promptText))
+            chatMessages.append(ChatMessage(role: .assistant, text: result.text))
+            persistCurrentChat()
+
+            do {
+                try RecipeOutputStore().write(text: result.text, title: recipe.title)
+            } catch {
+                AppLog.write("recipe", "레시피 산출물 저장 실패: \(error.localizedDescription)")
+            }
+
+            AppLog.write(
+                "recipe",
+                "레시피 실행 완료 id=\(recipe.id) meetings=\(meetings.count) truncated=\(result.truncated) model=\(model.rawValue) lang=\(language) out=\(result.text.count)자"
+            )
+            return true
+        } catch {
+            lastRecipeError = error.localizedDescription
+            AppLog.write("recipe", "레시피 실행 실패 id=\(recipe.id): \(error.localizedDescription)")
+            return false
+        }
     }
 
     func askChat(_ question: String, scope: ChatScope) {
@@ -180,7 +253,15 @@ final class AppState {
         AppLog.write("chat", "질문 scope=\(scope.key.prefix(40)) model=\(chatModel.rawValue) 질문=\(trimmed.count)자")
 
         let context = buildChatContext(scope)
-        let history = chatMessages.dropLast().suffix(8).map { (isUser: $0.role == .user, text: $0.text) }
+        let previous = chatMessages.dropLast()
+        let history: [(isUser: Bool, text: String)]
+        if let first = previous.first, first.promptText != nil {
+            let tail = previous.dropFirst().suffix(7)
+            let turns = [first] + Array(tail)
+            history = turns.map { (isUser: $0.role == .user, text: $0.promptText ?? $0.text) }
+        } else {
+            history = previous.suffix(8).map { (isUser: $0.role == .user, text: $0.promptText ?? $0.text) }
+        }
         let model = chatModel
         let localRef = localChat
 

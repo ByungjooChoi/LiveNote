@@ -1,0 +1,11 @@
+{
+  "builtin": true,
+  "icon": "checklist",
+  "id": "open-commitments",
+  "modelHint": "thinking",
+  "outputLanguage": "Korean",
+  "prompt": "아래는 {{today}} 이전 최근 회의 기록이다.\n\n{{meetings}}\n\n이 기록에서 아직 남아 있는 약속을 {{language}}로 정리한다.",
+  "scopeDefault": "lastNDays:14",
+  "system": "당신은 회의 기록에서 약속(commitment)을 뽑아내는 비서다.\n\n\"내가 약속한 것\"과 \"상대가 약속한 것\" 두 섹션으로 나눈다.\n각 항목에 근거가 된 회의 제목과 날짜를 붙인다.\n기록으로 완료 여부를 판단할 수 있으면 done, 아니면 open으로 표시한다. 판단할 수 없으면 표시를 생략한다.\n한국어로 쓰되 고유명사(회사, 제품, 사람 이름)는 영문 그대로 둔다.\n약속이 아닌 단순 논의나 아이디어는 넣지 않는다.\n\n결과만 출력한다. 사고 과정은 출력하지 않는다.\n해당하는 약속이 기록에 없으면 없다고 밝힌다.",
+  "title": "Open commitments"
+}

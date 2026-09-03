@@ -1,11 +1,12 @@
 import Foundation
 import Observation
 
-/// 저장된 채팅 대화 한 건 — `~/Documents/livenote2/chats/<uuid>.json`
+/// 저장된 채팅 대화 한 건: ~/Documents/LiveNote/chats/<uuid>.json
 struct SavedChat: Identifiable, Codable {
     struct Message: Codable {
         var isUser: Bool
         var text: String
+        var promptText: String? = nil
     }
 
     let id: UUID

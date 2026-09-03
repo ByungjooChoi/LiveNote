@@ -106,7 +106,7 @@ enum ChatModelChoice: String, Sendable, CaseIterable {
     ]
 }
 
-/// 언어 설정 (Settings > Language). UserDefaults 직접 읽기 — 엔진(actor)에서도 접근.
+/// 언어 설정 (Settings > Language). UserDefaults 직접 읽기: 엔진(actor)에서도 접근.
 enum LanguagePrefs {
     static let translationOptions = ["Korean", "Japanese", "Chinese", "Spanish", "French", "German"]
     static let summaryOptions = ["English", "Korean"]
@@ -129,9 +129,17 @@ enum LanguagePrefs {
 /// AI 채팅 말풍선.
 struct ChatMessage: Identifiable, Sendable {
     enum Role: Sendable { case user, assistant }
-    let id = UUID()
+    let id: UUID
     let role: Role
     var text: String
+    var promptText: String?
+
+    init(id: UUID = UUID(), role: Role, text: String, promptText: String? = nil) {
+        self.id = id
+        self.role = role
+        self.text = text
+        self.promptText = promptText
+    }
 }
 
 /// 클라우드 번역 연결 상태 (헤더 표시등용).

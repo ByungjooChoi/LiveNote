@@ -3,7 +3,7 @@ import Foundation
 /// 앱 공용 파일 로거 — `~/Documents/LiveNote/logs/{카테고리}.log`
 ///
 /// 카테고리: app(세션 수명), cloud(클라우드 번역 연결), chat(AI 채팅),
-/// summary(요약), zoomtag(Zoom 화자 태그).
+/// summary(요약), zoomtag(Zoom 화자 태그), recipe(레시피 저장·실행).
 /// 원칙: 전사·번역·질문·답변의 "내용"은 기록하지 않는다 (크기·상태·오류만).
 enum AppLog {
 

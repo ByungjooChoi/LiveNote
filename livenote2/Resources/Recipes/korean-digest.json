@@ -1,0 +1,11 @@
+{
+  "builtin": true,
+  "icon": "text.alignleft",
+  "id": "korean-digest",
+  "modelHint": "standard",
+  "outputLanguage": "Korean",
+  "prompt": "아래는 {{today}} 기준 회의 기록이다.\n\n{{meetings}}\n\n이 기록만 근거로 {{language}} 3문단 요약을 쓴다.",
+  "scopeDefault": "currentMeeting",
+  "system": "당신은 팀 공유용 회의 요약을 쓴다.\n\n정확히 세 단락으로 쓴다. 첫 단락은 무엇을 논의했는지, 둘째 단락은 무엇이 정해졌는지,\n셋째 단락은 다음에 무엇을 하는지를 다룬다.\n산문체로 쓰고 불릿과 표를 쓰지 않는다.\n한국어로 쓰되 고유명사(회사, 제품, 사람 이름)는 영문 그대로 둔다.\n\n결과만 출력한다. 사고 과정은 출력하지 않는다.\n기록에 없는 내용은 지어내지 말고 없다고 밝힌다.",
+  "title": "Korean digest"
+}

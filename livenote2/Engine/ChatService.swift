@@ -26,14 +26,19 @@ enum ChatPrompt {
     }
 }
 
-/// 로컬 채팅 — Qwen3.5-4B. 첫 질문 때 로드 후 상주 (채팅 응답성 우선, 약 +2.3GB).
+/// 로컬 채팅: Qwen3.5-4B. 첫 질문 때 로드 후 상주 (채팅 응답성 우선, 약 +2.3GB).
 /// 요약(SummaryService)과 달리 대화는 연속 사용이 잦아 온디맨드 해제를 하지 않음.
 actor LocalChatEngine {
 
     private var container: ModelContainer?
     private var loadedModelID: String?
 
-    func respond(context: String, history: [(isUser: Bool, text: String)], question: String) async throws -> String {
+    func respond(
+        context: String,
+        history: [(isUser: Bool, text: String)],
+        question: String,
+        systemPrompt: String? = nil
+    ) async throws -> String {
         let modelID = SummaryService.modelID
         if container == nil || loadedModelID != modelID {
             AppLog.write("chat", "로컬 모델 로드 시작 (\(modelID))")
@@ -47,7 +52,8 @@ actor LocalChatEngine {
         guard let container else { throw NSError(domain: "livenote2.chat", code: 2,
             userInfo: [NSLocalizedDescriptionKey: "Local model load failed"]) }
         let started = Date()
-        let session = ChatSession(container, instructions: ChatPrompt.system)
+        let instructions = systemPrompt ?? ChatPrompt.system
+        let session = ChatSession(container, instructions: instructions)
         let answer = try await session.respond(
             to: ChatPrompt.composed(context: context, history: history, question: question))
         AppLog.write("chat", "로컬 응답 \(answer.count)자 \(String(format: "%.1f", Date().timeIntervalSince(started)))s")
@@ -64,7 +70,7 @@ actor LocalChatEngine {
     }
 }
 
-/// 클라우드 채팅 — Gemini 3.7 Flash (generateContent, 멀티턴 contents).
+/// 클라우드 채팅: Gemini 3.7 Flash (generateContent, 멀티턴 contents).
 enum GeminiChat {
 
     static func respond(
@@ -73,7 +79,8 @@ enum GeminiChat {
         question: String,
         apiKey: String,
         model: String = GeminiSummarizer.model,
-        thinkingLevel: String? = nil
+        thinkingLevel: String? = nil,
+        systemPrompt: String? = nil
     ) async throws -> String {
         guard let url = URL(string:
             "https://generativelanguage.googleapis.com/v1beta/models/\(model):generateContent"
@@ -100,10 +107,10 @@ enum GeminiChat {
         request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
         request.timeoutInterval = 150
         var body: [String: Any] = [
-            "systemInstruction": ["parts": [["text": ChatPrompt.system]]],
+            "systemInstruction": ["parts": [["text": systemPrompt ?? ChatPrompt.system]]],
             "contents": contents,
         ]
-        // Gemini 3.x thinking 제어 (thinkingLevel: high/medium — thinkingBudget은 레거시)
+        // Gemini 3.x thinking 제어 (thinkingLevel: high/medium; thinkingBudget은 레거시)
         if let thinkingLevel {
             body["generationConfig"] = ["thinkingConfig": ["thinkingLevel": thinkingLevel]]
         }
