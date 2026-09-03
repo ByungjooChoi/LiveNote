@@ -106,6 +106,33 @@ final class MeetingTitleTests: XCTestCase {
         XCTAssertEqual(store.meetings.count, 1)
     }
 
+    /// 충돌로 " (2)"가 붙은 폴더를 같은 제목으로 다시 rename해도 번호가 커지지 않는다.
+    func testRenameIsIdempotentForSuffixedFolder() throws {
+        let store = try MeetingStoreFixture.makeStore()
+        defer { MeetingStoreFixture.cleanUp(store) }
+
+        let original = try XCTUnwrap(saveUntitledMeeting(in: store, hour: 10))
+        let taken = store.rootURL.appendingPathComponent(
+            MeetingStore.folderBaseName(for: MeetingStoreFixture.date(hour: 10), title: "Weekly sync"),
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: taken, withIntermediateDirectories: true)
+
+        let renamed = try XCTUnwrap(store.rename(at: original, title: "Weekly sync"))
+        XCTAssertTrue(renamed.lastPathComponent.hasSuffix("Weekly sync (2)"), renamed.lastPathComponent)
+
+        let again = try XCTUnwrap(store.rename(at: renamed, title: "Weekly sync"))
+        XCTAssertEqual(again, renamed)
+        XCTAssertEqual(store.load(again)?.title, "Weekly sync")
+    }
+
+    func testFolderNameMatchesBaseOnlyForCollisionSuffix() {
+        XCTAssertTrue(MeetingStore.folderName("2026-09-01 1000 Sync", matchesBase: "2026-09-01 1000 Sync"))
+        XCTAssertTrue(MeetingStore.folderName("2026-09-01 1000 Sync (2)", matchesBase: "2026-09-01 1000 Sync"))
+        XCTAssertFalse(MeetingStore.folderName("2026-09-01 1000 Sync (x)", matchesBase: "2026-09-01 1000 Sync"))
+        XCTAssertFalse(MeetingStore.folderName("2026-09-01 1000 Syncing", matchesBase: "2026-09-01 1000 Sync"))
+    }
+
     func testRenameReturnsNilForUnknownFolder() throws {
         let store = try MeetingStoreFixture.makeStore()
         defer { MeetingStoreFixture.cleanUp(store) }

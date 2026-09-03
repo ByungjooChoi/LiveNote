@@ -185,7 +185,11 @@ final class MeetingStore {
         }
 
         // 이미 같은 이름이면 (2) 접미사가 붙지 않도록 이동 자체를 생략한다.
-        guard url.lastPathComponent != Self.folderBaseName(for: meeting.startedAt, title: title) else {
+        // 충돌 회피로 붙은 " (N)" 접미사도 같은 이름으로 본다 (재호출마다 번호가 커지는 것 방지).
+        guard !Self.folderName(
+            url.lastPathComponent,
+            matchesBase: Self.folderBaseName(for: meeting.startedAt, title: title)
+        ) else {
             refresh()
             return url
         }
@@ -407,6 +411,16 @@ final class MeetingStore {
             base += " \(safeTitle)"
         }
         return base
+    }
+
+    /// 폴더 이름이 이 기본 이름에서 온 것인지 (정확히 같거나 충돌 회피 접미사 " (N)"만 붙은 경우).
+    /// rename을 같은 제목으로 반복해도 번호가 계속 커지지 않게 하는 판정이다.
+    static func folderName(_ name: String, matchesBase base: String) -> Bool {
+        if name == base { return true }
+        let pattern = "^\(NSRegularExpression.escapedPattern(for: base)) \\(\\d+\\)$"
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return false }
+        let range = NSRange(name.startIndex..., in: name)
+        return regex.firstMatch(in: name, range: range) != nil
     }
 
     /// 회의 제목을 폴더명에 안전한 형태로: 경로 예약 문자 제거, 공백 정리, 40자 제한.

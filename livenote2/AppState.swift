@@ -455,6 +455,8 @@ final class AppState {
         calendar.onMeetingTimeReached = { [weak self] item in
             guard let self, self.autoStartAtCalendarTime, !self.isActive else { return false }
             self.beginAutoStart(reason: "\(item.title) is starting")
+            // 정책: 이미 다른 카운트다운 패널이 떠 있어 beginAutoStart가 아무것도 하지 않은 경우도
+            // "처리됨"으로 본다. 그 패널이 곧 기록을 시작하므로 재시도는 중복 시작만 부른다.
             return true
         }
     }
@@ -658,7 +660,7 @@ final class AppState {
         let context = calendar.ongoingMeetingContext()
         meetingAttendees = context.attendees
         attendeeCandidates = context.attendees.map(\.name)
-        meetingTitle = context.title
+        meetingTitle = Self.normalizedTitle(context.title)
 
         // Zoom 화자 태그: Zoom이 떠 있으면 폴링 시작 (권한 없으면 요청 다이얼로그 + 안내)
         // 대면 모드는 Zoom 타일과 무관하므로 태거를 띄우지 않는다.
@@ -1031,6 +1033,16 @@ final class AppState {
     func setAutoStartAtCalendarTime(_ enabled: Bool) {
         autoStartAtCalendarTime = enabled
         UserDefaults.standard.set(enabled, forKey: "autoStartAtCalendarTime")
+        // 알림이 꺼져 있어도 시작 시각 통지는 받아야 하므로 감시 루프 조건에 반영한다.
+        calendar.setAutoStartWatchEnabled(enabled)
+    }
+
+    /// 캘린더 제목 정규화: 공백뿐인 제목은 "제목 없음"(nil)으로 본다.
+    /// 빈 제목이 들어오면 요약 기반 자동 제목이 영원히 막히므로 진입점에서 걸러낸다.
+    nonisolated static func normalizedTitle(_ raw: String?) -> String? {
+        guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else { return nil }
+        return trimmed
     }
 
     /// 저장된 적 없는 키는 fallback을 쓰는 Bool 설정 복원 (기본값이 true인 토글에 필요).
@@ -1105,18 +1117,24 @@ final class AppState {
         // 요약 생성 중 새 세션이 시작될 수 있으므로 대상 세션을 미리 붙잡아 둔다.
         let targetURL = currentMeetingURL
         let targetStartedAt = sessionStartedAt
+        // 자동 제목 필요 여부도 대상 세션 기준으로 미리 붙잡는다 (await 이후 meetingTitle은 새 세션 것).
+        let targetNeedsAutoTitle = (meetingTitle == nil)
         summaryPhase = .generating
         Task { [weak self] in
             guard let self else { return }
             do {
                 let summary = try await self.runSummary(transcript: transcript)
                 guard self.sessionStartedAt == targetStartedAt else {
-                    // 이미 다른 세션이 시작됐다: 현재 화면 상태는 건드리지 않고
-                    // 저장된 회의 폴더에만 요약을 반영한다. 자동 제목은 건너뛴다:
-                    // meetingTitle/currentMeetingURL은 이제 새 세션의 것이라 안전하게 못 쓴다.
+                    // 이미 다른 세션이 시작됐다: 현재 화면 상태(meetingTitle/currentMeetingURL/
+                    // currentSummary)는 건드리지 않고 대상 회의 폴더에만 요약과 자동 제목을 반영한다.
                     if let targetURL {
                         self.meetingStore.updateSummary(at: targetURL, summary: summary)
                         AppLog.write("summary", "세션 교체됨: 이전 회의 폴더에만 요약 반영")
+                        if targetNeedsAutoTitle,
+                           let title = MeetingStore.titleFromSummary(summary),
+                           self.meetingStore.rename(at: targetURL, title: title) != nil {
+                            AppLog.write("app", "세션 교체됨: 이전 회의에 자동 제목 반영 \(title.count)자")
+                        }
                     }
                     return
                 }

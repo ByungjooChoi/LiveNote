@@ -115,7 +115,7 @@
 
 **모델 캐시 위치**: FluidAudio → `~/Library/Application Support/FluidAudio/Models/` · MLX/HF → HuggingFace 캐시. 빌드가 바뀌어도 재다운로드 없음.
 
-**테스트 타깃 (2026-09-02 추가, v1.4.0)**: `livenote2Tests`, hosted XCTest 타깃, `@testable import LiveNote`(모듈명은 앱 표시명이 아니라 `LiveNote`). 46개 테스트: 참석자·자동 제목·자동 시작 카운트다운·대면 모드·`ContextBuilder`·캘린더 알림 등 순수 로직 위주(오디오·모델 IO는 배제). 공유 스킴 `livenote2.xcscheme`을 신설해 `xcodebuild test`에서 테스트 타깃이 잡히게 함(기존 스킴은 앱만 빌드했음). 아카이브(`script/package.sh`)는 여전히 앱 프로덕트만 만든다. 테스트 타깃이 배포물에 섞이지 않는다.
+**테스트 타깃 (2026-09-02 추가, v1.4.0)**: `livenote2Tests`, hosted XCTest 타깃, `@testable import LiveNote`(모듈명은 앱 표시명이 아니라 `LiveNote`). 참석자·자동 제목·자동 시작 카운트다운·대면 모드·`ContextBuilder`·캘린더 알림 등 순수 로직 위주(오디오·모델 IO는 배제). 공유 스킴 `livenote2.xcscheme`을 신설해 `xcodebuild test`에서 테스트 타깃이 잡히게 함(기존 스킴은 앱만 빌드했음). 아카이브(`script/package.sh`)는 여전히 앱 프로덕트만 만든다. 테스트 타깃이 배포물에 섞이지 않는다.
 
 **앱 아이콘 (2026-08-06)**: 건곤감리 트라이그램, 태극기 모서리 배열(좌상 건 ☰ · 우상 감 ☵ · 좌하 리 ☲ · 우하 곤 ☷). 한지 배경에 건곤=먹색, 감(물)=파랑, 리(불)=빨강. 생성기: `script/make_icon.py` (Pillow, 1024 마스터 → AppIcon.appiconset 10종은 스크립트 하단 참조 로직으로 리사이즈). 변형 A(그래파이트)/B(남색)도 스크립트에 보존.
 
@@ -283,7 +283,7 @@
 `AppState`에 있던 "전체 아카이브" 채팅 컨텍스트 조립 로직을 `@MainActor enum ContextBuilder`로 승격. `build(meetings:store:budget:perMeetingTranscriptCap:) -> (text, used, truncated)` 하나의 함수로, 회의 목록을 순회하며 회의당 한 섹션(헤더 + 본문)을 만들고 예산을 넘기면 이후 회의는 건너뛰며 개수를 센다.
 - 헤더: `## 제목 (날짜 · 소요시간)` + 참석자가 있으면 다음 줄에 `Attendees: 이름1, 이름2, …` (§5.7 attendees 필드 활용).
 - 본문: `summary`가 있으면 요약 전문, 없으면 `MeetingStore.transcriptForSummary`로 만든 전사 앞부분을 `perMeetingTranscriptCap`자로 자름.
-- 남은 예산이 `minimumSectionBudget`(2,000자) 이하면 그 회의부터는 넣지 않고 `truncated` 카운트만 올린다. 섹션이 중간에 잘려 어색해지는 것을 방지하기 위함이다.
+- 예산 계약: 섹션 사이 구분자(`"\n\n"`)의 길이도 비용에 포함해 계산한다. 섹션은 통째로만 넣는다. 남은 예산에 들어가면 넣고 `used`에 추가하며, 안 들어가면 넣지 않고 `truncated`만 올린다. 예외는 첫 섹션 하나다: 컨텍스트가 통째로 비는 것을 막기 위해 예산을 넘겨도 잘라서 넣되, 잘렸으므로 `truncated`로 세고 `used`에는 넣지 않는다. 첫 섹션을 자른 뒤에는 남은 예산이 0이므로 이후 회의는 모두 `truncated`로 센다. 따라서 `used`에는 온전히 들어간 회의만 담긴다.
 - ChatService(§5.9)의 아카이브 범위 채팅이 이 함수를 그대로 쓰고, Recipes(Phase 1)·사전 브리핑(Phase 2)은 예산·cap 값만 다르게 넘겨 재사용할 설계.
 
 ### 5.11 대면 회의 모드 (2026-09-02 추가, v1.4.0)

@@ -70,6 +70,32 @@ final class AutoStartCountdownTests: XCTestCase {
         XCTAssertEqual(pruned.count, 1)
     }
 
+    // MARK: - 감시 루프 기동 조건 (알림과 자동 시작은 독립 토글)
+
+    @MainActor
+    func testMonitorRunsWhenEitherToggleIsOn() {
+        XCTAssertTrue(CalendarMonitor.monitorShouldRun(alertsEnabled: true, autoStartEnabled: true))
+        XCTAssertTrue(CalendarMonitor.monitorShouldRun(alertsEnabled: true, autoStartEnabled: false))
+        XCTAssertTrue(CalendarMonitor.monitorShouldRun(alertsEnabled: false, autoStartEnabled: true))
+    }
+
+    @MainActor
+    func testMonitorStopsWhenBothTogglesAreOff() {
+        XCTAssertFalse(CalendarMonitor.monitorShouldRun(alertsEnabled: false, autoStartEnabled: false))
+    }
+
+    // MARK: - 캘린더 제목 정규화
+
+    func testNormalizedTitleDropsBlankTitles() {
+        XCTAssertNil(AppState.normalizedTitle(nil))
+        XCTAssertNil(AppState.normalizedTitle(""))
+        XCTAssertNil(AppState.normalizedTitle("   \n\t "))
+    }
+
+    func testNormalizedTitleTrimsSurroundingWhitespace() {
+        XCTAssertEqual(AppState.normalizedTitle("  Weekly sync\n"), "Weekly sync")
+    }
+
     // MARK: - 패널 남은 초 표기
 
     func testRemainingSecondsRoundsUp() {

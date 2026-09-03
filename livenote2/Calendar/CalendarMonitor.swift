@@ -31,6 +31,9 @@ final class CalendarMonitor {
 
     /// 회의 임박 알림 사용 여부 (UserDefaults 영속, 기본 켜짐 — 최초 켤 때 캘린더 권한 요청)
     private(set) var isEnabled = false
+    /// 캘린더 시각 자동 시작 감시 사용 여부. 알림이 꺼져 있어도 이 값이 켜져 있으면
+    /// 폴링 루프는 돌아야 한다 (팝업 없이 시작 시각 통지만 필요한 조합).
+    private(set) var autoStartWatchEnabled = false
     /// 권한 거부 등 안내 배너 (nil이면 정상)
     var issueMessage: String?
 
@@ -67,17 +70,35 @@ final class CalendarMonitor {
         } else {
             isEnabled = true
         }
-        if isEnabled {
-            Task { await ensureAccessAndStart() }
-        }
+        // 자동 시작 감시는 AppState가 소유·영속하는 설정이지만, 루프 기동 조건이라 여기서도 복원한다.
+        autoStartWatchEnabled = defaults.bool(forKey: "autoStartAtCalendarTime")
+        applyMonitorState()
     }
 
     // MARK: - 설정
 
+    /// 폴링 루프를 돌려야 하는지: 알림이든 자동 시작 감시든 하나만 켜져 있어도 돈다.
+    static func monitorShouldRun(alertsEnabled: Bool, autoStartEnabled: Bool) -> Bool {
+        alertsEnabled || autoStartEnabled
+    }
+
     func setEnabled(_ on: Bool) {
         isEnabled = on
         UserDefaults.standard.set(on, forKey: "calendarAlerts")
-        if on {
+        // 알림을 끄면 떠 있는 팝업은 즉시 닫는다 (루프는 자동 시작 감시 때문에 계속 돌 수 있다).
+        if !on { dismissAlert() }
+        applyMonitorState()
+    }
+
+    /// AppState의 "캘린더 시각 자동 시작" 토글을 루프 기동 조건에 반영한다.
+    func setAutoStartWatchEnabled(_ on: Bool) {
+        guard autoStartWatchEnabled != on else { return }
+        autoStartWatchEnabled = on
+        applyMonitorState()
+    }
+
+    private func applyMonitorState() {
+        if Self.monitorShouldRun(alertsEnabled: isEnabled, autoStartEnabled: autoStartWatchEnabled) {
             Task { await ensureAccessAndStart() }
         } else {
             monitorTask?.cancel()
@@ -118,7 +139,8 @@ final class CalendarMonitor {
     }
 
     private func tick() {
-        guard isEnabled else { return }
+        guard Self.monitorShouldRun(
+            alertsEnabled: isEnabled, autoStartEnabled: autoStartWatchEnabled) else { return }
         let now = Date()
 
         // 사이드바 "오늘 일정" 갱신 (내부 60초 스로틀)
@@ -129,6 +151,9 @@ final class CalendarMonitor {
 
         // 회의 시작 시각 도달 통지 (AppState의 autoStartAtCalendarTime이 실제 시작 여부 결정)
         notifyMeetingTimeReached(now: now)
+
+        // 여기부터는 알림 팝업 전용 구간: 알림이 꺼져 있으면 통지만 하고 끝낸다.
+        guard isEnabled else { return }
 
         // 떠 있는 팝업이 유예 시간을 넘기면 자동 닫기
         if let current = currentAlert, now > current.start.addingTimeInterval(Self.graceSeconds) {
