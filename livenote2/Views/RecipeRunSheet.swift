@@ -109,7 +109,7 @@ struct RecipeRunSheet: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Image(systemName: recipe.icon.isEmpty ? "doc.text" : recipe.icon)
+            Image(systemName: recipe.icon.isEmpty ? Recipe.defaultIcon : recipe.icon)
                 .font(.title2)
                 .foregroundStyle(Theme.accent)
             VStack(alignment: .leading, spacing: 2) {
@@ -150,11 +150,7 @@ struct RecipeRunSheet: View {
     }
 
     private func label(for tab: ScopeTab) -> String {
-        tab == .last14Days ? lastDaysLabel : tab.rawValue
-    }
-
-    private var lastDaysLabel: String {
-        lastDaysCount == 14 ? "Last 14 days" : "Last \(lastDaysCount) days"
+        tab == .last14Days ? "Last \(lastDaysCount) days" : tab.rawValue
     }
 
     private var meetingsSection: some View {

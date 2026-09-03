@@ -182,8 +182,10 @@ final class AppState {
     /// 레시피 대화의 첫 사용자 턴 표시 문구. 예산 초과로 잘린 회의가 있으면 그 수를 덧붙인다.
     static func recipeUserLabel(title: String, scopeLabel: String, count: Int, truncated: Int = 0) -> String {
         let meetingCount = count == 1 ? "1 meeting" : "\(count) meetings"
+        // 수동 범위의 label은 이미 "N meetings"라서 같은 문구를 두 번 쓰지 않는다.
+        let scopePart = scopeLabel == meetingCount ? meetingCount : "\(scopeLabel), \(meetingCount)"
         let cut = truncated > 0 ? ", \(truncated) truncated" : ""
-        return "Recipe: \(title) (\(scopeLabel), \(meetingCount)\(cut))"
+        return "Recipe: \(title) (\(scopePart)\(cut))"
     }
 
     /// 레시피 실행. model이 nil이면 레시피 힌트와 현재 채팅 모델로 결정한다.

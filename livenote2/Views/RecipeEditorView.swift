@@ -34,7 +34,7 @@ struct RecipeEditorView: View {
         self.onCancel = onCancel
 
         _title = State(initialValue: recipe?.title ?? "")
-        _icon = State(initialValue: recipe?.icon ?? "doc.text")
+        _icon = State(initialValue: recipe?.icon ?? Recipe.defaultIcon)
 
         let initialScope: ScopeChoice
         let initialDays: Int
@@ -116,10 +116,10 @@ struct RecipeEditorView: View {
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
                     HStack(spacing: 6) {
-                        Image(systemName: icon.isEmpty ? "doc.text" : icon)
+                        Image(systemName: icon.isEmpty ? Recipe.defaultIcon : icon)
                             .frame(width: 20, height: 20)
                             .foregroundStyle(Theme.accent)
-                        TextField("doc.text", text: $icon)
+                        TextField(Recipe.defaultIcon, text: $icon)
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 140)
                     }
@@ -254,7 +254,8 @@ struct RecipeEditorView: View {
 
     private func saveAction() {
         let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        let cleanIcon = icon.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "doc.text" : icon.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedIcon = icon.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanIcon = trimmedIcon.isEmpty ? Recipe.defaultIcon : trimmedIcon
 
         let resolvedScope: RecipeScopeDefault
         switch scopeChoice {

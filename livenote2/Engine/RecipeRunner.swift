@@ -108,12 +108,6 @@ enum RecipeRunner {
         }
     }
 
-    /// 템플릿에 {{meetings}}가 없어도 기록 원문이 promptText(감사용 전문)에 남도록 붙인다.
-    /// 모델은 별도의 context 인자로 언제나 기록을 받는다.
-    private static func appendingContext(_ rendered: String, context: String) -> String {
-        "\(rendered)\n\n--- 회의 기록 ---\n\(context)\n--- 기록 끝 ---"
-    }
-
     static func run(
         recipe: Recipe,
         meetings: [MeetingSummary],
@@ -135,22 +129,25 @@ enum RecipeRunner {
             perMeetingTranscriptCap: perMeetingTranscriptCap
         )
 
-        let hasPlaceholder = recipe.prompt.contains("{{meetings}}")
-
-        let renderedPrompt = renderPrompt(
-            template: recipe.prompt,
-            meetingsText: context.text,
-            language: language
-        )
-        let promptText = hasPlaceholder
-            ? renderedPrompt
-            : appendingContext(renderedPrompt, context: context.text)
-
+        // 모델은 기록을 별도 context 인자로 받으므로 질문 안에서는 위치만 가리킨다.
         let questionForModel = renderPrompt(
             template: recipe.prompt,
             meetingsText: "(the meeting records above)",
             language: language
         )
+
+        // promptText는 감사용 전문이라 기록 원문을 담는다.
+        // 템플릿에 {{meetings}}가 없으면 자리가 없으니 뒤에 덧붙인다.
+        let promptText: String
+        if recipe.prompt.contains("{{meetings}}") {
+            promptText = renderPrompt(
+                template: recipe.prompt,
+                meetingsText: context.text,
+                language: language
+            )
+        } else {
+            promptText = "\(questionForModel)\n\n--- 회의 기록 ---\n\(context.text)\n--- 기록 끝 ---"
+        }
 
         try Task.checkCancellation()
 

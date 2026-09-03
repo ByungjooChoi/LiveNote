@@ -44,19 +44,14 @@ struct RecipeOutputStore: Sendable {
     func write(text: String, title: String, date: Date = Date()) throws -> URL {
         try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
 
-        // 날짜 형식은 fileName(title:date:) 한 곳에만 둔다. 여기서는 중복 접미사만 붙인다.
         let base = Self.fileName(title: title, date: date)
         let stem = String(base.dropLast(3))  // ".md" 제거
 
         var fileURL = rootURL.appendingPathComponent(base)
-        if FileManager.default.fileExists(atPath: fileURL.path) {
-            var index = 2
-            while FileManager.default.fileExists(
-                atPath: rootURL.appendingPathComponent("\(stem) (\(index)).md").path
-            ) {
-                index += 1
-            }
+        var index = 2
+        while FileManager.default.fileExists(atPath: fileURL.path) {
             fileURL = rootURL.appendingPathComponent("\(stem) (\(index)).md")
+            index += 1
         }
         try text.write(to: fileURL, atomically: true, encoding: .utf8)
         return fileURL

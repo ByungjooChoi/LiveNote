@@ -1,6 +1,6 @@
 import Foundation
 
-/// 앱 공용 파일 로거 — `~/Documents/LiveNote/logs/{카테고리}.log`
+/// 앱 공용 파일 로거: `~/Documents/LiveNote/logs/{카테고리}.log`
 ///
 /// 카테고리: app(세션 수명), cloud(클라우드 번역 연결), chat(AI 채팅),
 /// summary(요약), zoomtag(Zoom 화자 태그), recipe(레시피 저장·실행).
@@ -43,10 +43,10 @@ enum AppLog {
     }
 }
 
-/// Gemini REST 공용 전송 — 전용 세션(연결 캐시 미공유) + 네트워크 순단 자동 재시도.
+/// Gemini REST 공용 전송: 전용 세션(연결 캐시 미공유) + 네트워크 순단 자동 재시도.
 ///
 /// 배경: 앱 내 URLSession.shared 요청이 "The network connection was lost"(-1005)로
-/// 실패하는 사례 (같은 시점에 WebSocket과 curl은 정상 — QUIC/연결 재사용 계열로 추정).
+/// 실패하는 사례 (같은 시점에 WebSocket과 curl은 정상, QUIC/연결 재사용 계열로 추정).
 /// ephemeral 세션은 Alt-Svc 캐시가 비어 있어 첫 요청이 TCP/h2로 나가고,
 /// 그래도 실패하면 1초 간격 2회 재시도.
 enum GeminiREST {

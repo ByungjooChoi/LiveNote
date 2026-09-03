@@ -27,7 +27,7 @@ struct RecipesRow: View {
                             onSelect(recipe)
                         } label: {
                             HStack(spacing: 6) {
-                                Image(systemName: recipe.icon.isEmpty ? "doc.text" : recipe.icon)
+                                Image(systemName: recipe.icon.isEmpty ? Recipe.defaultIcon : recipe.icon)
                                     .font(.callout)
                                     .foregroundStyle(Theme.accent)
                                 Text(recipe.title)

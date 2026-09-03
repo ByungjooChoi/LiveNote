@@ -55,30 +55,24 @@ enum RecipeScope: Equatable, Sendable {
 
     /// 순수 함수. 결과는 startedAt 내림차순(최신 먼저).
     func resolve(meetings: [MeetingSummary], now: Date = Date(), calendar: Calendar = .current) -> [MeetingSummary] {
+        let keep: (MeetingSummary) -> Bool
         switch self {
         case .thisWeek:
             let start = RecipeScope.weekStart(for: now, calendar: calendar)
-            return meetings
-                .filter { $0.startedAt >= start && $0.startedAt <= now }
-                .sorted { $0.startedAt > $1.startedAt }
+            keep = { $0.startedAt >= start && $0.startedAt <= now }
 
         case .lastDays(let n):
             let start = calendar.date(byAdding: .day, value: -n, to: now) ?? now
-            return meetings
-                .filter { $0.startedAt >= start && $0.startedAt <= now }
-                .sorted { $0.startedAt > $1.startedAt }
+            keep = { $0.startedAt >= start && $0.startedAt <= now }
 
         case .currentMeeting(let url):
             let target = url.standardizedFileURL.path
-            return meetings
-                .filter { $0.url.standardizedFileURL.path == target }
-                .sorted { $0.startedAt > $1.startedAt }
+            keep = { $0.url.standardizedFileURL.path == target }
 
         case .manual(let urls):
             let targets = Set(urls.map { $0.standardizedFileURL.path })
-            return meetings
-                .filter { targets.contains($0.url.standardizedFileURL.path) }
-                .sorted { $0.startedAt > $1.startedAt }
+            keep = { targets.contains($0.url.standardizedFileURL.path) }
         }
+        return meetings.filter(keep).sorted { $0.startedAt > $1.startedAt }
     }
 }

@@ -530,7 +530,7 @@ struct MeetingDetailView: View {
                         Button {
                             selectedRecipe = recipe
                         } label: {
-                            Label(recipe.title, systemImage: recipe.icon.isEmpty ? "doc.text" : recipe.icon)
+                            Label(recipe.title, systemImage: recipe.icon.isEmpty ? Recipe.defaultIcon : recipe.icon)
                         }
                     }
                 } label: {
@@ -1642,7 +1642,7 @@ struct SettingsView: View {
                     VStack(spacing: 8) {
                         ForEach(app.recipeStore.recipes) { recipe in
                             HStack(spacing: 10) {
-                                Image(systemName: recipe.icon.isEmpty ? "doc.text" : recipe.icon)
+                                Image(systemName: recipe.icon.isEmpty ? Recipe.defaultIcon : recipe.icon)
                                     .frame(width: 20)
                                     .foregroundStyle(Theme.accent)
 

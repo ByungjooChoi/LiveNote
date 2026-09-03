@@ -262,6 +262,7 @@ final class RecipeStore {
         for id in Self.builtinIDs {
             guard let recipe = Self.loadBuiltin(id: id, bundle: bundle) else {
                 AppLog.write("recipe", "번들 내장 레시피 없음: \(id)")
+                if firstFailure == nil { firstFailure = RecipeStoreError.writeFailed("bundled recipe \(id) is missing") }
                 continue
             }
             do {
@@ -309,7 +310,7 @@ final class RecipeStore {
         return try? JSONDecoder().decode(Recipe.self, from: data)
     }
 
-    /// 편집 화면의 "이 레시피만 되돌리기"용 번들 원본.
+    /// 이 저장소의 번들에서 읽은 원본. 폴더의 편집본과 비교할 때 쓴다.
     func builtinTemplate(id: String) -> Recipe? {
         Self.loadBuiltin(id: id, bundle: bundle)
     }

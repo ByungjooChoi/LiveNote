@@ -22,4 +22,10 @@ final class RecipeLabelTests: XCTestCase {
             AppState.recipeUserLabel(title: "Open commitments", scopeLabel: "Last 14 days", count: 12, truncated: 3),
             "Recipe: Open commitments (Last 14 days, 12 meetings, 3 truncated)")
     }
+
+    func testManualScopeDoesNotRepeatMeetingCount() {
+        XCTAssertEqual(
+            AppState.recipeUserLabel(title: "Korean digest", scopeLabel: RecipeScope.manual([URL(fileURLWithPath: "/a"), URL(fileURLWithPath: "/b")]).label, count: 2),
+            "Recipe: Korean digest (2 meetings)")
+    }
 }
