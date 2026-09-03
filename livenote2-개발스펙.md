@@ -309,6 +309,10 @@
 저장된 프롬프트 템플릿("레시피")을 회의 범위에 일괄 적용해 채팅 대화로 결과를 받는 기능. Granola의 Recipes에 해당.
 
 **저장 (`Storage/RecipeStore.swift`)**: 레시피 파일은 `~/Documents/LiveNote/recipes/<id>.json` 한 폴더에 평평하게 저장한다. `Recipe` Codable: id, title, icon(SF Symbol), builtin, scopeDefault, modelHint, outputLanguage, system, prompt (icon/builtin/modelHint는 없어도 디코딩되어 구버전·수기 편집 파일과 호환). 내장 레시피 5종은 앱 번들 `Resources/Recipes/*.json`에 있고, 앱 시작 시 폴더에 없는 id만 복사한다(`seedBuiltinsIfNeeded`, 사용자가 편집한 내장 파일은 그대로 유지). Settings의 "Reset built-ins"(`resetBuiltins()`)는 내장 id 5개를 번들 원본으로 덮어쓰고 사용자 레시피는 건드리지 않는다. 내장 레시피 파일을 삭제해도 다음 실행에 `seedBuiltinsIfNeeded`가 다시 채워 복원한다. 목록 정렬은 내장 우선, 그다음 제목 오름차순(대소문자 무시).
+- **id 검증 (`isValidID`, 정규식 `^[a-z0-9][a-z0-9-]{0,63}$`)**: 소문자 영숫자로 시작하고 소문자·숫자·`-`만 허용한다. `refresh()`는 이 형식에 안 맞는 id, 파일 이름과 id가 다른 파일, id가 중복된 파일을 조용히 목록에서 빼고 `recipe` 로그에만 남긴다(경로 조작·손상 파일 방어).
+- **쓰기 경로 격리**: `targetURL(for:)`가 id를 검증하고, 표준화한 경로가 `rootURL` 아래인지 한 번 더 확인한 뒤에만 파일 경로를 내준다. 쓰기는 `.atomic` 옵션을 쓰고, `upsert`/`delete`/`resetBuiltins`는 파일 연산이 성공했을 때만 메모리 목록(`recipes`)을 갱신한다.
+- **오류 (`RecipeStoreError`)**: `invalidID` / `writeFailed(String)` / `deleteFailed(String)`. `upsert`·`delete`·`resetBuiltins`는 이제 조용히 실패하지 않고 던진다(`seedBuiltinsIfNeeded`만 첫 실행 경로라서 여전히 실패를 로그로만 남긴다). Settings 카드와 편집 화면이 이를 받아 오류 문구를 그대로 보여준다.
+- **`uniqueID(for:)`**: 제목을 슬러그로 만들어 최대 60자로 자르고, 그 슬러그가 id 형식에 안 맞으면(한글 제목처럼 영숫자가 하나도 없는 경우 등) `"recipe"`로 대체한다. 중복이면 `"recipe-2"`, `"recipe-3"`… 순으로 늘려간다.
 
 **내장 5종**:
 
@@ -335,20 +339,26 @@ Weekly Update의 system 프롬프트는 SA(Solutions Architect) 주간보고 규
 - 모델에 보내는 질문은 `{{meetings}}` 자리에 "(the meeting records above)" 문자열을 넣어 만든다. 실제 회의 컨텍스트는 프라임된 첫 턴(context: 파라미터)으로 별도 전달하므로 같은 텍스트를 프롬프트에 두 번 넣지 않는다. 채팅에 남기는 사용자 턴(`ChatMessage.promptText`)에는 `{{meetings}}`가 실제 컨텍스트로 치환된 전체 프롬프트를 저장해 후속 질문의 근거로 쓴다.
 - `systemInstruction`은 `recipe.system`을 그대로 쓴다. 이를 위해 `GeminiChat.respond`와 `LocalChatEngine.respond`에 `systemPrompt: String? = nil` 파라미터를 추가했다(nil이면 기존 `ChatPrompt.system`).
 - 모델 라우팅(`defaultModel(for:userChoice:)`): `modelHint == .thinking`이면 사용자가 이미 thinking 계열(`ChatModelChoice.thinkingChoices`) 또는 `.localQwen`을 고르지 않은 한 `.gemini37FlashThinkingMedium`으로 승격한다. `.standard`면 사용자 선택을 그대로 쓴다.
-- API 키가 없으면(`GeminiKeychain.load() == nil`) 실행 시트가 로컬 모델로 안내하고 품질 경고를 보여준다. 사용자가 클라우드 모델을 그대로 선택한 채 실행하면 `RecipeError.noAPIKey`.
+- **API 키가 없으면 자동으로 로컬 엔진으로 실행한다 (2026-09-03 round-1 리뷰 수정).** 클라우드 모델을 선택했어도 `apiModel`이 없거나(`.localQwen` 선택) `GeminiKeychain.load()`가 nil이면 로컬로 폴백한다(`RecipeResult.usedLocalEngine`으로 구분). 예전에 있던 `RecipeError.noAPIKey`는 삭제됐다. 실행 시트는 이 상태에서도 [Run]을 계속 활성 상태로 두고 품질 경고 문구만 보여준다.
+- **호출 경로 주입 (`RecipeRunner.Backend`)**: `apiKey`/`cloud`/`local` 세 클로저로 된 구조체. 기본값 `.live`가 실제 `GeminiKeychain`·`GeminiChat`·`LocalChatEngine`을 부르고, 테스트는 호출을 기록하는 가짜 Backend를 주입한다. `run(...)`은 `backend: Backend = .live`와 `contextBudget: Int = RecipeRunner.contextBudget`도 파라미터로 받아, 테스트가 실제 회의 데이터 없이 예산·모델 라우팅·성공 경로를 검증할 수 있다.
+- **취소 확인**: 컨텍스트 조립 직후, 모델 호출 전후로 각각 `Task.checkCancellation()`을 부른다. 실행 시트의 Cancel이 실행 중인 `Task`를 취소하면 `CancellationError`로 빠져나온다.
+- **promptText는 항상 회의 기록을 포함한다.** 템플릿에 `{{meetings}}`가 있으면 그 자리에 치환된 값이 곧 promptText다. `{{meetings}}`가 없는 템플릿(편집 화면에서 지운 구버전 레시피 등)이면 렌더링된 텍스트 뒤에 `--- 회의 기록 ---` / `--- 기록 끝 ---`로 감싼 컨텍스트를 덧붙인다(`appendingContext`). 모델에는 항상 별도의 `context` 인자로 회의 기록을 주므로 이 덧붙이기는 채팅 로그(감사용) 쪽만을 위한 것이다. `RecipeResult`에 회의 기록 원문을 담는 `contextText` 필드가 추가되어 promptText와 분리 보관된다.
 
-**결과 처리 (`AppState.runRecipe`)**: 새 채팅을 시작하고(`startNewChat` + `chatScopeKey = .archive`), 첫 사용자 턴 라벨은 `"Recipe: <title> (<scope label>, N meetings[, T truncated])"`(`recipeUserLabel`, truncated는 예산 초과로 빠진 회의 수가 있을 때만 붙는다)이고 `ChatMessage.promptText`에 렌더링된 전체 프롬프트를 싣는다. 어시스턴트 턴에 결과 텍스트. `persistCurrentChat()`으로 일반 채팅과 동일하게 저장된다.
+**결과 처리 (`AppState.runRecipe`)**: `model` 파라미터는 옵셔널이다(`ChatModelChoice? = nil`). nil이면 `RecipeRunner.defaultModel(for:userChoice:)`을 현재 채팅 모델(`chatModel`) 기준으로 계산해 쓴다. `isRecipeRunning`이 이미 true면 재진입 가드가 즉시 `false`를 반환한다(이중 실행 방지). 새 채팅을 시작하고(`startNewChat` + `chatScopeKey = .archive`), 첫 사용자 턴 라벨은 `"Recipe: <title> (<scope label>, N meetings[, T truncated])"`(`recipeUserLabel`, truncated는 예산 초과로 빠진 회의 수가 있을 때만 붙는다)이고 `ChatMessage.promptText`에 렌더링된 전체 프롬프트를 싣는다. 어시스턴트 턴에 결과 텍스트. **`persistCurrentChat()`으로 대화를 먼저 저장한 다음** `RecipeOutputStore`에 결과 파일을 쓴다.
 - `SavedChat.Message.promptText`는 옵셔널이라 이 필드가 없는 구버전 `chats/*.json`도 그대로 디코드된다(nil로 채워짐).
 - `askChat`의 후속 질문 처리: 첫 턴에 promptText가 있으면(레시피로 시작한 대화) 그 턴을 항상 히스토리 맨 앞에 고정으로 포함하고 이후 최근 7턴을 덧붙인다. 일반 대화는 최근 8턴만. 히스토리로 보내는 텍스트는 각 턴마다 `promptText ?? text`.
-- 결과 텍스트는 `RecipeOutputStore`(`Storage/RecipeOutputStore.swift`)가 `~/Documents/LiveNote/recipes-output/<yyyy-MM-dd> <title>.md`로 저장한다. 같은 이름이 있으면 `" (2)"`, `" (3)"`… 접미사를 붙인다. 앱은 이 폴더의 파일을 지우지 않는다.
-- `recipe` 로그 카테고리(`~/Documents/LiveNote/logs/recipe.log`)에 실행 id·회의 수·truncated·모델·언어·출력 글자 수만 남긴다. 프롬프트·결과 본문은 기록하지 않는다.
+- 결과 텍스트는 `RecipeOutputStore`(`Storage/RecipeOutputStore.swift`)가 `~/Documents/LiveNote/recipes-output/<yyyy-MM-dd> <title>.md`로 저장한다. 같은 이름이 있으면 `" (2)"`, `" (3)"`… 접미사를 붙인다(접미사 부여 로직은 `fileName(title:date:)` 한 곳만 날짜 형식을 알도록 정리됐다). **이 저장이 실패하면 `runRecipe`는 `false`를 반환하고 `lastRecipeError`에 대화에는 남았지만 파일 저장은 실패했다는 취지의 메시지를 담는다.** 대화 자체는 이미 저장됐으므로 결과는 Chat 화면에서 여전히 확인할 수 있다. 앱은 이 폴더의 파일을 지우지 않는다.
+- 성공하면 `pendingScreen = .chat`(`AppState.PendingScreen`에 새로 추가된 케이스)으로 신호를 보내고 `ContentView`가 이를 받아 Chat 화면으로 전환한다. 예전에는 `RecipeRunSheet`가 받는 `onFinished` 클로저가 이 전환을 맡았는데, 이제 시트는 그 클로저를 받지 않는다.
+- `recipe` 로그 카테고리(`~/Documents/LiveNote/logs/recipe.log`)에 실행 id·회의 수·truncated·모델·로컬 엔진 사용 여부·소요 시간(초)·출력 언어의 글자 수(언어 문자열 자체는 남기지 않는다)·출력 글자 수를 남긴다. 프롬프트·결과 본문은 기록하지 않는다.
 
 **UI**:
 - Chat 홈 히어로 아래 `Views/RecipesRow.swift` 칩 행(내장 + 사용자 레시피 + See all).
-- `Views/RecipeRunSheet.swift`: 범위 세그먼트(This week / Last N days / This meeting / Choose...), 회의 체크리스트(어떤 행이든 토글 해제하면 자동으로 manual로 전환), 모델·출력 언어, 키 없음 경고, [Run].
+- `Views/RecipeRunSheet.swift`: 범위 세그먼트는 열린 회의가 있을 때만 "This meeting"을 포함한다(`availableTabs`, 없으면 세그먼트 자체가 안 보인다). Choose... 목록은 자체 스크롤 박스(높이 180pt)에 담기고, 다른 세그먼트에서 Choose...로 넘어오면 그 세그먼트가 고른 회의를 그대로 체크 상태로 옮긴다. Cancel은 실행 중인 `Task`를 취소한다(`runTask?.cancel()`). 모델 선택은 공용 `ChatModelMenu(selection:)`(바인딩을 받으면 그 값을, 없으면 앱 전역 채팅 모델을 읽고 쓰는 컴포넌트)를 재사용한다. API 키가 없어도 [Run]은 계속 활성 상태이고, 경고 문구 색만 선택된 모델이 이미 로컬이면 회색, 클라우드면 주홍으로 달라진다. 완료 후 화면 전환은 `pendingScreen = .chat`로 하므로 시트는 더 이상 `onFinished` 클로저를 받지 않는다.
 - `ContentView.swift`의 MeetingDetailView 툴바 "Recipes" 메뉴는 `scopeDefault == .currentMeeting`인 레시피만 나열한다(다른 범위 레시피는 이 메뉴에 뜨지 않는다).
-- Settings > Recipes 카드: 목록(내장 배지, Edit/Duplicate/내장이 아니면 Delete), New recipe, Reset built-ins.
-- `Views/RecipeEditorView.swift`: 제목/아이콘/출력 언어/기본 범위(Last N days면 Stepper)/모델 힌트/시스템 지시문/사용자 프롬프트 템플릿. 템플릿에 `{{meetings}}`가 없으면 경고를 보여준다(저장은 막지 않는다).
+- Settings > Recipes 카드: 목록(내장 배지, Edit/Duplicate/내장이 아니면 Delete), New recipe, Reset built-ins. Delete/Duplicate/Reset built-ins은 전부 `RecipeStore`가 던지는 오류를 잡아 카드 아래에 문구로 보여준다(`runRecipeStoreAction`).
+- `Views/RecipeEditorView.swift`: 제목/아이콘/출력 언어/기본 범위(Last N days면 Stepper)/모델 힌트/시스템 지시문/사용자 프롬프트 템플릿. 템플릿에 `{{meetings}}`가 없으면 경고를 보여주고 **Save 버튼도 비활성화한다**(예전엔 경고만 하고 저장은 허용했다). `upsert` 실패 시 오류를 폼 아래에 보여준다(`saveError`).
+
+**테스트**: `AppLog.directoryOverride`(테스트 전용 static 프로퍼티)를 세팅하면 `AppLog.write`가 `~/Documents/LiveNote/logs` 대신 지정한 임시 폴더에 쓴다. 레시피 관련 테스트를 포함해 로그를 남기는 테스트들이 이걸로 실제 문서 폴더를 건드리지 않는다. `RecipeRunnerTests`는 가짜 `Backend`로 클라우드·로컬 성공 경로까지 검증한다(총 123개 테스트).
 
 ---
 
@@ -408,8 +418,9 @@ Weekly Update의 system 프롬프트는 SA(Solutions Architect) 주간보고 규
 15. **이 기기의 xcode-select는 CommandLineTools를 가리킴** → CLI에서 `xcodebuild` 실패. `sudo xcode-select -s` 대신 `export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`로 우회 (package.sh에 내장).
 16. **Gemini Live Translate는 오디오 입력 전용.** 텍스트 번역 요청 불가 — 확정 문장 텍스트를 보내 번역받는 설계는 성립하지 않음. 오디오 스트리밍 + 전사 클레임 방식(§5.4)이 유일한 통합 경로. 프리뷰 모델이라 쿼터·모델명 변경 리스크 있음 (모델명은 `GeminiLiveTranslator.model` 상수 한 줄).
 17. **레시피 후속 채팅의 컨텍스트 중복 위험 (§5.13).** 레시피로 시작한 대화는 `askChat`이 첫 턴(promptText, 최대 120K자 컨텍스트 포함)을 후속 질문마다 히스토리에 고정으로 얹는다. 아카이브 채팅(§5.9, 60K자 상한)과 별개 예산이므로 겹쳐 쓰지는 않지만, 레시피 대화 자체가 매 요청 120K자를 반복 전송한다는 점은 그대로다. 컨텍스트가 큰 레시피는 후속 질문을 오래 이어가지 말고 필요하면 새 채팅으로 다시 시작하는 편이 낫다.
-18. **로컬 Qwen + 120K자 컨텍스트는 느리다.** 레시피 컨텍스트 예산(120K자, §5.13)은 클라우드 모델 기준으로 잡았다. API 키가 없어 `LocalChatEngine`으로 폴백하면 같은 예산이 그대로 로컬 모델에 들어가 응답이 눈에 띄게 느려진다(실행 시트가 경고 문구로 안내할 뿐 자동으로 줄이지는 않는다). 범위를 좁혀 회의 수를 줄이는 것이 유일한 완화책이다.
+18. **로컬 Qwen + 120K자 컨텍스트는 느리다.** 레시피 컨텍스트 예산(120K자, §5.13)은 클라우드 모델 기준으로 잡았다. API 키가 없으면 `RecipeRunner`가 자동으로 `LocalChatEngine`으로 폴백하는데(§5.13, 2026-09-03 round-1 리뷰 전에는 여기서 실패했다), 같은 예산이 그대로 로컬 모델에 들어가 응답이 눈에 띄게 느려진다(실행 시트가 경고 문구로 안내할 뿐 자동으로 줄이지는 않는다). 범위를 좁혀 회의 수를 줄이는 것이 유일한 완화책이다.
 19. **번들 내장 레시피 id는 유일해야 한다.** `Resources/Recipes/*.json`은 PBXFileSystemSynchronizedRootGroup 동기화 그룹이 번들 루트로 평탄화해서 복사한다(하위 폴더 구조가 사라짐). `RecipeStore.loadBuiltin`은 `bundle.url(forResource:withExtension:)`로 파일명(=id)만으로 찾으므로, 새 내장 레시피를 추가할 때 다른 번들 리소스와 파일명이 겹치면 엉뚱한 파일을 읽게 된다.
+20. **레시피 id가 파일명과 다르거나 형식에 안 맞으면 조용히 사라진다.** `RecipeStore.refresh()`는 id가 `^[a-z0-9][a-z0-9-]{0,63}$`에 안 맞거나, 파일명(확장자 제외)과 id가 다르거나, id가 중복이면 그 파일을 목록에서 빼고 `recipe` 로그에만 남긴다(경로 조작 방어가 목적이라 UI에는 알리지 않는다). recipes 폴더의 JSON을 손으로 편집·복사할 때는 파일명과 id를 같게, 소문자·숫자·하이픈만 쓸 것.
 
 ---
 
