@@ -5,6 +5,7 @@ import XCTest
 final class RecipeOutputStoreTests: XCTestCase {
 
     private var root: URL!
+    private var logRoot: URL!
 
     private func date(_ y: Int, _ m: Int, _ d: Int) -> Date {
         var comps = DateComponents()
@@ -20,11 +21,17 @@ final class RecipeOutputStoreTests: XCTestCase {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("LiveNoteRecipeOutputTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        logRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LiveNoteRecipeOutputLogs-\(UUID().uuidString)", isDirectory: true)
+        AppLog.directoryOverride = logRoot
     }
 
     override func tearDown() {
+        AppLog.directoryOverride = nil
         if let root { try? FileManager.default.removeItem(at: root) }
+        if let logRoot { try? FileManager.default.removeItem(at: logRoot) }
         root = nil
+        logRoot = nil
         super.tearDown()
     }
 

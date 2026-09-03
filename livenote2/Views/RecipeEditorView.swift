@@ -26,6 +26,7 @@ struct RecipeEditorView: View {
     @State private var outputLanguage: String
     @State private var systemPrompt: String
     @State private var userPrompt: String
+    @State private var saveError: String?
 
     init(recipe: Recipe? = nil, onSave: ((Recipe) -> Void)? = nil, onCancel: (() -> Void)? = nil) {
         self.recipe = recipe
@@ -212,7 +213,7 @@ struct RecipeEditorView: View {
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3)))
 
                 if isPromptMissingPlaceholder {
-                    Text("Warning: Prompt does not contain {{meetings}}. Meeting records will not be injected.")
+                    Text("Prompt must contain {{meetings}} so the meeting records are injected")
                         .font(.caption)
                         .foregroundStyle(Theme.vermilion)
                 }
@@ -221,24 +222,33 @@ struct RecipeEditorView: View {
     }
 
     private var footer: some View {
-        HStack {
-            Spacer()
-            Button("Cancel") {
-                if let onCancel {
-                    onCancel()
-                } else {
-                    dismiss()
-                }
+        VStack(alignment: .leading, spacing: 8) {
+            if let saveError {
+                Text(saveError)
+                    .font(.caption)
+                    .foregroundStyle(Theme.vermilion)
+                    .textSelection(.enabled)
             }
-            .keyboardShortcut(.cancelAction)
 
-            Button("Save") {
-                saveAction()
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    if let onCancel {
+                        onCancel()
+                    } else {
+                        dismiss()
+                    }
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Button("Save") {
+                    saveAction()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Theme.accent)
+                .disabled(!isTitleValid || isPromptMissingPlaceholder)
+                .keyboardShortcut(.defaultAction)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(Theme.accent)
-            .disabled(!isTitleValid)
-            .keyboardShortcut(.defaultAction)
         }
     }
 
@@ -280,7 +290,13 @@ struct RecipeEditorView: View {
             prompt: userPrompt
         )
 
-        app.recipeStore.upsert(saved)
+        do {
+            try app.recipeStore.upsert(saved)
+        } catch {
+            saveError = error.localizedDescription
+            return
+        }
+        saveError = nil
 
         if let onSave {
             onSave(saved)

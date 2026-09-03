@@ -9,14 +9,24 @@ enum AppLog {
 
     private static let queue = DispatchQueue(label: "livenote2.applog")
 
-    private static let dir: URL = {
+    /// 테스트 전용: 로그를 실제 문서 폴더 대신 이 폴더에 쓴다.
+    nonisolated(unsafe) static var directoryOverride: URL?
+
+    private static let defaultDir: URL = {
         let dir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Documents/LiveNote/logs", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }()
 
+    private static func currentDir() -> URL {
+        guard let override = directoryOverride else { return defaultDir }
+        try? FileManager.default.createDirectory(at: override, withIntermediateDirectories: true)
+        return override
+    }
+
     static func write(_ category: String, _ message: String) {
+        let dir = currentDir()
         queue.async {
             let formatter = ISO8601DateFormatter()
             let line = "\(formatter.string(from: Date())) \(message)\n"

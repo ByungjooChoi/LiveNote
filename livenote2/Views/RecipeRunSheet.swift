@@ -7,7 +7,6 @@ struct RecipeRunSheet: View {
 
     let recipe: Recipe
     var currentMeeting: URL? = nil
-    var onFinished: () -> Void
 
     enum ScopeTab: String, CaseIterable, Identifiable {
         case thisWeek = "This week"
@@ -23,11 +22,11 @@ struct RecipeRunSheet: View {
     @State private var selectedMeetingURLs: Set<URL> = []
     @State private var selectedModel: ChatModelChoice
     @State private var outputLanguage: String
+    @State private var runTask: Task<Void, Never>?
 
-    init(recipe: Recipe, currentMeeting: URL? = nil, onFinished: @escaping () -> Void) {
+    init(recipe: Recipe, currentMeeting: URL? = nil) {
         self.recipe = recipe
         self.currentMeeting = currentMeeting
-        self.onFinished = onFinished
 
         switch recipe.scopeDefault {
         case .thisWeek:
@@ -49,32 +48,37 @@ struct RecipeRunSheet: View {
         _outputLanguage = State(initialValue: recipe.outputLanguage)
     }
 
-    private var effectiveScope: RecipeScope {
-        switch selectedTab {
+    /// 열린 회의가 없으면 "This meeting" 세그먼트 자체를 내보내지 않는다.
+    private var availableTabs: [ScopeTab] {
+        currentMeeting == nil
+            ? [.thisWeek, .last14Days, .manual]
+            : ScopeTab.allCases
+    }
+
+    private func scope(for tab: ScopeTab) -> RecipeScope? {
+        switch tab {
         case .thisWeek:
             return .thisWeek
         case .last14Days:
             return .lastDays(lastDaysCount)
         case .thisMeeting:
-            if let url = currentMeeting {
-                return .currentMeeting(url)
-            }
-            return .thisWeek
+            return currentMeeting.map { RecipeScope.currentMeeting($0) }
         case .manual:
             return .manual(Array(selectedMeetingURLs))
         }
+    }
+
+    /// `.thisMeeting`은 열린 회의가 있을 때만 존재한다. 없으면 세그먼트도 없으므로 여기 오지 않는다.
+    private var effectiveScope: RecipeScope {
+        scope(for: selectedTab) ?? .manual(Array(selectedMeetingURLs))
     }
 
     private var resolvedMeetings: [MeetingSummary] {
         app.recipeMeetings(for: effectiveScope)
     }
 
-    private var isCloudModelWithoutKey: Bool {
-        !app.hasGeminiKey && selectedModel != .localQwen
-    }
-
     private var canRun: Bool {
-        !resolvedMeetings.isEmpty && !app.isRecipeRunning && !isCloudModelWithoutKey
+        !resolvedMeetings.isEmpty && !app.isRecipeRunning
     }
 
     var body: some View {
@@ -129,35 +133,27 @@ struct RecipeRunSheet: View {
                 .font(.subheadline.weight(.semibold))
 
             Picker("Scope", selection: $selectedTab) {
-                Text("This week").tag(ScopeTab.thisWeek)
-                Text(lastDaysLabel).tag(ScopeTab.last14Days)
-                Text("This meeting")
-                    .tag(ScopeTab.thisMeeting)
-                Text("Choose...").tag(ScopeTab.manual)
+                ForEach(availableTabs) { tab in
+                    Text(label(for: tab)).tag(tab)
+                }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .onChange(of: selectedTab) { _, newTab in
-                if newTab == .manual && selectedMeetingURLs.isEmpty {
-                    let current = app.recipeMeetings(for: previousScope(for: newTab))
-                    selectedMeetingURLs = Set(current.map { $0.url })
-                }
+            .onChange(of: selectedTab) { oldTab, newTab in
+                // Choose...로 넘어올 때는 직전 범위가 고른 회의를 그대로 체크 상태로 옮긴다.
+                guard newTab == .manual, selectedMeetingURLs.isEmpty else { return }
+                guard let previous = scope(for: oldTab) else { return }
+                selectedMeetingURLs = Set(app.recipeMeetings(for: previous).map { $0.url })
             }
         }
+    }
+
+    private func label(for tab: ScopeTab) -> String {
+        tab == .last14Days ? lastDaysLabel : tab.rawValue
     }
 
     private var lastDaysLabel: String {
         lastDaysCount == 14 ? "Last 14 days" : "Last \(lastDaysCount) days"
-    }
-
-    private func previousScope(for tab: ScopeTab) -> RecipeScope {
-        switch tab {
-        case .thisWeek: return .thisWeek
-        case .last14Days: return .lastDays(lastDaysCount)
-        case .thisMeeting:
-            return currentMeeting.map { .currentMeeting($0) } ?? .thisWeek
-        case .manual: return .thisWeek
-        }
     }
 
     private var meetingsSection: some View {
@@ -177,57 +173,61 @@ struct RecipeRunSheet: View {
                 }
             }
 
-            VStack(spacing: 4) {
-                if selectedTab == .manual {
-                    if app.meetingStore.meetings.isEmpty {
-                        Text("No recorded meetings found.")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .padding(.vertical, 16)
+            // 목록은 자체 ScrollView 안에서만 스크롤한다(행 압축 방지).
+            ScrollView {
+                VStack(spacing: 4) {
+                    if selectedTab == .manual {
+                        if app.meetingStore.meetings.isEmpty {
+                            Text("No recorded meetings found.")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .padding(.vertical, 16)
+                        } else {
+                            ForEach(app.meetingStore.meetings) { meeting in
+                                let isSelected = selectedMeetingURLs.contains(meeting.url)
+                                meetingToggleRow(
+                                    title: meeting.title,
+                                    dateLabel: meeting.dateLabel,
+                                    isSelected: isSelected
+                                ) {
+                                    if isSelected {
+                                        selectedMeetingURLs.remove(meeting.url)
+                                    } else {
+                                        selectedMeetingURLs.insert(meeting.url)
+                                    }
+                                }
+                            }
+                        }
                     } else {
-                        ForEach(app.meetingStore.meetings) { meeting in
-                            let isSelected = selectedMeetingURLs.contains(meeting.url)
-                            meetingToggleRow(
-                                title: meeting.title,
-                                dateLabel: meeting.dateLabel,
-                                isSelected: isSelected
-                            ) {
-                                if isSelected {
-                                    selectedMeetingURLs.remove(meeting.url)
-                                } else {
-                                    selectedMeetingURLs.insert(meeting.url)
+                        let meetings = resolvedMeetings
+                        if meetings.isEmpty {
+                            Text("No meetings in this range")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .center)
+                                .padding(.vertical, 16)
+                        } else {
+                            ForEach(meetings) { meeting in
+                                meetingToggleRow(
+                                    title: meeting.title,
+                                    dateLabel: meeting.dateLabel,
+                                    isSelected: true
+                                ) {
+                                    // 어떤 행이든 토글 해제 시 manual 모드로 전환하고 현재 목록에서 제외
+                                    var newSelection = Set(meetings.map { $0.url })
+                                    newSelection.remove(meeting.url)
+                                    selectedMeetingURLs = newSelection
+                                    selectedTab = .manual
                                 }
                             }
                         }
                     }
-                } else {
-                    let meetings = resolvedMeetings
-                    if meetings.isEmpty {
-                        Text("No meetings in this range")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .center)
-                            .padding(.vertical, 16)
-                    } else {
-                        ForEach(meetings) { meeting in
-                            meetingToggleRow(
-                                title: meeting.title,
-                                dateLabel: meeting.dateLabel,
-                                isSelected: true
-                            ) {
-                                // 어떤 행이든 토글 해제 시 manual 모드로 전환하고 현재 목록에서 제외
-                                var newSelection = Set(meetings.map { $0.url })
-                                newSelection.remove(meeting.url)
-                                selectedMeetingURLs = newSelection
-                                selectedTab = .manual
-                            }
-                        }
-                    }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .frame(height: 180)
             .padding(10)
             .themedCard()
-            .frame(maxHeight: 180)
         }
     }
 
@@ -267,33 +267,13 @@ struct RecipeRunSheet: View {
                 Text("Model")
                     .font(.subheadline.weight(.semibold))
                 Spacer()
-                Picker("Model", selection: $selectedModel) {
-                    Section("Standard") {
-                        ForEach(ChatModelChoice.standardChoices, id: \.self) { choice in
-                            Text(choice.displayName).tag(choice)
-                        }
-                    }
-                    Section("Thinking") {
-                        ForEach(ChatModelChoice.thinkingChoices, id: \.self) { choice in
-                            Text(choice.displayName).tag(choice)
-                        }
-                    }
-                    Section("Local") {
-                        Text(ChatModelChoice.localQwen.displayName).tag(ChatModelChoice.localQwen)
-                    }
-                }
-                .labelsHidden()
-                .fixedSize()
+                ChatModelMenu(selection: $selectedModel)
             }
 
-            if isCloudModelWithoutKey {
+            if !app.hasGeminiKey {
                 Text("No Gemini API key: runs on the local model, quality may be lower")
                     .font(.caption)
-                    .foregroundStyle(Theme.vermilion)
-            } else if !app.hasGeminiKey {
-                Text("No Gemini API key: runs on the local model, quality may be lower")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(selectedModel == .localQwen ? Color.secondary : Theme.vermilion)
             }
 
             HStack {
@@ -328,6 +308,7 @@ struct RecipeRunSheet: View {
                 Spacer()
 
                 Button("Cancel") {
+                    runTask?.cancel()
                     dismiss()
                 }
                 .keyboardShortcut(.cancelAction)
@@ -344,16 +325,18 @@ struct RecipeRunSheet: View {
     }
 
     private func runAction() {
-        Task {
+        let scope = effectiveScope
+        let model = selectedModel
+        let language = outputLanguage
+        runTask = Task {
             let success = await app.runRecipe(
                 recipe,
-                scope: effectiveScope,
-                model: selectedModel,
-                language: outputLanguage
+                scope: scope,
+                model: model,
+                language: language
             )
             if success {
                 dismiss()
-                onFinished()
             }
         }
     }

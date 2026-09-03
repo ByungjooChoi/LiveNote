@@ -80,6 +80,23 @@ final class RecipeScopeTests: XCTestCase {
         XCTAssertEqual(result.map { $0.url }, [inFriday.url, inMonday.url])
     }
 
+    /// 월요일 오전에 실행하면 그 주에는 월요일 기록만 남는다(직전 일요일 23:59는 제외).
+    func testThisWeekOnMondayMorningKeepsOnlyThatDay() {
+        let now = date(2026, 8, 31, 9, 0)  // Monday
+        let mondayEarly = summary(url: URL(fileURLWithPath: "/tmp/m1"), startedAt: date(2026, 8, 31, 0, 0))
+        let mondayJustBefore = summary(url: URL(fileURLWithPath: "/tmp/m2"), startedAt: date(2026, 8, 31, 8, 59))
+        let previousSunday = summary(url: URL(fileURLWithPath: "/tmp/m3"), startedAt: date(2026, 8, 30, 23, 59))
+        let laterToday = summary(url: URL(fileURLWithPath: "/tmp/m4"), startedAt: date(2026, 8, 31, 9, 1))
+
+        let result = RecipeScope.thisWeek.resolve(
+            meetings: [mondayEarly, mondayJustBefore, previousSunday, laterToday],
+            now: now,
+            calendar: cal
+        )
+
+        XCTAssertEqual(result.map { $0.url }, [mondayJustBefore.url, mondayEarly.url])
+    }
+
     // MARK: - lastDays
 
     func testLastDaysBoundary() {

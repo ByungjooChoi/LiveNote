@@ -122,6 +122,24 @@ struct Recipe: Codable, Identifiable, Equatable, Sendable {
     }
 }
 
+/// 레시피 저장소 오류. UI는 errorDescription을 그대로 보여준다.
+enum RecipeStoreError: LocalizedError, Equatable {
+    case invalidID
+    case writeFailed(String)
+    case deleteFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidID:
+            return "Invalid recipe id"
+        case .writeFailed(let detail):
+            return "Could not save the recipe: \(detail)"
+        case .deleteFailed(let detail):
+            return "Could not delete the recipe: \(detail)"
+        }
+    }
+}
+
 /// 레시피 저장소: `~/Documents/LiveNote/recipes/` 한 폴더만 읽고 쓴다.
 ///
 /// 내장 레시피는 앱 번들(Resources/Recipes/*.json)에 있고 첫 실행 시 폴더로 복사된다.
@@ -174,13 +192,28 @@ final class RecipeStore {
         let files = (try? FileManager.default.contentsOfDirectory(
             at: rootURL, includingPropertiesForKeys: nil, options: .skipsHiddenFiles)) ?? []
         var found: [Recipe] = []
+        var seenIDs = Set<String>()
         for file in files where file.pathExtension == "json" {
             guard let data = try? Data(contentsOf: file) else { continue }
+            let recipe: Recipe
             do {
-                found.append(try JSONDecoder().decode(Recipe.self, from: data))
+                recipe = try JSONDecoder().decode(Recipe.self, from: data)
             } catch {
                 AppLog.write("recipe", "레시피 디코딩 실패 \(file.lastPathComponent): \(error.localizedDescription)")
+                continue
             }
+            // 파일 이름이 곧 id다. 어긋나거나 형식에 맞지 않으면 무시한다
+            // (경로 조작 방지, 로그에는 파일 이름만 남긴다).
+            let basename = file.deletingPathExtension().lastPathComponent
+            guard Self.isValidID(recipe.id), recipe.id == basename else {
+                AppLog.write("recipe", "recipe id 불일치 무시 \(file.lastPathComponent)")
+                continue
+            }
+            guard seenIDs.insert(recipe.id).inserted else {
+                AppLog.write("recipe", "recipe id 중복 무시 \(file.lastPathComponent)")
+                continue
+            }
+            found.append(recipe)
         }
         recipes = Self.sorted(found)
     }
@@ -196,8 +229,10 @@ final class RecipeStore {
 
     // MARK: - 쓰기
 
-    func upsert(_ recipe: Recipe) {
-        write(recipe)
+    /// 파일에 먼저 쓰고, 성공했을 때만 메모리 목록을 갱신한다.
+    func upsert(_ recipe: Recipe) throws {
+        guard Self.isValidID(recipe.id) else { throw RecipeStoreError.invalidID }
+        try write(recipe)
         if let index = recipes.firstIndex(where: { $0.id == recipe.id }) {
             recipes[index] = recipe
         } else {
@@ -206,38 +241,59 @@ final class RecipeStore {
         recipes = Self.sorted(recipes)
     }
 
-    func delete(id: String) {
-        try? FileManager.default.removeItem(at: fileURL(for: id))
+    func delete(id: String) throws {
+        guard Self.isValidID(id) else { throw RecipeStoreError.invalidID }
+        let url = try targetURL(for: id)
+        if FileManager.default.fileExists(atPath: url.path) {
+            do {
+                try FileManager.default.removeItem(at: url)
+            } catch {
+                throw RecipeStoreError.deleteFailed(error.localizedDescription)
+            }
+        }
         recipes.removeAll { $0.id == id }
     }
 
     /// 내장 레시피를 번들 원본으로 되돌린다. 사용자 레시피는 건드리지 않는다.
-    func resetBuiltins() {
+    /// 일부가 실패해도 남은 항목을 계속 복원하고, 첫 실패를 끝에서 던진다.
+    func resetBuiltins() throws {
         var restored = 0
+        var firstFailure: Error?
         for id in Self.builtinIDs {
             guard let recipe = Self.loadBuiltin(id: id, bundle: bundle) else {
                 AppLog.write("recipe", "번들 내장 레시피 없음: \(id)")
                 continue
             }
-            write(recipe)
-            restored += 1
+            do {
+                try write(recipe)
+                restored += 1
+            } catch {
+                AppLog.write("recipe", "내장 레시피 복원 실패 \(id): \(error.localizedDescription)")
+                if firstFailure == nil { firstFailure = error }
+            }
         }
         AppLog.write("recipe", "내장 레시피 초기화 \(restored)/\(Self.builtinIDs.count)")
         refresh()
+        if let firstFailure { throw firstFailure }
     }
 
     /// 폴더에 없는 내장 레시피만 복사한다(사용자가 편집한 파일은 유지).
+    /// 첫 실행 경로라서 던지지 않고 실패만 기록한다.
     func seedBuiltinsIfNeeded() {
         var seeded = 0
         for id in Self.builtinIDs {
-            let url = fileURL(for: id)
+            guard let url = try? targetURL(for: id) else { continue }
             guard !FileManager.default.fileExists(atPath: url.path) else { continue }
             guard let recipe = Self.loadBuiltin(id: id, bundle: bundle) else {
                 AppLog.write("recipe", "번들 내장 레시피 없음: \(id)")
                 continue
             }
-            write(recipe)
-            seeded += 1
+            do {
+                try write(recipe)
+                seeded += 1
+            } catch {
+                AppLog.write("recipe", "내장 레시피 복사 실패 \(id): \(error.localizedDescription)")
+            }
         }
         if seeded > 0 {
             AppLog.write("recipe", "내장 레시피 복사 \(seeded)/\(Self.builtinIDs.count)")
@@ -277,9 +333,17 @@ final class RecipeStore {
         return slug.isEmpty ? "recipe" : slug
     }
 
+    /// 파일 이름으로 쓸 수 있는 id인지 검사한다. 소문자 영숫자와 '-'만 허용하고
+    /// 첫 글자는 영숫자여야 한다(경로 구분자·상위 경로 표기 차단).
+    static func isValidID(_ id: String) -> Bool {
+        id.range(of: "^[a-z0-9][a-z0-9-]{0,63}$", options: .regularExpression) != nil
+    }
+
     /// 이미 쓰이는 슬러그면 -2, -3 순으로 붙인다.
+    /// 슬러그가 id 규칙에 맞지 않으면(한글 제목 등) "recipe"로 대체한다.
     func uniqueID(for title: String) -> String {
-        let base = Self.slug(from: title)
+        let slug = String(Self.slug(from: title).prefix(60))
+        let base = Self.isValidID(slug) ? slug : "recipe"
         if !isTaken(base) { return base }
         var suffix = 2
         while isTaken("\(base)-\(suffix)") { suffix += 1 }
@@ -287,24 +351,34 @@ final class RecipeStore {
     }
 
     private func isTaken(_ id: String) -> Bool {
-        recipes.contains { $0.id == id }
-            || FileManager.default.fileExists(atPath: fileURL(for: id).path)
+        if recipes.contains(where: { $0.id == id }) { return true }
+        guard let url = try? targetURL(for: id) else { return true }
+        return FileManager.default.fileExists(atPath: url.path)
     }
 
     // MARK: - 파일
 
-    private func write(_ recipe: Recipe) {
+    private func write(_ recipe: Recipe) throws {
+        guard Self.isValidID(recipe.id) else { throw RecipeStoreError.invalidID }
+        let url = try targetURL(for: recipe.id)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         do {
             try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
-            try encoder.encode(recipe).write(to: fileURL(for: recipe.id))
+            try encoder.encode(recipe).write(to: url, options: .atomic)
         } catch {
             AppLog.write("recipe", "레시피 저장 실패 \(recipe.id): \(error.localizedDescription)")
+            throw RecipeStoreError.writeFailed(error.localizedDescription)
         }
     }
 
-    private func fileURL(for id: String) -> URL {
-        rootURL.appendingPathComponent("\(id).json")
+    /// 검증된 id로만 만들고, 표준화한 경로가 rootURL 아래인지 한 번 더 확인한다.
+    private func targetURL(for id: String) throws -> URL {
+        guard Self.isValidID(id) else { throw RecipeStoreError.invalidID }
+        let url = rootURL.appendingPathComponent("\(id).json").standardizedFileURL
+        var rootPath = rootURL.standardizedFileURL.path
+        if !rootPath.hasSuffix("/") { rootPath += "/" }
+        guard url.path.hasPrefix(rootPath) else { throw RecipeStoreError.invalidID }
+        return url
     }
 }

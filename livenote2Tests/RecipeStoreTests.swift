@@ -7,17 +7,24 @@ import XCTest
 final class RecipeStoreTests: XCTestCase {
 
     private var root: URL!
+    private var logRoot: URL!
 
     override func setUpWithError() throws {
         try super.setUpWithError()
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("LiveNoteRecipeTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        logRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LiveNoteRecipeLogs-\(UUID().uuidString)", isDirectory: true)
+        AppLog.directoryOverride = logRoot
     }
 
     override func tearDown() {
+        AppLog.directoryOverride = nil
         if let root { try? FileManager.default.removeItem(at: root) }
+        if let logRoot { try? FileManager.default.removeItem(at: logRoot) }
         root = nil
+        logRoot = nil
         super.tearDown()
     }
 
@@ -112,7 +119,7 @@ final class RecipeStoreTests: XCTestCase {
         let store = RecipeStore(rootURL: root)
         var edited = try XCTUnwrap(store.recipes.first { $0.id == "weekly-update" })
         edited.title = "My weekly"
-        store.upsert(edited)
+        try store.upsert(edited)
         try FileManager.default.removeItem(at: fileURL("korean-digest"))
 
         store.seedBuiltinsIfNeeded()
@@ -127,10 +134,10 @@ final class RecipeStoreTests: XCTestCase {
         var edited = try XCTUnwrap(store.recipes.first { $0.id == "weekly-update" })
         let original = edited.title
         edited.title = "My weekly"
-        store.upsert(edited)
-        store.upsert(makeUserRecipe())
+        try store.upsert(edited)
+        try store.upsert(makeUserRecipe())
 
-        store.resetBuiltins()
+        try store.resetBuiltins()
 
         XCTAssertEqual(store.recipes.first { $0.id == "weekly-update" }?.title, original)
         XCTAssertNotNil(store.recipes.first { $0.id == "mine" })
@@ -140,26 +147,26 @@ final class RecipeStoreTests: XCTestCase {
 
     func testUpsertDeleteAndRefresh() throws {
         let store = RecipeStore(rootURL: root)
-        store.upsert(makeUserRecipe())
+        try store.upsert(makeUserRecipe())
         XCTAssertNotNil(store.recipes.first { $0.id == "mine" })
 
         var updated = try XCTUnwrap(store.recipes.first { $0.id == "mine" })
         updated.prompt = "{{meetings}} updated"
-        store.upsert(updated)
+        try store.upsert(updated)
         store.refresh()
         XCTAssertEqual(store.recipes.first { $0.id == "mine" }?.prompt, "{{meetings}} updated")
 
-        store.delete(id: "mine")
+        try store.delete(id: "mine")
         XCTAssertNil(store.recipes.first { $0.id == "mine" })
         XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL("mine").path))
         store.refresh()
         XCTAssertNil(store.recipes.first { $0.id == "mine" })
     }
 
-    func testSortPutsBuiltinsFirstThenTitleAscending() {
+    func testSortPutsBuiltinsFirstThenTitleAscending() throws {
         let store = RecipeStore(rootURL: root)
-        store.upsert(makeUserRecipe(id: "zeta", title: "Zeta"))
-        store.upsert(makeUserRecipe(id: "alpha", title: "alpha"))
+        try store.upsert(makeUserRecipe(id: "zeta", title: "Zeta"))
+        try store.upsert(makeUserRecipe(id: "alpha", title: "alpha"))
 
         let ids = store.recipes.map(\.id)
         let builtinCount = RecipeStore.builtinIDs.count
@@ -174,7 +181,7 @@ final class RecipeStoreTests: XCTestCase {
         let store = RecipeStore(rootURL: root)
         var edited = try XCTUnwrap(store.recipes.first { $0.id == "korean-digest" })
         edited.system = "changed"
-        store.upsert(edited)
+        try store.upsert(edited)
 
         let template = try XCTUnwrap(store.builtinTemplate(id: "korean-digest"))
         XCTAssertNotEqual(template.system, "changed")
@@ -190,12 +197,88 @@ final class RecipeStoreTests: XCTestCase {
         XCTAssertEqual(RecipeStore.slug(from: "!!!"), "recipe")
     }
 
-    func testUniqueIDAvoidsExistingRecipes() {
+    func testUniqueIDAvoidsExistingRecipes() throws {
         let store = RecipeStore(rootURL: root)
         XCTAssertEqual(store.uniqueID(for: "Korean digest"), "korean-digest-2")
-        store.upsert(makeUserRecipe(id: "korean-digest-2", title: "Korean digest"))
+        try store.upsert(makeUserRecipe(id: "korean-digest-2", title: "Korean digest"))
         XCTAssertEqual(store.uniqueID(for: "Korean digest"), "korean-digest-3")
         XCTAssertEqual(store.uniqueID(for: "Brand new"), "brand-new")
+    }
+
+    // MARK: - id 안전성
+
+    func testIsValidIDAcceptsSlugsAndRejectsPathTricks() {
+        XCTAssertTrue(RecipeStore.isValidID("weekly-update"))
+        XCTAssertTrue(RecipeStore.isValidID("recipe-2"))
+        XCTAssertTrue(RecipeStore.isValidID("a"))
+
+        XCTAssertFalse(RecipeStore.isValidID(""))
+        XCTAssertFalse(RecipeStore.isValidID(".."))
+        XCTAssertFalse(RecipeStore.isValidID("../../etc/passwd"))
+        XCTAssertFalse(RecipeStore.isValidID("sub/dir"))
+        XCTAssertFalse(RecipeStore.isValidID("-leading"))
+        XCTAssertFalse(RecipeStore.isValidID("Upper"))
+        XCTAssertFalse(RecipeStore.isValidID("주간-보고"))
+        XCTAssertFalse(RecipeStore.isValidID(String(repeating: "a", count: 65)))
+    }
+
+    func testUpsertAndDeleteRejectInvalidID() {
+        let store = RecipeStore(rootURL: root)
+        let bad = Recipe(
+            id: "../escape", title: "Bad", scopeDefault: .manual,
+            outputLanguage: "English", system: "s", prompt: "{{meetings}}")
+
+        XCTAssertThrowsError(try store.upsert(bad)) { error in
+            XCTAssertEqual(error as? RecipeStoreError, .invalidID)
+        }
+        XCTAssertThrowsError(try store.delete(id: "../escape")) { error in
+            XCTAssertEqual(error as? RecipeStoreError, .invalidID)
+        }
+    }
+
+    func testUniqueIDFallsBackWhenSlugIsNotAValidID() {
+        let store = RecipeStore(rootURL: root)
+        let id = store.uniqueID(for: "주간 보고")
+        XCTAssertEqual(id, "recipe")
+        XCTAssertTrue(RecipeStore.isValidID(id))
+    }
+
+    func testRefreshSkipsFilesWhoseIDDoesNotMatchTheFileName() throws {
+        let store = RecipeStore(rootURL: root)
+        let mismatched = Recipe(
+            id: "declared-id", title: "Mismatch", scopeDefault: .manual,
+            outputLanguage: "English", system: "s", prompt: "{{meetings}}")
+        let data = try JSONEncoder().encode(mismatched)
+        try data.write(to: root.appendingPathComponent("other-name.json"))
+
+        store.refresh()
+
+        XCTAssertNil(store.recipes.first { $0.id == "declared-id" })
+        XCTAssertEqual(store.recipes.map(\.id).sorted(), RecipeStore.builtinIDs.sorted())
+    }
+
+    // MARK: - scopeDefault JSON 표기
+
+    func testScopeDefaultEncodesAsSingleStringInRecipeJSON() throws {
+        let expected: [(RecipeScopeDefault, String)] = [
+            (.thisWeek, "thisWeek"),
+            (.lastDays(14), "lastNDays:14"),
+            (.currentMeeting, "currentMeeting"),
+            (.manual, "manual"),
+        ]
+        for (scope, raw) in expected {
+            let recipe = Recipe(
+                id: "scope-case", title: "Scope case", scopeDefault: scope,
+                outputLanguage: "English", system: "s", prompt: "{{meetings}}")
+            let data = try JSONEncoder().encode(recipe)
+            let json = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: data) as? [String: Any])
+            XCTAssertEqual(json["scopeDefault"] as? String, raw, raw)
+
+            let decoded = try JSONDecoder().decode(Recipe.self, from: data)
+            XCTAssertEqual(decoded.scopeDefault, scope, raw)
+            XCTAssertEqual(decoded, recipe, raw)
+        }
     }
 
     // MARK: - helpers

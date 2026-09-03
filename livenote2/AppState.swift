@@ -186,17 +186,24 @@ final class AppState {
         return "Recipe: \(title) (\(scopeLabel), \(meetingCount)\(cut))"
     }
 
+    /// 레시피 실행. model이 nil이면 레시피 힌트와 현재 채팅 모델로 결정한다.
+    /// 성공하면 대화를 저장하고 pendingScreen으로 Chat 화면 전환을 요청한다.
     func runRecipe(
         _ recipe: Recipe,
         scope: RecipeScope,
-        model: ChatModelChoice,
+        model: ChatModelChoice? = nil,
         language: String
     ) async -> Bool {
+        guard !isRecipeRunning else { return false }
+
         let meetings = recipeMeetings(for: scope)
         guard !meetings.isEmpty else {
             lastRecipeError = "No meetings in selected scope"
             return false
         }
+
+        let resolvedModel = model ?? RecipeRunner.defaultModel(for: recipe, userChoice: chatModel)
+        let started = Date()
 
         isRecipeRunning = true
         lastRecipeError = nil
@@ -206,7 +213,7 @@ final class AppState {
             let result = try await RecipeRunner.run(
                 recipe: recipe,
                 meetings: meetings,
-                model: model,
+                model: resolvedModel,
                 language: language,
                 store: meetingStore,
                 localEngine: localChat
@@ -225,17 +232,26 @@ final class AppState {
             chatMessages.append(ChatMessage(role: .assistant, text: result.text))
             persistCurrentChat()
 
+            let elapsed = String(format: "%.1f", Date().timeIntervalSince(started))
+            AppLog.write(
+                "recipe",
+                "레시피 실행 완료 id=\(recipe.id) meetings=\(meetings.count) truncated=\(result.truncated) model=\(resolvedModel.rawValue) local=\(result.usedLocalEngine) lang=\(language.count)자 out=\(result.text.count)자 \(elapsed)s"
+            )
+
+            // 산출물 파일 저장은 실패하면 실행 실패로 본다. 대화는 이미 저장되어 내용은 남는다.
             do {
                 try RecipeOutputStore().write(text: result.text, title: recipe.title)
             } catch {
-                AppLog.write("recipe", "레시피 산출물 저장 실패: \(error.localizedDescription)")
+                lastRecipeError = "Result is in the chat but could not be saved to recipes-output: \(error.localizedDescription)"
+                AppLog.write("recipe", "레시피 산출물 저장 실패 id=\(recipe.id): \(error.localizedDescription)")
+                return false
             }
 
-            AppLog.write(
-                "recipe",
-                "레시피 실행 완료 id=\(recipe.id) meetings=\(meetings.count) truncated=\(result.truncated) model=\(model.rawValue) lang=\(language) out=\(result.text.count)자"
-            )
+            pendingScreen = .chat
             return true
+        } catch is CancellationError {
+            AppLog.write("recipe", "레시피 실행 취소 id=\(recipe.id)")
+            return false
         } catch {
             lastRecipeError = error.localizedDescription
             AppLog.write("recipe", "레시피 실행 실패 id=\(recipe.id): \(error.localizedDescription)")
@@ -356,6 +372,7 @@ final class AppState {
     /// 알림 팝업의 "Change notification settings" 등 창 밖에서 온 요청에 쓴다.
     enum PendingScreen: Equatable {
         case settings
+        case chat
     }
     var pendingScreen: PendingScreen?
 

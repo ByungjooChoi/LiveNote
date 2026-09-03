@@ -74,6 +74,7 @@ struct ContentView: View {
         guard let pending = app.pendingScreen else { return }
         switch pending {
         case .settings: screen = .settings
+        case .chat: screen = .chat
         }
         app.pendingScreen = nil
     }
@@ -508,9 +509,7 @@ struct MeetingDetailView: View {
             if newPhase == .idle { meeting = app.meetingStore.load(url) }
         }
         .sheet(item: $selectedRecipe) { recipe in
-            RecipeRunSheet(recipe: recipe, currentMeeting: url) {
-                screen = .chat
-            }
+            RecipeRunSheet(recipe: recipe, currentMeeting: url)
         }
     }
 
@@ -676,8 +675,7 @@ struct ChatFullView: View {
             }
         }
         .sheet(item: $selectedRecipe) { recipe in
-            RecipeRunSheet(recipe: recipe, currentMeeting: nil) {
-            }
+            RecipeRunSheet(recipe: recipe, currentMeeting: nil)
         }
     }
 
@@ -1237,6 +1235,18 @@ struct SummaryCard: View {
 struct ChatModelMenu: View {
     @Environment(AppState.self) private var app
 
+    /// 바인딩을 주면 그 값을 읽고 쓴다(레시피 실행 시트의 1회성 선택).
+    /// 없으면 앱 전역 채팅 모델을 읽고 쓴다.
+    private let selection: Binding<ChatModelChoice>?
+
+    init(selection: Binding<ChatModelChoice>? = nil) {
+        self.selection = selection
+    }
+
+    private var current: ChatModelChoice {
+        selection?.wrappedValue ?? app.chatModel
+    }
+
     var body: some View {
         Menu {
             Section("Standard") {
@@ -1249,7 +1259,7 @@ struct ChatModelMenu: View {
                 modelButton(.localQwen)
             }
         } label: {
-            Text(app.chatModel.displayName)
+            Text(current.displayName)
                 .font(.caption)
         }
         .fixedSize()
@@ -1259,9 +1269,13 @@ struct ChatModelMenu: View {
     @ViewBuilder
     private func modelButton(_ choice: ChatModelChoice) -> some View {
         Button {
-            app.setChatModel(choice)
+            if let selection {
+                selection.wrappedValue = choice
+            } else {
+                app.setChatModel(choice)
+            }
         } label: {
-            if choice == app.chatModel {
+            if choice == current {
                 Label(choice.displayName, systemImage: "checkmark")
             } else {
                 Text(choice.displayName)
@@ -1475,6 +1489,7 @@ struct SettingsView: View {
     @State private var jargonDraft = ""
     @State private var editingRecipe: Recipe?
     @State private var isCreatingRecipe = false
+    @State private var recipeError: String?
 
     var body: some View {
         ScrollView {
@@ -1663,7 +1678,9 @@ struct SettingsView: View {
 
                                 if !recipe.builtin {
                                     Button("Delete", role: .destructive) {
-                                        app.recipeStore.delete(id: recipe.id)
+                                        runRecipeStoreAction {
+                                            try app.recipeStore.delete(id: recipe.id)
+                                        }
                                     }
                                     .controlSize(.small)
                                 }
@@ -1673,6 +1690,13 @@ struct SettingsView: View {
                                 Divider()
                             }
                         }
+                    }
+
+                    if let recipeError {
+                        Text(recipeError)
+                            .font(.caption)
+                            .foregroundStyle(Theme.vermilion)
+                            .textSelection(.enabled)
                     }
 
                     HStack {
@@ -1686,7 +1710,9 @@ struct SettingsView: View {
                         Spacer()
 
                         Button("Reset built-ins") {
-                            app.recipeStore.resetBuiltins()
+                            runRecipeStoreAction {
+                                try app.recipeStore.resetBuiltins()
+                            }
                         }
                         .controlSize(.small)
                     }
@@ -1731,7 +1757,19 @@ struct SettingsView: View {
             system: recipe.system,
             prompt: recipe.prompt
         )
-        app.recipeStore.upsert(copy)
+        runRecipeStoreAction {
+            try app.recipeStore.upsert(copy)
+        }
+    }
+
+    /// 레시피 저장소 작업을 실행하고 실패하면 카드 아래에 오류를 보여준다.
+    private func runRecipeStoreAction(_ action: () throws -> Void) {
+        do {
+            try action()
+            recipeError = nil
+        } catch {
+            recipeError = error.localizedDescription
+        }
     }
 
     /// 라벨 왼쪽 + 컨트롤 오른쪽 정렬 행 (Granola식)
