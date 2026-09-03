@@ -19,6 +19,7 @@
 
 /* Begin PBXFileReference section */
 		AB1200000000000000000006 /* LiveNote.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LiveNote.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		AB1200000000000000000021 /* livenote2Tests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = livenote2Tests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -40,7 +41,22 @@
 			path = livenote2;
 			sourceTree = "<group>";
 		};
+		AB1200000000000000000020 /* livenote2Tests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = livenote2Tests;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXContainerItemProxy section */
+		AB1200000000000000000027 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AB1200000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = AB1200000000000000000005;
+			remoteInfo = livenote2;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		AB1200000000000000000008 /* Frameworks */ = {
@@ -58,6 +74,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		AB1200000000000000000024 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -72,6 +95,7 @@
 			isa = PBXGroup;
 			children = (
 				AB1200000000000000000004 /* livenote2 */,
+				AB1200000000000000000020 /* livenote2Tests */,
 				8BA667F730254CA5003F050F /* Frameworks */,
 				AB1200000000000000000003 /* Products */,
 			);
@@ -81,6 +105,7 @@
 			isa = PBXGroup;
 			children = (
 				AB1200000000000000000006 /* LiveNote.app */,
+				AB1200000000000000000021 /* livenote2Tests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -118,6 +143,29 @@
 			productReference = AB1200000000000000000006 /* LiveNote.app */;
 			productType = "com.apple.product-type.application";
 		};
+		AB1200000000000000000022 /* livenote2Tests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = AB1200000000000000000028 /* Build configuration list for PBXNativeTarget "livenote2Tests" */;
+			buildPhases = (
+				AB1200000000000000000023 /* Sources */,
+				AB1200000000000000000024 /* Frameworks */,
+				AB1200000000000000000025 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				AB1200000000000000000026 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				AB1200000000000000000020 /* livenote2Tests */,
+			);
+			name = livenote2Tests;
+			packageProductDependencies = (
+			);
+			productName = livenote2Tests;
+			productReference = AB1200000000000000000021 /* livenote2Tests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -130,6 +178,10 @@
 				TargetAttributes = {
 					AB1200000000000000000005 = {
 						CreatedOnToolsVersion = 26.0;
+					};
+					AB1200000000000000000022 = {
+						CreatedOnToolsVersion = 26.0;
+						TestTargetID = AB1200000000000000000005;
 					};
 				};
 			};
@@ -154,12 +206,20 @@
 			projectRoot = "";
 			targets = (
 				AB1200000000000000000005 /* livenote2 */,
+				AB1200000000000000000022 /* livenote2Tests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		AB1200000000000000000009 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		AB1200000000000000000025 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -176,7 +236,22 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		AB1200000000000000000023 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		AB1200000000000000000026 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = AB1200000000000000000005 /* livenote2 */;
+			targetProxy = AB1200000000000000000027 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		AB1200000000000000000012 /* Debug */ = {
@@ -352,6 +427,40 @@
 			};
 			name = Release;
 		};
+		AB1200000000000000000029 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = W48965CX9B;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.byungjoo.livenote2.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/LiveNote.app/Contents/MacOS/LiveNote";
+			};
+			name = Debug;
+		};
+		AB1200000000000000000030 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = W48965CX9B;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.byungjoo.livenote2.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/LiveNote.app/Contents/MacOS/LiveNote";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -369,6 +478,15 @@
 			buildConfigurations = (
 				AB1200000000000000000014 /* Debug */,
 				AB1200000000000000000015 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		AB1200000000000000000028 /* Build configuration list for PBXNativeTarget "livenote2Tests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AB1200000000000000000029 /* Debug */,
+				AB1200000000000000000030 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
