@@ -10,6 +10,8 @@ struct MeetingSummary: Identifiable, Hashable {
     let startedAt: Date
     let rowCount: Int
     let durationSeconds: Double
+    /// 캘린더에서 캡처한 참석자 (구버전 저장본은 nil)
+    let attendees: [Attendee]?
 
     var id: URL { url }
 
@@ -33,6 +35,8 @@ struct SavedMeeting: Codable {
     var rows: [TranscriptRow]
     /// LLM 생성 요약 (한국어). 없으면 nil. (구버전 파일과의 호환을 위해 옵셔널)
     var summary: String? = nil
+    /// 회의 시작 시점 캘린더 참석자 (본인 제외). 구버전 파일 호환을 위해 옵셔널.
+    var attendees: [Attendee]? = nil
 }
 
 /// 회의 저장소 — `~/Documents/livenote2/` 아래 회의별 폴더.
@@ -57,6 +61,13 @@ final class MeetingStore {
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Documents")
         rootURL = documents.appendingPathComponent("LiveNote", isDirectory: true)
+        refresh()
+    }
+
+    /// 테스트용: 임시 폴더를 루트로 쓰는 저장소.
+    init(rootURL: URL) {
+        self.rootURL = rootURL
+        try? FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
         refresh()
     }
 
@@ -89,7 +100,8 @@ final class MeetingStore {
                 dateLabel: Self.shortDateFormatter.string(from: meeting.startedAt),
                 startedAt: meeting.startedAt,
                 rowCount: meeting.rows.count,
-                durationSeconds: meeting.durationSeconds
+                durationSeconds: meeting.durationSeconds,
+                attendees: meeting.attendees
             ))
         }
         meetings = found.sorted { $0.startedAt > $1.startedAt }
@@ -106,6 +118,7 @@ final class MeetingStore {
         durationSeconds: Double,
         title: String?,
         summary: String?,
+        attendees: [Attendee]?,
         existingURL: URL?
     ) -> URL? {
         guard !rows.isEmpty else { return existingURL }
@@ -124,7 +137,8 @@ final class MeetingStore {
             myName: myName,
             speakerNames: speakerNames,
             rows: rows,
-            summary: summary
+            summary: summary,
+            attendees: attendees
         )
 
         do {
@@ -153,6 +167,45 @@ final class MeetingStore {
         }
         UserDefaults.standard.set(true, forKey: key)
         if cleaned > 0 { refresh() }
+    }
+
+    /// 저장된 회의의 제목 변경: session.json 갱신 + 폴더명을 새 제목으로 rename.
+    /// 새 폴더 URL을 반환(이동하지 않았으면 기존 URL). 실패 시 nil.
+    func rename(at url: URL, title: String) -> URL? {
+        guard var meeting = load(url) else { return nil }
+        meeting.title = title
+
+        var destination = url
+        // 이미 같은 이름이면 (2) 접미사가 붙지 않도록 이동 자체를 생략한다.
+        if url.lastPathComponent != Self.folderBaseName(for: meeting.startedAt, title: title) {
+            let candidate = makeUniqueFolder(for: meeting.startedAt, title: title)
+            do {
+                try FileManager.default.moveItem(at: url, to: candidate)
+                destination = candidate
+            } catch {
+                AppLog.write("app", "회의 폴더 rename 실패: \(error.localizedDescription.prefix(120))")
+            }
+        }
+
+        do {
+            try writeAll(meeting, to: destination)
+        } catch {
+            return nil
+        }
+        refresh()
+        return destination
+    }
+
+    /// 요약 첫 H1을 회의 제목으로 (60자 컷). H1이 없으면 nil.
+    static func titleFromSummary(_ summary: String) -> String? {
+        for rawLine in summary.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard line.hasPrefix("# ") else { continue }
+            let title = String(line.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+            guard !title.isEmpty else { continue }
+            return String(title.prefix(60)).trimmingCharacters(in: .whitespaces)
+        }
+        return nil
     }
 
     /// 저장된 회의에 요약만 갱신.
@@ -331,10 +384,7 @@ final class MeetingStore {
     /// 폴더명: "yyyy-MM-dd HHmm" + 캘린더 회의 제목 (파일명 안전화, 40자 컷).
     /// 예: "2026-09-01 1950 Philip Craig"
     private func makeUniqueFolder(for date: Date, title: String?) -> URL {
-        var base = Self.folderFormatter.string(from: date)
-        if let safeTitle = Self.folderSafeTitle(title), !safeTitle.isEmpty {
-            base += " \(safeTitle)"
-        }
+        let base = Self.folderBaseName(for: date, title: title)
         var candidate = rootURL.appendingPathComponent(base, isDirectory: true)
         var counter = 2
         while FileManager.default.fileExists(atPath: candidate.path) {
@@ -342,6 +392,15 @@ final class MeetingStore {
             counter += 1
         }
         return candidate
+    }
+
+    /// 중복 처리 전 폴더 기본 이름 ("yyyy-MM-dd HHmm[ 제목]").
+    static func folderBaseName(for date: Date, title: String?) -> String {
+        var base = folderFormatter.string(from: date)
+        if let safeTitle = folderSafeTitle(title), !safeTitle.isEmpty {
+            base += " \(safeTitle)"
+        }
+        return base
     }
 
     /// 회의 제목을 폴더명에 안전한 형태로: 경로 예약 문자 제거, 공백 정리, 40자 제한.

@@ -239,26 +239,15 @@ final class AppState {
             let summary = meeting.summary.map { "요약:\n\($0)\n\n" } ?? ""
             return "\(title)\(summary)전사:\n\(String(transcript.suffix(60_000)))"
         case .archive:
-            var parts: [String] = []
-            var budget = 60_000
-            for meeting in meetingStore.meetings.prefix(15) {
-                guard budget > 2_000, let saved = meetingStore.load(meeting.url) else { continue }
-                let body: String
-                if let summary = saved.summary {
-                    body = summary
-                } else {
-                    let transcript = MeetingStore.transcriptForSummary(saved) { row in
-                        MeetingStore.resolveName(row: row, myName: saved.myName, speakerNames: saved.speakerNames)
-                    }
-                    body = String(transcript.prefix(1_500))
-                }
-                let section = "## \(meeting.title) (\(meeting.dateLabel))\n\(body)"
-                parts.append(String(section.prefix(budget)))
-                budget -= section.count
-            }
-            return parts.isEmpty
+            let context = ContextBuilder.build(
+                meetings: Array(meetingStore.meetings.prefix(15)),
+                store: meetingStore,
+                budget: 60_000,
+                perMeetingTranscriptCap: 1_500
+            )
+            return context.text.isEmpty
                 ? "저장된 회의가 아직 없습니다."
-                : "아래는 저장된 회의 전체 기록입니다.\n\n" + parts.joined(separator: "\n\n")
+                : "아래는 저장된 회의 전체 기록입니다.\n\n" + context.text
         }
     }
 
@@ -308,6 +297,8 @@ final class AppState {
     @ObservationIgnored private var captureStartedAt: Date?
     /// 현재 회의의 캘린더 일정 제목 (저장 시 함께 기록)
     @ObservationIgnored private var meetingTitle: String?
+    /// 현재 회의의 캘린더 참석자 (이름 + 이메일, 저장 시 session.json에 기록)
+    @ObservationIgnored private var meetingAttendees: [Attendee] = []
 
     // 번역 요청 큐
     struct TranslationRequest: Sendable {
@@ -610,7 +601,9 @@ final class AppState {
         zoomTagMessage = nil
         captureStartedAt = nil
         // 진행 중인 캘린더 일정의 참석자 → 화자 이름 원클릭 후보, 제목 → 회의 이름
-        attendeeCandidates = calendar.attendeeNamesForOngoingMeeting()
+        let attendees = calendar.ongoingMeetingAttendees()
+        meetingAttendees = attendees
+        attendeeCandidates = attendees.map(\.name)
         meetingTitle = calendar.ongoingMeetingTitle()
 
         // Zoom 화자 태그: Zoom이 떠 있으면 폴링 시작 (권한 없으면 요청 다이얼로그 + 안내)
@@ -940,6 +933,7 @@ final class AppState {
             durationSeconds: duration,
             title: meetingTitle,
             summary: currentSummary,
+            attendees: meetingAttendees.isEmpty ? nil : meetingAttendees,
             existingURL: currentMeetingURL
         )
     }
@@ -1004,10 +998,24 @@ final class AppState {
                 self.currentSummary = summary
                 self.summaryPhase = .idle
                 self.persistCurrentSession()
+                self.applyAutoTitleIfNeeded(from: summary)
             } catch {
                 self.summaryPhase = .failed(error.localizedDescription)
             }
         }
+    }
+
+    /// 캘린더 제목이 없는 임시 회의는 요약 첫 H1을 제목으로 채택하고 폴더명까지 반영.
+    /// meetingTitle이 채워지면 다시 들어오지 않으므로 회의당 1회만 동작한다.
+    private func applyAutoTitleIfNeeded(from summary: String) {
+        guard meetingTitle == nil,
+              let url = currentMeetingURL,
+              let title = MeetingStore.titleFromSummary(summary) else { return }
+        meetingTitle = title
+        if let renamed = meetingStore.rename(at: url, title: title) {
+            currentMeetingURL = renamed
+        }
+        AppLog.write("app", "요약에서 회의 제목 자동 지정: \(title.count)자")
     }
 
     /// 요약 실행 라우팅: 클라우드 백엔드 + API 키 보유 시 Gemini 3.7 Flash

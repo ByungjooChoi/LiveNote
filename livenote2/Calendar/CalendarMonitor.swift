@@ -276,6 +276,12 @@ final class CalendarMonitor {
     /// 지금 진행 중이거나 10분 내 시작하는 일정의 참석자 이름 목록.
     /// 화자 칩 rename 팝오버에 원클릭 후보로 표시됨. 본인·회의실 리소스 제외, 최대 10명.
     func attendeeNamesForOngoingMeeting(now: Date = Date()) -> [String] {
+        ongoingMeetingAttendees(now: now).map(\.name)
+    }
+
+    /// 위와 같은 창·필터로 참석자를 이름 + 이메일까지 담아 반환.
+    /// 회의 저장(session.json)과 이후 브리핑·담당자 매칭이 쓰는 원본 데이터다.
+    func ongoingMeetingAttendees(now: Date = Date()) -> [Attendee] {
         guard EKEventStore.authorizationStatus(for: .event) == .fullAccess else { return [] }
         let predicate = store.predicateForEvents(
             withStart: now.addingTimeInterval(-90 * 60),
@@ -288,17 +294,31 @@ final class CalendarMonitor {
             return now >= start.addingTimeInterval(-10 * 60) && now <= end
         }
         var seen = Set<String>()
-        var names: [String] = []
+        var attendees: [Attendee] = []
         for event in ongoing {
-            for attendee in event.attendees ?? [] {
-                guard attendee.participantType == .person, !attendee.isCurrentUser else { continue }
-                let name = Self.prettyName(attendee.name ?? "")
+            for participant in event.attendees ?? [] {
+                guard participant.participantType == .person, !participant.isCurrentUser else { continue }
+                let name = Self.prettyName(participant.name ?? "")
                 guard !name.isEmpty, seen.insert(name.lowercased()).inserted else { continue }
-                names.append(name)
-                if names.count >= 10 { return names }
+                attendees.append(Attendee(name: name, email: Self.email(fromParticipantURL: participant.url)))
+                if attendees.count >= 10 { return attendees }
             }
         }
-        return names
+        return attendees
+    }
+
+    /// EKParticipant.url에서 이메일 주소 추출 ("mailto:jane@x.com" → "jane@x.com").
+    /// mailto가 아니거나 주소가 비면 nil.
+    static func email(fromParticipantURL url: URL?) -> String? {
+        guard let url, url.scheme?.lowercased() == "mailto" else { return nil }
+        var rest = url.absoluteString
+        guard let colon = rest.firstIndex(of: ":") else { return nil }
+        rest = String(rest[rest.index(after: colon)...])
+        // 헤더 파라미터("?subject=…")와 다중 수신자는 버리고 첫 주소만 쓴다.
+        if let question = rest.firstIndex(of: "?") { rest = String(rest[..<question]) }
+        if let comma = rest.firstIndex(of: ",") { rest = String(rest[..<comma]) }
+        let address = (rest.removingPercentEncoding ?? rest).trimmingCharacters(in: .whitespaces)
+        return address.isEmpty ? nil : address
     }
 
     /// 표시 이름이 이메일이면 로컬 파트를 사람 이름처럼 정리 ("jane.doe@x.com" → "Jane Doe").

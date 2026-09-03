@@ -27,6 +27,13 @@ struct TranscriptRow: Identifiable, Sendable, Codable {
     }
 }
 
+/// 캘린더 일정에서 캡처한 회의 참석자 (본인 제외).
+/// session.json에 함께 저장되어 이후 브리핑·태스크 담당자 매칭의 근거가 된다.
+struct Attendee: Codable, Hashable, Sendable {
+    var name: String
+    var email: String?
+}
+
 /// 엔진 → UI로 전달되는 확정 세그먼트.
 struct FinalSegment: Sendable {
     let channel: AudioChannel
