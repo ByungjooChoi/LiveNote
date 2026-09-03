@@ -21,8 +21,8 @@ enum RecipeScope: Equatable, Sendable {
     }
 
     /// 레시피 기본 범위를 실행 시점 범위로 변환한다.
-    /// `.currentMeeting`인데 열린 회의가 없으면 이번 주로 폴백하고,
-    /// `.manual`은 빈 선택으로 시작해 사용자가 시트에서 고르게 한다.
+    /// `.currentMeeting`인데 열린 회의가 없으면 빈 수동 선택으로 시작한다(다른 범위로 바꿔치기하지 않는다).
+    /// `.manual`도 빈 선택으로 시작해 사용자가 시트에서 고르게 한다.
     init(default scopeDefault: RecipeScopeDefault, currentMeeting: URL?) {
         switch scopeDefault {
         case .thisWeek:
@@ -33,7 +33,7 @@ enum RecipeScope: Equatable, Sendable {
             if let url = currentMeeting {
                 self = .currentMeeting(url)
             } else {
-                self = .thisWeek
+                self = .manual([])
             }
         case .manual:
             self = .manual([])

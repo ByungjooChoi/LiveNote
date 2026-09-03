@@ -331,7 +331,7 @@ Weekly Update의 system 프롬프트는 SA(Solutions Architect) 주간보고 규
 - `lastDays(n)`은 `calendar.date(byAdding: .day, value: -n, to: now)`다. 달력 일 단위 연산이라 서머타임 경계도 자연스럽게 처리한다.
 - `thisWeek`/`lastDays` 둘 다 `startedAt <= now` 조건으로 미래 회의를 제외한다.
 - `currentMeeting`/`manual`은 `url.standardizedFileURL.path` 문자열 비교로 매칭한다.
-- `RecipeScope(default:currentMeeting:)`가 레시피의 scopeDefault를 실행 시점 범위로 바꾼다. `.currentMeeting`인데 열린 회의가 없으면 `.thisWeek`로 폴백하고, `.manual`은 빈 배열로 시작해 실행 시트에서 사용자가 고르게 한다.
+- `RecipeScope(default:currentMeeting:)`가 레시피의 scopeDefault를 실행 시점 범위로 바꾼다. `.currentMeeting`인데 열린 회의가 없으면(Chat 홈에서 실행) 빈 `.manual([])`로 시작한다. 다른 범위로 바꿔치기하면 여러 회의가 섞인 결과가 나오므로 금지. `.manual`도 빈 배열로 시작해 실행 시트에서 사용자가 고르게 한다(고르기 전에는 Run 비활성).
 
 **실행 (`Engine/RecipeRunner.swift`)**:
 - `ContextBuilder.build(meetings:store:budget:perMeetingTranscriptCap:)`를 재사용하되 레시피 전용 예산: `contextBudget = 120_000`자, `perMeetingTranscriptCap = 6_000`자/회의(아카이브 채팅의 60K자 상한·무제한 cap과는 다른 값, §5.10).

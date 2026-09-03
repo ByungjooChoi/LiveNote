@@ -23,6 +23,8 @@ struct RecipeRunSheet: View {
     @State private var selectedModel: ChatModelChoice
     @State private var outputLanguage: String
     @State private var runTask: Task<Void, Never>?
+    /// 행 토글로 Choose...에 들어온 경우: 계산된 선택 집합을 그대로 두고 재시딩하지 않는다.
+    @State private var enteredManualByRowToggle = false
 
     init(recipe: Recipe, currentMeeting: URL? = nil) {
         self.recipe = recipe
@@ -35,11 +37,8 @@ struct RecipeRunSheet: View {
             _selectedTab = State(initialValue: .last14Days)
             _lastDaysCount = State(initialValue: n)
         case .currentMeeting:
-            if currentMeeting != nil {
-                _selectedTab = State(initialValue: .thisMeeting)
-            } else {
-                _selectedTab = State(initialValue: .thisWeek)
-            }
+            // 열린 회의가 없으면 빈 Choose... 로 시작한다. 다른 범위로 바꿔치기하면 여러 회의가 섞인다.
+            _selectedTab = State(initialValue: currentMeeting != nil ? .thisMeeting : .manual)
         case .manual:
             _selectedTab = State(initialValue: .manual)
         }
@@ -101,11 +100,8 @@ struct RecipeRunSheet: View {
         .padding(20)
         .frame(minWidth: 540, maxWidth: 620, minHeight: 520, maxHeight: 620)
         .onAppear {
+            app.lastRecipeError = nil
             selectedModel = RecipeRunner.defaultModel(for: recipe, userChoice: app.chatModel)
-            if selectedTab == .manual && selectedMeetingURLs.isEmpty {
-                let initial = app.recipeMeetings(for: RecipeScope(default: recipe.scopeDefault, currentMeeting: currentMeeting))
-                selectedMeetingURLs = Set(initial.map { $0.url })
-            }
         }
     }
 
@@ -140,8 +136,13 @@ struct RecipeRunSheet: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .onChange(of: selectedTab) { oldTab, newTab in
-                // Choose...로 넘어올 때는 직전 범위가 고른 회의를 그대로 체크 상태로 옮긴다.
-                guard newTab == .manual, selectedMeetingURLs.isEmpty else { return }
+                guard newTab == .manual else { return }
+                // 행 토글로 들어온 경우는 이미 계산된 선택을 쓴다. 세그먼트로 직접 넘어온 경우만
+                // 직전 범위가 고른 회의를 체크 상태로 옮긴다(이전 수동 선택은 버린다).
+                if enteredManualByRowToggle {
+                    enteredManualByRowToggle = false
+                    return
+                }
                 guard let previous = scope(for: oldTab) else { return }
                 selectedMeetingURLs = Set(app.recipeMeetings(for: previous).map { $0.url })
             }
@@ -217,6 +218,7 @@ struct RecipeRunSheet: View {
                                     var newSelection = Set(meetings.map { $0.url })
                                     newSelection.remove(meeting.url)
                                     selectedMeetingURLs = newSelection
+                                    enteredManualByRowToggle = true
                                     selectedTab = .manual
                                 }
                             }

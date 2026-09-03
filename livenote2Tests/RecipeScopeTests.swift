@@ -171,8 +171,8 @@ final class RecipeScopeTests: XCTestCase {
         XCTAssertEqual(RecipeScope(default: .currentMeeting, currentMeeting: url), .currentMeeting(url))
     }
 
-    func testInitFromScopeDefaultCurrentMeetingFallsBackToThisWeek() {
-        XCTAssertEqual(RecipeScope(default: .currentMeeting, currentMeeting: nil), .thisWeek)
+    func testInitFromScopeDefaultCurrentMeetingWithoutMeetingStartsEmptyManual() {
+        XCTAssertEqual(RecipeScope(default: .currentMeeting, currentMeeting: nil), .manual([]))
     }
 
     func testInitFromScopeDefaultManualStartsEmpty() {
