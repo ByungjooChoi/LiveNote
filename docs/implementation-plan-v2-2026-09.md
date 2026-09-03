@@ -61,7 +61,9 @@ Phase 0 (기반·G 일부) ─┬─> Phase 1 (Recipes)
 
 ---
 
-## Phase 1: Recipes (v1.5.0)
+## Phase 1: Recipes (v1.5.0, 완료: 2026-09-03)
+
+구현 메모: 계획 대비 세 가지가 늘었다. 후속 채팅이 레시피 컨텍스트를 계속 근거로 쓰도록 `ChatMessage`/`SavedChat.Message`에 `promptText` 필드를 추가했다(계획엔 없던 항목, 구버전 chats/*.json과는 옵셔널로 호환). `systemPrompt` 오버라이드는 계획에 적힌 `GeminiChat`에 더해 `LocalChatEngine.respond`에도 추가해 로컬 폴백에서도 레시피 시스템 프롬프트가 적용되게 했다. 채팅 라벨에 예산 초과로 잘린 회의 수(truncated)를 표시하도록 늘렸다. 편집 폼은 `Views/RecipeEditorView.swift` 별도 파일로 뺐다(계획에는 Settings 카드 안 폼으로 적혀 있었으나, 다른 Views/* 분리 원칙에 맞췄다).
 
 ### 1.1 저장소
 - 신규 `Storage/RecipeStore.swift`: `Recipe` Codable(id, title, icon, builtin, scopeDefault, modelHint, outputLanguage, system, prompt). 폴더 `~/Documents/LiveNote/recipes/`. `refresh()`, `upsert()`, `delete()`, `resetBuiltins()`.

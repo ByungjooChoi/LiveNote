@@ -13,3 +13,6 @@ dist/
 # 아이콘 생성 중간물 (마스터는 스크립트로 재생성 가능)
 icons/preview_*.png
 icons/master_*.png
+
+# oh-my-claudecode 세션 상태 (운영 산출물)
+.omc/

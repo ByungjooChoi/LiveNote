@@ -2,7 +2,7 @@
 
 작성일: 2026-08-06 · 대상: 이 문서만 보고 동일한 앱을 재구축해야 하는 제로베이스 AI/개발자
 현재 상태: **1단계 완성 + 출시 패키징 완료** (빌드·실전 사용 검증 완료, /Applications 설치본 운영 중)
-최신 갱신: v1.4.0 (2026-09-02, Phase 0: 참석자 캡처, 아카이브 컨텍스트 조립 공용화, 자동 제목, 알림 분할 버튼, 대면 회의 모드, 자동 시작 카운트다운, 테스트 타깃 신설)
+최신 갱신: v1.5.0 (2026-09-03, Phase 1: Recipes, 저장된 프롬프트 템플릿을 회의 범위에 일괄 실행)
 
 ---
 
@@ -71,6 +71,7 @@
 - **알림 팝업 분할 참가 버튼 (2026-09-02, v1.4.0)**: 플랫폼(Zoom/Teams/Meet/Webex)별 딥링크 참가 + 기록 시작, 참가만/기록만/설정 이동을 메뉴로 분리(§5.8)
 - **자동 시작 확인 카운트다운 (2026-09-02, v1.4.0)**: 오탐 기록을 막는 5초 취소 가능 지연(§5.12)
 - **캘린더 참석자 이메일 캡처 + 아카이브 컨텍스트 조립 공용화 (2026-09-02, v1.4.0)**: session.json에 참석자 저장, 여러 화면이 같은 로직으로 회의록 컨텍스트를 조립(§5.7, §5.10)
+- **Recipes (2026-09-03, v1.5.0)**: 저장된 프롬프트 템플릿을 회의 범위(이번 주/최근 N일/이 회의/직접 선택)에 일괄 실행해 결과를 채팅 대화와 md 파일로 받는 기능. 내장 5종 포함, 사용자 정의·편집 가능(§5.13)
 
 ### 미완/백로그 (우선순위 순)
 1. ~~**출시 패키징**~~ ✅ 완료 (2026-08-06): `xcodebuild archive` → /Applications 설치. CLI 절차는 §8.7 참조
@@ -303,6 +304,52 @@
 - **설정 (UserDefaults, Settings > Meetings)**: `autoStartCountdown`(카운트다운 사용, **기본 켜짐**, 5초, `AppState.autoStartCountdownSeconds`) · `autoStartAtCalendarTime`(캘린더 시작 시각 트리거 사용, **기본 꺼짐**). 카운트다운을 끄면 지연 없이 즉시 start() (`AppState.autoStartDelay(countdownEnabled:)`가 0 반환).
 - **흐름**: `beginAutoStart(reason:)`가 진입점이다. `isActive`가 아니고 패널이 이미 떠 있지 않을 때만 표시, 만료 시 `start()` + notice 배너, 만료 전 다른 자동 시작 트리거가 겹치면 무시.
 
+### 5.13 Recipes (RecipeStore + RecipeScope + RecipeRunner + RecipeOutputStore, 2026-09-03 추가, v1.5.0)
+
+저장된 프롬프트 템플릿("레시피")을 회의 범위에 일괄 적용해 채팅 대화로 결과를 받는 기능. Granola의 Recipes에 해당.
+
+**저장 (`Storage/RecipeStore.swift`)**: 레시피 파일은 `~/Documents/LiveNote/recipes/<id>.json` 한 폴더에 평평하게 저장한다. `Recipe` Codable: id, title, icon(SF Symbol), builtin, scopeDefault, modelHint, outputLanguage, system, prompt (icon/builtin/modelHint는 없어도 디코딩되어 구버전·수기 편집 파일과 호환). 내장 레시피 5종은 앱 번들 `Resources/Recipes/*.json`에 있고, 앱 시작 시 폴더에 없는 id만 복사한다(`seedBuiltinsIfNeeded`, 사용자가 편집한 내장 파일은 그대로 유지). Settings의 "Reset built-ins"(`resetBuiltins()`)는 내장 id 5개를 번들 원본으로 덮어쓰고 사용자 레시피는 건드리지 않는다. 내장 레시피 파일을 삭제해도 다음 실행에 `seedBuiltinsIfNeeded`가 다시 채워 복원한다. 목록 정렬은 내장 우선, 그다음 제목 오름차순(대소문자 무시).
+
+**내장 5종**:
+
+| id | 제목 | 기본 범위 | 모델 힌트 | 출력 언어 |
+|---|---|---|---|---|
+| weekly-update | Weekly Update | thisWeek | thinking | Korean |
+| follow-up-email | Follow-up email | currentMeeting | standard | English |
+| open-commitments | Open commitments | lastNDays:14 | thinking | Korean |
+| customer-call-brief | Customer call brief (EN) | currentMeeting | standard | English |
+| korean-digest | Korean digest | currentMeeting | standard | Korean |
+
+Weekly Update의 system 프롬프트는 SA(Solutions Architect) 주간보고 규칙을 명문화한다(1인칭 주어 생략, 판단·논리 흐름 서술, 산출물 나열 금지, 배정 경위 미기재, 계정별 단락, 한국어 출력에 고유명사만 영문 유지 등).
+
+**범위 (`Models/RecipeScope.swift`)**: `thisWeek` / `lastDays(Int)` / `currentMeeting(URL)` / `manual([URL])`. 순수 함수 `resolve(meetings:now:calendar:)`가 startedAt 내림차순으로 필터한다.
+- **주 시작은 항상 월요일 00:00(로컬)**이다. `Calendar.current.firstWeekday`(지역화 값, 예: 미국 로케일은 일요일)와 무관하게 `weekStart(for:calendar:)`가 `firstWeekday = 2`로 고정한 캘린더로 계산한다.
+- `lastDays(n)`은 `calendar.date(byAdding: .day, value: -n, to: now)`다. 달력 일 단위 연산이라 서머타임 경계도 자연스럽게 처리한다.
+- `thisWeek`/`lastDays` 둘 다 `startedAt <= now` 조건으로 미래 회의를 제외한다.
+- `currentMeeting`/`manual`은 `url.standardizedFileURL.path` 문자열 비교로 매칭한다.
+- `RecipeScope(default:currentMeeting:)`가 레시피의 scopeDefault를 실행 시점 범위로 바꾼다. `.currentMeeting`인데 열린 회의가 없으면 `.thisWeek`로 폴백하고, `.manual`은 빈 배열로 시작해 실행 시트에서 사용자가 고르게 한다.
+
+**실행 (`Engine/RecipeRunner.swift`)**:
+- `ContextBuilder.build(meetings:store:budget:perMeetingTranscriptCap:)`를 재사용하되 레시피 전용 예산: `contextBudget = 120_000`자, `perMeetingTranscriptCap = 6_000`자/회의(아카이브 채팅의 60K자 상한·무제한 cap과는 다른 값, §5.10).
+- 프롬프트 치환(`renderPrompt`): `{{meetings}}` `{{today}}`(yyyy-MM-dd, 로컬 타임존) `{{language}}`. 모르는 플레이스홀더는 그대로 남는다.
+- 모델에 보내는 질문은 `{{meetings}}` 자리에 "(the meeting records above)" 문자열을 넣어 만든다. 실제 회의 컨텍스트는 프라임된 첫 턴(context: 파라미터)으로 별도 전달하므로 같은 텍스트를 프롬프트에 두 번 넣지 않는다. 채팅에 남기는 사용자 턴(`ChatMessage.promptText`)에는 `{{meetings}}`가 실제 컨텍스트로 치환된 전체 프롬프트를 저장해 후속 질문의 근거로 쓴다.
+- `systemInstruction`은 `recipe.system`을 그대로 쓴다. 이를 위해 `GeminiChat.respond`와 `LocalChatEngine.respond`에 `systemPrompt: String? = nil` 파라미터를 추가했다(nil이면 기존 `ChatPrompt.system`).
+- 모델 라우팅(`defaultModel(for:userChoice:)`): `modelHint == .thinking`이면 사용자가 이미 thinking 계열(`ChatModelChoice.thinkingChoices`) 또는 `.localQwen`을 고르지 않은 한 `.gemini37FlashThinkingMedium`으로 승격한다. `.standard`면 사용자 선택을 그대로 쓴다.
+- API 키가 없으면(`GeminiKeychain.load() == nil`) 실행 시트가 로컬 모델로 안내하고 품질 경고를 보여준다. 사용자가 클라우드 모델을 그대로 선택한 채 실행하면 `RecipeError.noAPIKey`.
+
+**결과 처리 (`AppState.runRecipe`)**: 새 채팅을 시작하고(`startNewChat` + `chatScopeKey = .archive`), 첫 사용자 턴 라벨은 `"Recipe: <title> (<scope label>, N meetings[, T truncated])"`(`recipeUserLabel`, truncated는 예산 초과로 빠진 회의 수가 있을 때만 붙는다)이고 `ChatMessage.promptText`에 렌더링된 전체 프롬프트를 싣는다. 어시스턴트 턴에 결과 텍스트. `persistCurrentChat()`으로 일반 채팅과 동일하게 저장된다.
+- `SavedChat.Message.promptText`는 옵셔널이라 이 필드가 없는 구버전 `chats/*.json`도 그대로 디코드된다(nil로 채워짐).
+- `askChat`의 후속 질문 처리: 첫 턴에 promptText가 있으면(레시피로 시작한 대화) 그 턴을 항상 히스토리 맨 앞에 고정으로 포함하고 이후 최근 7턴을 덧붙인다. 일반 대화는 최근 8턴만. 히스토리로 보내는 텍스트는 각 턴마다 `promptText ?? text`.
+- 결과 텍스트는 `RecipeOutputStore`(`Storage/RecipeOutputStore.swift`)가 `~/Documents/LiveNote/recipes-output/<yyyy-MM-dd> <title>.md`로 저장한다. 같은 이름이 있으면 `" (2)"`, `" (3)"`… 접미사를 붙인다. 앱은 이 폴더의 파일을 지우지 않는다.
+- `recipe` 로그 카테고리(`~/Documents/LiveNote/logs/recipe.log`)에 실행 id·회의 수·truncated·모델·언어·출력 글자 수만 남긴다. 프롬프트·결과 본문은 기록하지 않는다.
+
+**UI**:
+- Chat 홈 히어로 아래 `Views/RecipesRow.swift` 칩 행(내장 + 사용자 레시피 + See all).
+- `Views/RecipeRunSheet.swift`: 범위 세그먼트(This week / Last N days / This meeting / Choose...), 회의 체크리스트(어떤 행이든 토글 해제하면 자동으로 manual로 전환), 모델·출력 언어, 키 없음 경고, [Run].
+- `ContentView.swift`의 MeetingDetailView 툴바 "Recipes" 메뉴는 `scopeDefault == .currentMeeting`인 레시피만 나열한다(다른 범위 레시피는 이 메뉴에 뜨지 않는다).
+- Settings > Recipes 카드: 목록(내장 배지, Edit/Duplicate/내장이 아니면 Delete), New recipe, Reset built-ins.
+- `Views/RecipeEditorView.swift`: 제목/아이콘/출력 언어/기본 범위(Last N days면 Stepper)/모델 힌트/시스템 지시문/사용자 프롬프트 템플릿. 템플릿에 `{{meetings}}`가 없으면 경고를 보여준다(저장은 막지 않는다).
+
 ---
 
 ## 6. 파일별 스펙 (livenote2/livenote2/ 아래 주요 파일)
@@ -320,16 +367,24 @@
 | `Engine/GeminiLiveTranslator.swift` | actor. §5.4 클라우드 번역: 채널별 WebSocket 2개, PCM 변환·무음 게이트·전송, outputTranscription 누적·claim, 재연결. + `GeminiKeychain`(API 키 Keychain 보관) |
 | `Engine/ZoomSpeakerTagger.swift` | @MainActor. §5.3 Zoom AX 폴링: 타일 파싱(이름·active speaker·뮤트), 활성 화자 타임라인, dominantName, 내 뮤트 변화 콜백. AX API를 만지는 유일한 파일 |
 | `Engine/ChatService.swift` | §5.9 채팅: `ChatPrompt`(공유 프롬프트·이력 합성), `LocalChatEngine` actor(Qwen 상주), `GeminiChat`(3.7 Flash 멀티턴 REST) |
-| `Engine/ContextBuilder.swift` | §5.10 (v1.4.0 추가) `@MainActor enum`. `build(meetings:store:budget:perMeetingTranscriptCap:)`로 아카이브 채팅·향후 Recipes/브리핑이 공용하는 컨텍스트 조립 |
+| `Engine/ContextBuilder.swift` | §5.10 (v1.4.0 추가) `@MainActor enum`. `build(meetings:store:budget:perMeetingTranscriptCap:)`로 아카이브 채팅·Recipes(§5.13)·향후 브리핑이 공용하는 컨텍스트 조립 |
+| `Engine/RecipeRunner.swift` | §5.13 (v1.5.0 추가) `@MainActor enum`. `run(recipe:meetings:model:language:store:localEngine:)`, `renderPrompt`, `defaultModel(for:userChoice:)` |
 | `Calendar/CalendarMonitor.swift` | @MainActor @Observable. §5.8 감시 루프·자격 판정·Zoom 링크 파싱(`firstZoomLink`/`zoomDeepLink` static)·참가 실행. EventKit을 만지는 유일한 파일. v1.4.0: `ongoingMeetingAttendees()`가 이메일 포함 `[Attendee]` 반환(§5.7), `onMeetingTimeReached`가 캘린더 시작 시각 트리거(§5.12) 발화 |
 | `Calendar/MeetingAlertPanel.swift` | `MeetingAlertPanelController`(NSPanel 생성·우상단 배치·닫기) + `MeetingAlertView`(SwiftUI: 제목·시간·카운트다운·분할 참가 버튼/Dismiss, §5.8) |
 | `Calendar/CountdownPanel.swift` | §5.12 (v1.4.0 추가) `CountdownPanelController`(NSPanel) + `CountdownView`(사유·카운트다운·Cancel). 자동 시작 전 취소 유예 |
 | `Engine/SummaryService.swift` | actor. §5.5. 모델 ID 상수 한 줄로 교체 가능하게 유지할 것 |
-| `AppState.swift` | @MainActor @Observable 중심 허브. phase(idle/preparing/listening/error), rows, volatileText, 배너 4종(systemAudio/diarizer/translation/notice), micLevel, echoFilterEnabled·myName·autoStartOnMeetingApp(UserDefaults 영속), start(mode:)/stop() 오케스트레이션(§4 흐름, v1.4.0부터 online/inPerson 분기 §5.11), 에코 dedup(§5.2③), 저장·재저장(§5.6~7), 자동 시작/종료 옵저버(§5.12 카운트다운 경유), 요약 상태머신(summaryPhase), `pendingScreen`(팝업 메뉴 → Settings 화면 전환 신호). **파이프라인 내부 상태 14개 프로퍼티에 @ObservationIgnored 필수**(§7.4). 회의 앱 번들ID 목록은 **파일 스코프 상수**(§7.5) |
-| `ContentView.swift` | NavigationSplitView: 사이드바(라이브 + MeetingStore.meetings, 컨텍스트 메뉴: Finder에서 보기/삭제) / LiveMeetingView(헤더: 상태·미터·에코필터 토글·시작/중지 ⌘R·In person 배지(§5.11), 배너들, SummaryCard, 전사 리스트: 화자칩 popover rename·EN·KO·"번역 중…"·타임스탬프·잠정 행, 자동 스크롤) / SavedMeetingView(읽기전용 + SummaryCard + onChange(summaryPhase) 재로드) / Settings > Meetings(자동 시작 카운트다운·캘린더 시작 시각 트리거 토글, §5.12). 화자칩 색: me=blue, 슬롯=8색 팔레트 순환, nil=회색 |
+| `AppState.swift` | @MainActor @Observable 중심 허브. phase(idle/preparing/listening/error), rows, volatileText, 배너 4종(systemAudio/diarizer/translation/notice), micLevel, echoFilterEnabled·myName·autoStartOnMeetingApp(UserDefaults 영속), start(mode:)/stop() 오케스트레이션(§4 흐름, v1.4.0부터 online/inPerson 분기 §5.11), 에코 dedup(§5.2③), 저장·재저장(§5.6~7), 자동 시작/종료 옵저버(§5.12 카운트다운 경유), 요약 상태머신(summaryPhase), `pendingScreen`(팝업 메뉴 → Settings 화면 전환 신호), v1.5.0: `recipeStore`·`runRecipe(_:scope:model:language:)`·`recipeMeetings(for:)`(§5.13), `askChat`이 레시피로 시작한 대화의 첫 promptText 턴을 고정 포함. **파이프라인 내부 상태 14개 프로퍼티에 @ObservationIgnored 필수**(§7.4). 회의 앱 번들ID 목록은 **파일 스코프 상수**(§7.5) |
+| `ContentView.swift` | NavigationSplitView: 사이드바(라이브 + MeetingStore.meetings, 컨텍스트 메뉴: Finder에서 보기/삭제) / LiveMeetingView(헤더: 상태·미터·에코필터 토글·시작/중지 ⌘R·In person 배지(§5.11), 배너들, SummaryCard, 전사 리스트: 화자칩 popover rename·EN·KO·"번역 중…"·타임스탬프·잠정 행, 자동 스크롤) / SavedMeetingView(읽기전용 + SummaryCard + onChange(summaryPhase) 재로드) / MeetingDetailView 툴바 "Recipes" 메뉴(currentMeeting 범위 레시피만, §5.13) / Settings > Meetings(자동 시작 카운트다운·캘린더 시작 시각 트리거 토글, §5.12) / Settings > Recipes 카드(§5.13). 화자칩 색: me=blue, 슬롯=8색 팔레트 순환, nil=회색 |
 | `Storage/MeetingStore.swift` | §5.7 + `resolveName(row:myName:speakerNames:)` 정적 헬퍼(이름 해석 단일 소스) + 마크다운 생성기 4종 + `transcriptForSummary` + v1.4.0: `attendees` 필드, `rename(at:title:)`, `titleFromSummary(_:)`(자동 제목) |
+| `Storage/RecipeStore.swift` | §5.13 (v1.5.0 추가) @MainActor @Observable. `recipes`, `upsert`, `delete`, `resetBuiltins`, `seedBuiltinsIfNeeded`, `uniqueID(for:)` |
+| `Storage/RecipeOutputStore.swift` | §5.13 (v1.5.0 추가) `recipes-output/<yyyy-MM-dd> <title>.md` 저장, 파일명 충돌 시 " (2)" 접미사 |
+| `Models/RecipeScope.swift` | §5.13 (v1.5.0 추가) 범위 enum + `resolve(meetings:now:calendar:)`(순수 함수) |
 | `Views/StartMenu.swift` | §5.11 (v1.4.0 추가) Home Start 분할 버튼: 본체=online 시작, ▾ 메뉴="Start in-person" |
 | `Views/ModeBadge.swift` | §5.11 (v1.4.0 추가) 헤더용 캡슐 배지 (대면 모드 "In person" 표시에 사용) |
+| `Views/RecipesRow.swift` | §5.13 (v1.5.0 추가) Chat 홈 히어로 아래 레시피 칩 행 |
+| `Views/RecipeRunSheet.swift` | §5.13 (v1.5.0 추가) 레시피 실행 대화상자: 범위·회의 선택·모델·언어·[Run] |
+| `Views/RecipeEditorView.swift` | §5.13 (v1.5.0 추가) 레시피 생성·편집 폼 |
+| `Resources/Recipes/*.json` | §5.13 (v1.5.0 추가) 내장 레시피 5종 원본. 동기화 그룹이 번들 루트로 평탄화해 복사하므로(§7.19) pbxproj 수정 없이 파일만 추가하면 되지만 id(=파일명)는 다른 번들 리소스와 겹치면 안 됨 |
 
 ---
 
@@ -352,6 +407,9 @@
 14. **이 기기에는 코드서명 인증서가 없음** (`security find-identity` 0건) — Xcode에 Apple ID 미등록 상태. 모든 빌드(⌘R·archive)가 ad-hoc 서명이라 빌드마다 cdhash가 바뀌어 TCC 재요청이 발생했던 것(§7.7의 실체). /Applications 설치본은 바이너리가 고정되므로 권한이 유지되지만, **업데이트 재설치 시에는 마이크·시스템 오디오 권한을 다시 허용해야 함**. 영구화하려면 Xcode > Settings > Accounts에 Apple ID 추가 후 Personal Team 서명.
 15. **이 기기의 xcode-select는 CommandLineTools를 가리킴** → CLI에서 `xcodebuild` 실패. `sudo xcode-select -s` 대신 `export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`로 우회 (package.sh에 내장).
 16. **Gemini Live Translate는 오디오 입력 전용.** 텍스트 번역 요청 불가 — 확정 문장 텍스트를 보내 번역받는 설계는 성립하지 않음. 오디오 스트리밍 + 전사 클레임 방식(§5.4)이 유일한 통합 경로. 프리뷰 모델이라 쿼터·모델명 변경 리스크 있음 (모델명은 `GeminiLiveTranslator.model` 상수 한 줄).
+17. **레시피 후속 채팅의 컨텍스트 중복 위험 (§5.13).** 레시피로 시작한 대화는 `askChat`이 첫 턴(promptText, 최대 120K자 컨텍스트 포함)을 후속 질문마다 히스토리에 고정으로 얹는다. 아카이브 채팅(§5.9, 60K자 상한)과 별개 예산이므로 겹쳐 쓰지는 않지만, 레시피 대화 자체가 매 요청 120K자를 반복 전송한다는 점은 그대로다. 컨텍스트가 큰 레시피는 후속 질문을 오래 이어가지 말고 필요하면 새 채팅으로 다시 시작하는 편이 낫다.
+18. **로컬 Qwen + 120K자 컨텍스트는 느리다.** 레시피 컨텍스트 예산(120K자, §5.13)은 클라우드 모델 기준으로 잡았다. API 키가 없어 `LocalChatEngine`으로 폴백하면 같은 예산이 그대로 로컬 모델에 들어가 응답이 눈에 띄게 느려진다(실행 시트가 경고 문구로 안내할 뿐 자동으로 줄이지는 않는다). 범위를 좁혀 회의 수를 줄이는 것이 유일한 완화책이다.
+19. **번들 내장 레시피 id는 유일해야 한다.** `Resources/Recipes/*.json`은 PBXFileSystemSynchronizedRootGroup 동기화 그룹이 번들 루트로 평탄화해서 복사한다(하위 폴더 구조가 사라짐). `RecipeStore.loadBuiltin`은 `bundle.url(forResource:withExtension:)`로 파일명(=id)만으로 찾으므로, 새 내장 레시피를 추가할 때 다른 번들 리소스와 파일명이 겹치면 엉뚱한 파일을 읽게 된다.
 
 ---
 

@@ -1,19 +1,19 @@
 # LiveNote (livenote2) — Claude Code 작업 지침
 
-macOS 네이티브 회의 노트테이커 (SwiftUI, Apple Silicon). 봇 없이 마이크(나)+시스템 오디오(상대방) 2채널 캡처, 로컬 Parakeet STT, 실시간 한국어 번역, Zoom 화자 태그, 자동 회의록, 아카이브 채팅. Granola/Jamie 대체가 목표. 현재 v1.3.1.
+macOS 네이티브 회의 노트테이커 (SwiftUI, Apple Silicon). 봇 없이 마이크(나)+시스템 오디오(상대방) 2채널 캡처, 로컬 Parakeet STT, 실시간 한국어 번역, Zoom 화자 태그, 자동 회의록, 아카이브 채팅. Granola/Jamie 대체가 목표. 현재 v1.5.0 (Phase 1 Recipes 완료, 2026-09-03).
 
 ## 먼저 읽을 문서
 - `livenote2-개발스펙.md`: 아키텍처·알고리즘·튜닝 상수·함정(§7). 기능 변경 시 해당 절을 갱신한다.
 - `docs/product-plan-v2-2026-09.md`: 다음 기능들의 제품 기획 (Recipes, 사전 브리핑, Speaker Memory, Tasks, 전사 편집, 소소한 개선).
-- `docs/implementation-plan-v2-2026-09.md`: 위 기획의 Phase별 구현 계획. **다음 작업은 Phase 0 (v1.4.0)부터.**
+- `docs/implementation-plan-v2-2026-09.md`: 위 기획의 Phase별 구현 계획. **Phase 0·1 완료. 다음 작업은 Phase 2 (v1.6.0, Tasks + 사전 브리핑)부터.**
 - `docs/feature-plan-jamie-granola-2026-09.md`: 경쟁 분석 배경.
 - `README.md`: 사용자 관점 기능 설명.
 
 ## 코드 구조 (livenote2/)
 - `AppState.swift`: 중앙 허브(@MainActor @Observable). 세션 수명, 행 생성, 화자 명명, 번역 파이프라인, 채팅, 2-pass, 설정. 1,300줄 이상이라 새 기능은 별도 파일로.
 - `ContentView.swift`: 전 화면(Home/Chat/Live/Meeting/Settings) + Theme. 새 화면은 `Views/` 폴더에 분리해서 추가.
-- `Engine/`: TranscriptionEngine(라이브 STT, 에너지 세그멘테이션), TranscriptRefiner(2-pass), SessionAudioRecorder(세션 한정 WAV), EchoDedup, ZoomSpeakerTagger(AX), SpeakerDiarizer(LS-EEND), GeminiLiveTranslator, TranslationCoordinator, SummaryService(+GeminiSummarizer), ChatService, Logging(AppLog, GeminiREST), ModelSeeder.
-- `Storage/`: MeetingStore(회의 폴더·md), ChatStore. `Calendar/`: CalendarMonitor(EventKit), MeetingAlertPanel. `Models/TranscriptModels.swift`: 공용 타입·LanguagePrefs.
+- `Engine/`: TranscriptionEngine(라이브 STT, 에너지 세그멘테이션), TranscriptRefiner(2-pass), SessionAudioRecorder(세션 한정 WAV), EchoDedup, ZoomSpeakerTagger(AX), SpeakerDiarizer(LS-EEND), GeminiLiveTranslator, TranslationCoordinator, SummaryService(+GeminiSummarizer), ChatService(GeminiChat·LocalChatEngine, systemPrompt 덮어쓰기), ContextBuilder, RecipeRunner, Logging(AppLog, GeminiREST), ModelSeeder.
+- `Storage/`: MeetingStore(회의 폴더·md), ChatStore(promptText 포함), RecipeStore(레시피 JSON·내장 시딩), RecipeOutputStore(recipes-output md). `Calendar/`: CalendarMonitor(EventKit), MeetingAlertPanel, CountdownPanel. `Models/`: TranscriptModels(공용 타입·LanguagePrefs), RecipeScope. `Views/`: RecipesRow, RecipeRunSheet, RecipeEditorView, StartMenu, ModeBadge. `Resources/Recipes/*.json`: 내장 레시피 5종(동기화 그룹이 번들 루트로 평탄화해 복사, pbxproj 편집 불필요).
 - 의존성: FluidAudio 0.15.5 (Parakeet v2/v3, LS-EEND, 오프라인 DiarizerManager), mlx-swift-lm 3.31 (Qwen 로컬).
 
 ## 빌드·설치·배포
@@ -27,9 +27,16 @@ macOS 네이티브 회의 노트테이커 (SwiftUI, Apple Silicon). 봇 없이 �
 
 ## 데이터·로그
 - 회의: `~/Documents/LiveNote/<yyyy-MM-dd HHmm 제목>/` (session.json, en.md, ko.md, combined.md, summary.md). 오디오는 저장하지 않는다(2-pass 후 임시 WAV 삭제).
-- 채팅: `~/Documents/LiveNote/chats/*.json`. 로그: `~/Documents/LiveNote/logs/{app,cloud,chat,summary,zoomtag}.log` (내용은 기록하지 않음, 상태·크기·오류만).
+- 채팅: `~/Documents/LiveNote/chats/*.json`. 레시피: `~/Documents/LiveNote/recipes/*.json`, 산출물 `~/Documents/LiveNote/recipes-output/`. 로그: `~/Documents/LiveNote/logs/{app,cloud,chat,summary,zoomtag,recipe}.log` (내용은 기록하지 않음, 상태·크기·오류만).
 - Gemini API 키: 키체인 `com.byungjoo.livenote2.gemini`.
 - `~/Documents/LiveNote-v1-archive`는 폐기된 v1 파이썬 프로젝트. 건드리지 말 것.
+
+## 테스트 (모든 구현 작업에 적용, 프롬프트에 따로 쓰지 않아도 됨)
+- 테스트 타겟 `livenote2Tests`(hosted XCTest, `@testable import LiveNote`). 실행: `xcodebuild test -project livenote2.xcodeproj -scheme livenote2 -destination 'platform=macOS,arch=arm64'`.
+- 스토리/기능 단위마다 로직 계층(Models, Engine, Storage, Calendar 파서)의 단위 테스트를 추가하거나 확장한다. 기존 테스트가 깨지면 기능이 아니라 테스트를 먼저 의심하지 말고 원인을 규명한다.
+- UI(SwiftUI 뷰, NSPanel 렌더링, 알림 3경로, 스피커폰 화자 분리)는 자동 테스트 대상이 아니다. 완료 보고에 "수동 QA 항목"으로 나열한다.
+- 테스트가 실제 `~/Documents/LiveNote/`에 쓰지 않도록 임시 디렉터리를 주입한다(현재 MeetingStore 테스트가 app.log에 흔적을 남기는 문제 있음, 정리 대상).
+- 완료 판정 전 반드시 테스트 전체 + Release 빌드를 실행하고 출력을 읽는다.
 
 ## 규칙
 - 커밋 메시지 끝에 `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`. 작업 단위마다 커밋·푸시(`git push` to origin main).
