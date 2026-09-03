@@ -166,11 +166,17 @@ struct MeetingAlertView: View {
     /// 링크 호스트로 회의 플랫폼 이름을 결정한다. 모르는 호스트나 nil이면 "meeting".
     static func platformName(for url: URL?) -> String {
         guard let host = url?.host()?.lowercased() else { return "meeting" }
-        if host.contains("zoom.us") { return "Zoom" }
-        if host.contains("teams") { return "Teams" }
-        if host.contains("meet.google") { return "Meet" }
-        if host.contains("webex") { return "Webex" }
+        if matches(host, "zoom.us") { return "Zoom" }
+        if matches(host, "teams.microsoft.com") || matches(host, "teams.live.com") { return "Teams" }
+        if matches(host, "meet.google.com") { return "Meet" }
+        if matches(host, "webex.com") { return "Webex" }
         return "meeting"
+    }
+
+    /// 도메인 자신이거나 그 하위 도메인일 때만 참.
+    /// 부분 문자열 비교는 notzoom.us·teams.evil.example 같은 호스트를 오인식한다.
+    private static func matches(_ host: String, _ domain: String) -> Bool {
+        host == domain || host.hasSuffix("." + domain)
     }
 
     private func countdown(now: Date) -> String {

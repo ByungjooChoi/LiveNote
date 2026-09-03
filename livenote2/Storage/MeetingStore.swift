@@ -170,30 +170,36 @@ final class MeetingStore {
     }
 
     /// 저장된 회의의 제목 변경: session.json 갱신 + 폴더명을 새 제목으로 rename.
-    /// 새 폴더 URL을 반환(이동하지 않았으면 기존 URL). 실패 시 nil.
+    ///
+    /// 순서가 계약이다. 제목(메타데이터)을 먼저 원본 폴더에 쓰고, 그 다음 폴더를 옮긴다.
+    /// 이동이 실패해도 제목은 이미 남아 있으므로 원본 URL을 돌려준다(폴더명만 옛 이름).
+    /// nil은 "아무것도 바뀌지 않았다"는 뜻으로만 쓴다: 불러오기 실패 또는 첫 쓰기 실패.
     func rename(at url: URL, title: String) -> URL? {
         guard var meeting = load(url) else { return nil }
         meeting.title = title
 
-        var destination = url
-        // 이미 같은 이름이면 (2) 접미사가 붙지 않도록 이동 자체를 생략한다.
-        if url.lastPathComponent != Self.folderBaseName(for: meeting.startedAt, title: title) {
-            let candidate = makeUniqueFolder(for: meeting.startedAt, title: title)
-            do {
-                try FileManager.default.moveItem(at: url, to: candidate)
-                destination = candidate
-            } catch {
-                AppLog.write("app", "회의 폴더 rename 실패: \(error.localizedDescription.prefix(120))")
-            }
-        }
-
         do {
-            try writeAll(meeting, to: destination)
+            try writeAll(meeting, to: url)
         } catch {
             return nil
         }
+
+        // 이미 같은 이름이면 (2) 접미사가 붙지 않도록 이동 자체를 생략한다.
+        guard url.lastPathComponent != Self.folderBaseName(for: meeting.startedAt, title: title) else {
+            refresh()
+            return url
+        }
+
+        let candidate = makeUniqueFolder(for: meeting.startedAt, title: title)
+        do {
+            try FileManager.default.moveItem(at: url, to: candidate)
+        } catch {
+            AppLog.write("app", "회의 폴더 rename 실패(제목만 반영): \(error.localizedDescription.prefix(120))")
+            refresh()
+            return url
+        }
         refresh()
-        return destination
+        return candidate
     }
 
     /// 요약 첫 H1을 회의 제목으로 (60자 컷). H1이 없으면 nil.

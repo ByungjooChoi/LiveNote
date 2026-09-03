@@ -50,6 +50,26 @@ final class AutoStartCountdownTests: XCTestCase {
             defaults, key: "autoStartAtCalendarTime", default: false))
     }
 
+    // MARK: - 시작 통지 키 정리 (끝난 회의는 버린다)
+
+    @MainActor
+    func testPrunedNotifiedKeysDropsEndedMeetings() {
+        let now = Date()
+        let keys = [
+            "past": now.addingTimeInterval(-60),
+            "ongoing": now.addingTimeInterval(600),
+        ]
+        let pruned = CalendarMonitor.prunedNotifiedKeys(keys, now: now)
+        XCTAssertEqual(Array(pruned.keys), ["ongoing"])
+    }
+
+    @MainActor
+    func testPrunedNotifiedKeysKeepsMeetingEndingNow() {
+        let now = Date()
+        let pruned = CalendarMonitor.prunedNotifiedKeys(["edge": now], now: now)
+        XCTAssertEqual(pruned.count, 1)
+    }
+
     // MARK: - 패널 남은 초 표기
 
     func testRemainingSecondsRoundsUp() {

@@ -61,13 +61,21 @@ struct ContentView: View {
             if running { screen = .live }
         }
         // 창 밖(알림 팝업 등)에서 온 화면 전환 요청 반영
-        .onChange(of: app.pendingScreen) { _, pending in
-            guard let pending else { return }
-            switch pending {
-            case .settings: screen = .settings
-            }
-            app.pendingScreen = nil
+        .onChange(of: app.pendingScreen) { _, _ in
+            consumePendingScreen()
         }
+        // 창이 닫혀 있는 동안 들어온 요청은 창이 다시 열릴 때 여기서 소비한다.
+        .onAppear {
+            consumePendingScreen()
+        }
+    }
+
+    private func consumePendingScreen() {
+        guard let pending = app.pendingScreen else { return }
+        switch pending {
+        case .settings: screen = .settings
+        }
+        app.pendingScreen = nil
     }
 
     @ViewBuilder

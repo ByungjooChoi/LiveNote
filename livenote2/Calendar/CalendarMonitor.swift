@@ -40,15 +40,16 @@ final class CalendarMonitor {
     @ObservationIgnored var onRecordRequested: (() -> Void)?
     /// "Change notification settings" 선택 시 호출: AppState가 Settings 화면을 요청.
     @ObservationIgnored var onOpenSettingsRequested: (() -> Void)?
-    /// 캘린더 회의 시작 시각 도달 시 호출 (일정 제목 전달).
-    /// 실제 기록 시작 여부는 AppState의 autoStartAtCalendarTime 설정이 결정한다.
-    @ObservationIgnored var onMeetingTimeReached: ((String) -> Void)?
+    /// 캘린더 회의 시작 시각 도달 시 호출 (해당 일정 전달).
+    /// 반환값은 "실제로 처리했는지"다. AppState가 autoStartAtCalendarTime 꺼짐·이미 기록 중 등으로
+    /// 무시하면 false를 돌려주고, 그때는 통지 키를 남기지 않아 다음 tick에 다시 시도한다.
+    @ObservationIgnored var onMeetingTimeReached: ((UpcomingMeetingItem) -> Bool)?
 
     @ObservationIgnored private let store = EKEventStore()
     @ObservationIgnored private var monitorTask: Task<Void, Never>?
     @ObservationIgnored private var alertedKeys: Set<String> = []
-    /// 시작 시각 도달을 이미 통지한 일정 (회의당 1회)
-    @ObservationIgnored private var startNotifiedKeys: Set<String> = []
+    /// 시작 시각 도달을 이미 통지한 일정 (회의당 1회). 값은 회의 종료 시각이고, 지난 일정은 tick에서 버린다.
+    @ObservationIgnored private var startNotifiedKeys: [String: Date] = [:]
     @ObservationIgnored private var currentAlert: MeetingAlert?
     @ObservationIgnored private let panel = MeetingAlertPanelController()
 
@@ -123,6 +124,9 @@ final class CalendarMonitor {
         // 사이드바 "오늘 일정" 갱신 (내부 60초 스로틀)
         refreshTodayUpcoming(now: now)
 
+        // 종료된 회의의 통지 키 정리 (앱을 오래 켜둬도 집합이 계속 커지지 않게)
+        startNotifiedKeys = Self.prunedNotifiedKeys(startNotifiedKeys, now: now)
+
         // 회의 시작 시각 도달 통지 (AppState의 autoStartAtCalendarTime이 실제 시작 여부 결정)
         notifyMeetingTimeReached(now: now)
 
@@ -168,14 +172,21 @@ final class CalendarMonitor {
     /// 오늘 일정 중 시작 시각을 막 지난 온라인 회의를 한 번씩 통지한다.
     /// 폴링 주기(10초)와 todayUpcoming 갱신 주기(60초)를 감안해 시작 후 3분까지 유효.
     private func notifyMeetingTimeReached(now: Date) {
-        guard onMeetingTimeReached != nil else { return }
+        guard let handler = onMeetingTimeReached else { return }
         for item in todayUpcoming {
             guard item.webLink != nil else { continue }
             guard now >= item.start, now <= item.start.addingTimeInterval(3 * 60) else { continue }
-            guard startNotifiedKeys.insert(item.id).inserted else { continue }
-            onMeetingTimeReached?(item.title)
+            guard startNotifiedKeys[item.id] == nil else { continue }
+            // 수신 측이 무시한 통지는 소비하지 않는다: 설정이 켜지거나 기록이 끝나면 다시 시도한다.
+            guard handler(item) else { continue }
+            startNotifiedKeys[item.id] = item.end
             return
         }
+    }
+
+    /// 이미 끝난 회의의 통지 키를 버린다.
+    static func prunedNotifiedKeys(_ keys: [String: Date], now: Date) -> [String: Date] {
+        keys.filter { $0.value >= now }
     }
 
     /// 지금 알림을 띄워야 할 가장 가까운 회의.
@@ -305,9 +316,11 @@ final class CalendarMonitor {
         todayUpcoming = items
     }
 
-    /// 지금 진행 중(시작 10분 전~종료)인 일정의 제목. Zoom 링크가 있는 일정 우선.
-    func ongoingMeetingTitle(now: Date = Date()) -> String? {
-        guard EKEventStore.authorizationStatus(for: .event) == .fullAccess else { return nil }
+    /// 지금 진행 중(시작 10분 전~종료)인 일정 하나를 골라 제목과 참석자를 함께 반환한다.
+    /// 제목과 참석자가 서로 다른 일정에서 섞이지 않도록 선택을 한 곳으로 모은 진입점이다.
+    /// 선택 규칙: 온라인 회의 링크가 있는 첫 일정, 없으면 첫 일정.
+    func ongoingMeetingContext(now: Date = Date()) -> (title: String?, attendees: [Attendee]) {
+        guard EKEventStore.authorizationStatus(for: .event) == .fullAccess else { return (nil, []) }
         let predicate = store.predicateForEvents(
             withStart: now.addingTimeInterval(-90 * 60),
             end: now.addingTimeInterval(30 * 60),
@@ -318,10 +331,20 @@ final class CalendarMonitor {
                   event.status != .canceled else { return false }
             return now >= start.addingTimeInterval(-10 * 60) && now <= end
         }
-        let withZoom = ongoing.first {
+        let withLink = ongoing.first {
             Self.firstZoomLink(in: [$0.url?.absoluteString, $0.location, $0.notes]) != nil
         }
-        return (withZoom ?? ongoing.first)?.title
+        guard let event = withLink ?? ongoing.first else { return (nil, []) }
+
+        let raw = (event.attendees ?? [])
+            .filter { $0.participantType == .person && !$0.isCurrentUser }
+            .map { (name: $0.name, email: Self.email(fromParticipantURL: $0.url)) }
+        return (event.title, Self.normalizedAttendees(from: raw))
+    }
+
+    /// 지금 진행 중(시작 10분 전~종료)인 일정의 제목. 온라인 회의 링크가 있는 일정 우선.
+    func ongoingMeetingTitle(now: Date = Date()) -> String? {
+        ongoingMeetingContext(now: now).title
     }
 
     // MARK: - 참석자 이름 후보 (화자 rename 원클릭용)
@@ -332,30 +355,33 @@ final class CalendarMonitor {
         ongoingMeetingAttendees(now: now).map(\.name)
     }
 
-    /// 위와 같은 창·필터로 참석자를 이름 + 이메일까지 담아 반환.
+    /// 제목과 같은 일정에서 뽑은 참석자 (이름 + 이메일).
     /// 회의 저장(session.json)과 이후 브리핑·담당자 매칭이 쓰는 원본 데이터다.
     func ongoingMeetingAttendees(now: Date = Date()) -> [Attendee] {
-        guard EKEventStore.authorizationStatus(for: .event) == .fullAccess else { return [] }
-        let predicate = store.predicateForEvents(
-            withStart: now.addingTimeInterval(-90 * 60),
-            end: now.addingTimeInterval(30 * 60),
-            calendars: nil
-        )
-        let ongoing = store.events(matching: predicate).filter { event in
-            guard let start = event.startDate, let end = event.endDate, !event.isAllDay,
-                  event.status != .canceled else { return false }
-            return now >= start.addingTimeInterval(-10 * 60) && now <= end
-        }
+        ongoingMeetingContext(now: now).attendees
+    }
+
+    /// 캘린더 참석자 원본(표시 이름, 이메일)을 저장용 Attendee로 정규화한다.
+    /// 중복 판정 키는 이메일(소문자) 우선, 없을 때만 이름이다. 이렇게 해야 동명이인을 잃지 않는다.
+    /// 이름이 비어도 이메일이 있으면 이메일에서 이름을 만들어 살린다.
+    static func normalizedAttendees(
+        from raw: [(name: String?, email: String?)],
+        limit: Int = 10
+    ) -> [Attendee] {
         var seen = Set<String>()
         var attendees: [Attendee] = []
-        for event in ongoing {
-            for participant in event.attendees ?? [] {
-                guard participant.participantType == .person, !participant.isCurrentUser else { continue }
-                let name = Self.prettyName(participant.name ?? "")
-                guard !name.isEmpty, seen.insert(name.lowercased()).inserted else { continue }
-                attendees.append(Attendee(name: name, email: Self.email(fromParticipantURL: participant.url)))
-                if attendees.count >= 10 { return attendees }
+        for participant in raw {
+            let rawEmail = participant.email?.trimmingCharacters(in: .whitespaces)
+            let email = (rawEmail?.isEmpty == false) ? rawEmail : nil
+            var name = prettyName(participant.name ?? "")
+            if name.isEmpty, let email {
+                name = prettyName(email)
             }
+            guard !name.isEmpty else { continue }
+            let key = email?.lowercased() ?? name.lowercased()
+            guard seen.insert(key).inserted else { continue }
+            attendees.append(Attendee(name: name, email: email))
+            if attendees.count >= limit { break }
         }
         return attendees
     }

@@ -22,6 +22,10 @@ final class MeetingAlertTests: XCTestCase {
         XCTAssertEqual(name("https://Company.Zoom.US/j/987"), "Zoom")
     }
 
+    func testCompanySubdomainIsZoom() {
+        XCTAssertEqual(name("https://company.zoom.us/j/123"), "Zoom")
+    }
+
     func testTeamsHost() {
         XCTAssertEqual(name("https://teams.microsoft.com/l/meetup-join/19%3ameeting"), "Teams")
         XCTAssertEqual(name("https://teams.live.com/meet/9876543"), "Teams")
@@ -37,6 +41,26 @@ final class MeetingAlertTests: XCTestCase {
 
     func testUnknownHostFallsBackToMeeting() {
         XCTAssertEqual(name("https://example.com/room/42"), "meeting")
+    }
+
+    // MARK: - 호스트 오인식 방지 (부분 문자열이 아니라 도메인 일치)
+
+    func testLookalikeZoomHostIsNotZoom() {
+        XCTAssertEqual(name("https://notzoom.us/j/123"), "meeting")
+        XCTAssertEqual(name("https://zoom.us.evil.example/j/123"), "meeting")
+    }
+
+    func testLookalikeTeamsHostIsNotTeams() {
+        XCTAssertEqual(name("https://teams.evil.example/l/meetup-join/1"), "meeting")
+        XCTAssertEqual(name("https://myteams.microsoft.com.evil.example/x"), "meeting")
+    }
+
+    func testLookalikeMeetHostIsNotMeet() {
+        XCTAssertEqual(name("https://meet.google.com.evil.example/abc"), "meeting")
+    }
+
+    func testLookalikeWebexHostIsNotWebex() {
+        XCTAssertEqual(name("https://notwebex.com/meet/philip"), "meeting")
     }
 
     func testNilURLFallsBackToMeeting() {

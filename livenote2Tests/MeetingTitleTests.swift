@@ -114,6 +114,41 @@ final class MeetingTitleTests: XCTestCase {
         XCTAssertNil(store.rename(at: missing, title: "Whatever"))
     }
 
+    /// 같은 제목으로 다시 rename하면 같은 URL을 돌려주고 제목도 그대로 저장돼 있다.
+    func testRenameToSameTitleReturnsSameURLAndKeepsTitle() throws {
+        let store = try MeetingStoreFixture.makeStore()
+        defer { MeetingStoreFixture.cleanUp(store) }
+
+        let original = try XCTUnwrap(saveUntitledMeeting(in: store, hour: 10))
+        let renamed = try XCTUnwrap(store.rename(at: original, title: "Weekly sync"))
+        let again = try XCTUnwrap(store.rename(at: renamed, title: "Weekly sync"))
+
+        XCTAssertEqual(again, renamed)
+        XCTAssertEqual(store.load(again)?.title, "Weekly sync")
+        XCTAssertEqual(store.meetings.count, 1)
+    }
+
+    /// 폴더 이동이 실패해도 제목은 저장되고 원본 URL이 돌아온다 (nil 아님).
+    func testRenameKeepsTitleWhenFolderMoveFails() throws {
+        let store = try MeetingStoreFixture.makeStore()
+        defer { MeetingStoreFixture.cleanUp(store) }
+
+        let original = try XCTUnwrap(saveUntitledMeeting(in: store, hour: 10))
+        // 루트를 읽기 전용으로 만들면 폴더 이동만 실패하고 폴더 안 쓰기는 계속 된다.
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o500], ofItemAtPath: store.rootURL.path)
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o700], ofItemAtPath: store.rootURL.path)
+        }
+
+        let result = store.rename(at: original, title: "Weekly sync")
+
+        XCTAssertEqual(result, original)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: original.path))
+        XCTAssertEqual(store.load(original)?.title, "Weekly sync")
+    }
+
     private func saveUntitledMeeting(in store: MeetingStore, hour: Int) -> URL? {
         store.save(
             rows: [MeetingStoreFixture.row(text: "hello there")],

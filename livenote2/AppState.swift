@@ -427,11 +427,11 @@ final class AppState {
             }
         }
 
-        // 캘린더 팝업의 [참가] → Zoom 실행 + 기록 시작
+        // 캘린더 팝업의 [참가] → 회의 링크 열기 + 기록 시작 (Zoom·Teams·Meet·Webex 공통)
         calendar.onJoinRequested = { [weak self] in
             guard let self, !self.isActive else { return }
             self.start()
-            self.noticeMessage = "Joining Zoom from the calendar alert — recording started."
+            self.noticeMessage = "Joining the meeting from the calendar alert - recording started."
         }
 
         // 팝업 메뉴 "Start LiveNote only" → 링크는 열지 않고 기록만 시작
@@ -446,12 +446,16 @@ final class AppState {
             guard let self else { return }
             self.pendingScreen = .settings
             NSApp.activate(ignoringOtherApps: true)
+            // 창이 모두 닫혀 있으면 여기서 더 할 일이 없다: WindowGroup 창 재생성은 앱 코드에서
+            // 직접 못 하므로, 다음에 창이 열릴 때 ContentView의 onAppear가 pendingScreen을 소비한다.
         }
 
-        // 캘린더 회의 시작 시각 도달 → 설정이 켜져 있을 때만 자동 시작 (카운트다운 경유)
-        calendar.onMeetingTimeReached = { [weak self] title in
-            guard let self, self.autoStartAtCalendarTime, !self.isActive else { return }
-            self.beginAutoStart(reason: "\(title) is starting")
+        // 캘린더 회의 시작 시각 도달 → 설정이 켜져 있을 때만 자동 시작 (카운트다운 경유).
+        // 무시한 경우 false를 돌려주면 CalendarMonitor가 통지 키를 남기지 않고 다음 tick에 재시도한다.
+        calendar.onMeetingTimeReached = { [weak self] item in
+            guard let self, self.autoStartAtCalendarTime, !self.isActive else { return false }
+            self.beginAutoStart(reason: "\(item.title) is starting")
+            return true
         }
     }
 
@@ -649,11 +653,12 @@ final class AppState {
         micMutedByZoom = false
         zoomTagMessage = nil
         captureStartedAt = nil
-        // 진행 중인 캘린더 일정의 참석자 → 화자 이름 원클릭 후보, 제목 → 회의 이름
-        let attendees = calendar.ongoingMeetingAttendees()
-        meetingAttendees = attendees
-        attendeeCandidates = attendees.map(\.name)
-        meetingTitle = calendar.ongoingMeetingTitle()
+        // 진행 중인 캘린더 일정의 참석자 → 화자 이름 원클릭 후보, 제목 → 회의 이름.
+        // 제목과 참석자가 다른 일정에서 섞이지 않도록 한 번의 호출로 같은 일정에서 가져온다.
+        let context = calendar.ongoingMeetingContext()
+        meetingAttendees = context.attendees
+        attendeeCandidates = context.attendees.map(\.name)
+        meetingTitle = context.title
 
         // Zoom 화자 태그: Zoom이 떠 있으면 폴링 시작 (권한 없으면 요청 다이얼로그 + 안내)
         // 대면 모드는 Zoom 타일과 무관하므로 태거를 띄우지 않는다.
@@ -913,7 +918,8 @@ final class AppState {
         micCapture.onSamples = { [weak self] samples in
             self?.audioContinuation?.yield((channel, samples))
             // 대면 모드에서는 마이크가 유일한 회의 음성이므로 화자구분에도 같은 샘플을 넣는다.
-            if feedsDiarizer {
+            // 뮤트 중에는 넣지 않는다: 전사는 버려지는데 화자 임베딩만 오염되는 것을 막는다.
+            if feedsDiarizer, self?.micMuted == false {
                 self?.diarizerContinuation?.yield(samples)
             }
         }
@@ -1096,16 +1102,30 @@ final class AppState {
         let transcript = MeetingStore.transcriptForSummary(meeting) { [self] row in
             displayName(for: row)
         }
+        // 요약 생성 중 새 세션이 시작될 수 있으므로 대상 세션을 미리 붙잡아 둔다.
+        let targetURL = currentMeetingURL
+        let targetStartedAt = sessionStartedAt
         summaryPhase = .generating
         Task { [weak self] in
             guard let self else { return }
             do {
                 let summary = try await self.runSummary(transcript: transcript)
+                guard self.sessionStartedAt == targetStartedAt else {
+                    // 이미 다른 세션이 시작됐다: 현재 화면 상태는 건드리지 않고
+                    // 저장된 회의 폴더에만 요약을 반영한다. 자동 제목은 건너뛴다:
+                    // meetingTitle/currentMeetingURL은 이제 새 세션의 것이라 안전하게 못 쓴다.
+                    if let targetURL {
+                        self.meetingStore.updateSummary(at: targetURL, summary: summary)
+                        AppLog.write("summary", "세션 교체됨: 이전 회의 폴더에만 요약 반영")
+                    }
+                    return
+                }
                 self.currentSummary = summary
                 self.summaryPhase = .idle
                 self.persistCurrentSession()
                 self.applyAutoTitleIfNeeded(from: summary)
             } catch {
+                guard self.sessionStartedAt == targetStartedAt else { return }
                 self.summaryPhase = .failed(error.localizedDescription)
             }
         }
@@ -1117,10 +1137,13 @@ final class AppState {
         guard meetingTitle == nil,
               let url = currentMeetingURL,
               let title = MeetingStore.titleFromSummary(summary) else { return }
-        meetingTitle = title
-        if let renamed = meetingStore.rename(at: url, title: title) {
-            currentMeetingURL = renamed
+        // 제목은 저장이 성공했을 때만 UI에 반영한다 (실패 시 화면과 디스크가 어긋나지 않게).
+        guard let renamed = meetingStore.rename(at: url, title: title) else {
+            AppLog.write("app", "요약 제목 저장 실패: 제목을 반영하지 않음")
+            return
         }
+        meetingTitle = title
+        currentMeetingURL = renamed
         AppLog.write("app", "요약에서 회의 제목 자동 지정: \(title.count)자")
     }
 

@@ -30,6 +30,57 @@ final class AttendeeTests: XCTestCase {
         XCTAssertNil(CalendarMonitor.email(fromParticipantURL: URL(string: "mailto:")))
     }
 
+    // MARK: - 참석자 정규화 (한 일정에서 뽑은 원본 → 저장용 Attendee)
+
+    func testNormalizedAttendeesKeepsSameNameWithDifferentEmails() {
+        let result = CalendarMonitor.normalizedAttendees(from: [
+            (name: "Jane Doe", email: "jane@a.com"),
+            (name: "Jane Doe", email: "jane@b.com"),
+        ])
+        XCTAssertEqual(result, [
+            Attendee(name: "Jane Doe", email: "jane@a.com"),
+            Attendee(name: "Jane Doe", email: "jane@b.com"),
+        ])
+    }
+
+    func testNormalizedAttendeesDedupesByEmailIgnoringCase() {
+        let result = CalendarMonitor.normalizedAttendees(from: [
+            (name: "Jane Doe", email: "Jane@A.com"),
+            (name: "J. Doe", email: "jane@a.com"),
+        ])
+        XCTAssertEqual(result, [Attendee(name: "Jane Doe", email: "Jane@A.com")])
+    }
+
+    func testNormalizedAttendeesDedupesByNameWhenEmailMissing() {
+        let result = CalendarMonitor.normalizedAttendees(from: [
+            (name: "Bob", email: nil),
+            (name: "bob", email: nil),
+        ])
+        XCTAssertEqual(result, [Attendee(name: "Bob", email: nil)])
+    }
+
+    func testNormalizedAttendeesKeepsEmailOnlyParticipant() {
+        let result = CalendarMonitor.normalizedAttendees(from: [
+            (name: nil, email: "jane.doe@example.com"),
+            (name: "  ", email: "bob_smith@example.com"),
+        ])
+        XCTAssertEqual(result, [
+            Attendee(name: "Jane Doe", email: "jane.doe@example.com"),
+            Attendee(name: "Bob Smith", email: "bob_smith@example.com"),
+        ])
+    }
+
+    func testNormalizedAttendeesDropsFullyEmptyParticipant() {
+        XCTAssertTrue(CalendarMonitor.normalizedAttendees(from: [(name: nil, email: nil)]).isEmpty)
+        XCTAssertTrue(CalendarMonitor.normalizedAttendees(from: [(name: " ", email: " ")]).isEmpty)
+    }
+
+    func testNormalizedAttendeesRespectsLimit() {
+        let raw = (1...12).map { (name: "Person \($0)", email: Optional("p\($0)@x.com")) }
+        XCTAssertEqual(CalendarMonitor.normalizedAttendees(from: raw).count, 10)
+        XCTAssertEqual(CalendarMonitor.normalizedAttendees(from: raw, limit: 3).count, 3)
+    }
+
     // MARK: - Attendee Codable
 
     func testAttendeeJSONRoundTrip() throws {
