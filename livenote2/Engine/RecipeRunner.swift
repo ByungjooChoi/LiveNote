@@ -26,13 +26,13 @@ struct RecipeResult: Sendable {
 @MainActor
 enum RecipeRunner {
 
-    static let contextBudget = 120_000
-    static let perMeetingTranscriptCap = 6_000
+    nonisolated static let contextBudget = 120_000
+    nonisolated static let perMeetingTranscriptCap = 6_000
 
     /// 모델 호출 경로 주입점. 기본값 `.live`는 실제 Gemini·로컬 엔진을 부르고,
     /// 테스트는 호출을 기록하는 가짜 구현을 넣는다.
     struct Backend: Sendable {
-        var apiKey: @Sendable () -> String?
+        var apiKey: @MainActor @Sendable () -> String?
         var cloud: @Sendable (
             _ context: String,
             _ question: String,
@@ -48,28 +48,30 @@ enum RecipeRunner {
             _ systemPrompt: String
         ) async throws -> String
 
-        static let live = Backend(
-            apiKey: { GeminiKeychain.load() },
-            cloud: { context, question, apiKey, apiModel, thinkingLevel, systemPrompt in
-                try await GeminiChat.respond(
-                    context: context,
-                    history: [],
-                    question: question,
-                    apiKey: apiKey,
-                    model: apiModel,
-                    thinkingLevel: thinkingLevel,
-                    systemPrompt: systemPrompt
-                )
-            },
-            local: { engine, context, question, systemPrompt in
-                try await engine.respond(
-                    context: context,
-                    history: [],
-                    question: question,
-                    systemPrompt: systemPrompt
-                )
-            }
-        )
+        static func live(apiKey: @escaping @MainActor @Sendable () -> String?) -> Backend {
+            Backend(
+                apiKey: apiKey,
+                cloud: { context, question, apiKey, apiModel, thinkingLevel, systemPrompt in
+                    try await GeminiChat.respond(
+                        context: context,
+                        history: [],
+                        question: question,
+                        apiKey: apiKey,
+                        model: apiModel,
+                        thinkingLevel: thinkingLevel,
+                        systemPrompt: systemPrompt
+                    )
+                },
+                local: { engine, context, question, systemPrompt in
+                    try await engine.respond(
+                        context: context,
+                        history: [],
+                        question: question,
+                        systemPrompt: systemPrompt
+                    )
+                }
+            )
+        }
     }
 
     /// 프롬프트 템플릿의 플레이스홀더 치환: {{meetings}}, {{today}}, {{language}}.
@@ -115,7 +117,7 @@ enum RecipeRunner {
         language: String,
         store: MeetingStore,
         localEngine: LocalChatEngine,
-        backend: Backend = .live,
+        backend: Backend,
         contextBudget: Int = RecipeRunner.contextBudget
     ) async throws -> RecipeResult {
         guard !meetings.isEmpty else {

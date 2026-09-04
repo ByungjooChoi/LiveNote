@@ -1,6 +1,6 @@
 # LiveNote (livenote2) — Claude Code 작업 지침
 
-macOS 네이티브 회의 노트테이커 (SwiftUI, Apple Silicon). 봇 없이 마이크(나)+시스템 오디오(상대방) 2채널 캡처, 로컬 Parakeet STT, 실시간 한국어 번역, Zoom 화자 태그, 자동 회의록, 아카이브 채팅. Granola/Jamie 대체가 목표. 현재 v1.5.0 (Phase 1 Recipes 완료, 2026-09-03).
+macOS 네이티브 회의 노트테이커 (SwiftUI, Apple Silicon). 봇 없이 마이크(나)+시스템 오디오(상대방) 2채널 캡처, 로컬 Parakeet STT, 실시간 한국어 번역, Zoom 화자 태그, 자동 회의록, 아카이브 채팅. Granola/Jamie 대체가 목표. 현재 v1.5.1 (Phase 1 Recipes 완료 2026-09-03, Keychain·폴백 버그 수정 2026-09-04).
 
 ## 먼저 읽을 문서
 - `livenote2-개발스펙.md`: 아키텍처·알고리즘·튜닝 상수·함정(§7). 기능 변경 시 해당 절을 갱신한다.

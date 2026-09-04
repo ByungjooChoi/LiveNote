@@ -303,6 +303,33 @@ final class RecipeRunnerTests: XCTestCase {
         }
     }
 
+    /// (h) 주입된 apiKey 클로저가 호출되고 nil 반환 시 로컬 엔진으로 폴백한다 (usedLocalEngine == true).
+    func testInjectedApiKeyClosureUsedWhenNilFallsBackToLocal() async throws {
+        try saveMeeting(title: "Alpha", hour: 10, summary: "SUMMARY-BODY")
+        let recorder = BackendRecorder()
+        var apiKeyCalled = false
+        var backend = makeBackend(key: nil, recorder: recorder)
+        backend.apiKey = {
+            apiKeyCalled = true
+            return nil
+        }
+
+        let result = try await RecipeRunner.run(
+            recipe: makeRecipe(),
+            meetings: store.meetings,
+            model: .gemini37Flash,
+            language: "Korean",
+            store: store,
+            localEngine: LocalChatEngine(),
+            backend: backend
+        )
+
+        XCTAssertTrue(apiKeyCalled)
+        XCTAssertEqual(recorder.cloudCalls.count, 0)
+        XCTAssertEqual(recorder.localCalls.count, 1)
+        XCTAssertTrue(result.usedLocalEngine)
+    }
+
     // MARK: - helpers
 
     private func makeRecipe(

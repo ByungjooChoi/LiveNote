@@ -115,14 +115,40 @@ enum LanguagePrefs {
         "Spanish": "es", "French": "fr", "German": "de",
     ]
 
-    static var translationLanguage: String {
-        UserDefaults.standard.string(forKey: "translationLanguage") ?? "Korean"
+    static func translationLanguage(defaults: UserDefaults = .standard) -> String {
+        defaults.string(forKey: "translationLanguage") ?? "Korean"
     }
-    /// BCP-47 코드 (Apple Translation·Gemini translationConfig 공용)
-    static var translationCode: String { codes[translationLanguage] ?? "ko" }
+    static var translationLanguage: String {
+        translationLanguage(defaults: .standard)
+    }
 
+    /// BCP-47 코드 (Apple Translation·Gemini translationConfig 공용)
+    static func translationCode(defaults: UserDefaults = .standard) -> String {
+        codes[translationLanguage(defaults: defaults)] ?? "ko"
+    }
+    static var translationCode: String {
+        translationCode(defaults: .standard)
+    }
+
+    static func summaryLanguage(defaults: UserDefaults = .standard) -> String {
+        defaults.string(forKey: "summaryLanguage") ?? "English"
+    }
     static var summaryLanguage: String {
-        UserDefaults.standard.string(forKey: "summaryLanguage") ?? "English"
+        summaryLanguage(defaults: .standard)
+    }
+
+    static func transcriptionLanguage(defaults: UserDefaults = .standard) -> String {
+        defaults.string(forKey: "transcriptionLanguage") ?? "English"
+    }
+    static var transcriptionLanguage: String {
+        transcriptionLanguage(defaults: .standard)
+    }
+
+    static func migrateSummaryLanguageDefault(defaults: UserDefaults = .standard) {
+        if !defaults.bool(forKey: "summaryLanguageResetToEnglish.v1") {
+            defaults.removeObject(forKey: "summaryLanguage")
+            defaults.set(true, forKey: "summaryLanguageResetToEnglish.v1")
+        }
     }
 }
 

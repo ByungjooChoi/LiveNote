@@ -71,8 +71,11 @@ final class ZoomSpeakerTagger {
 
     // MARK: - 수명
 
+    nonisolated static let accessibilitySettingsURL = URL(
+        string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
+
     /// AX 권한 확인. prompt=true면 시스템 다이얼로그로 요청.
-    static func accessibilityTrusted(prompt: Bool) -> Bool {
+    nonisolated static func accessibilityTrusted(prompt: Bool) -> Bool {
         if prompt {
             return AXIsProcessTrustedWithOptions(
                 ["AXTrustedCheckOptionPrompt": true] as CFDictionary)
@@ -80,7 +83,7 @@ final class ZoomSpeakerTagger {
         return AXIsProcessTrusted()
     }
 
-    static func zoomRunning() -> Bool {
+    nonisolated static func zoomRunning() -> Bool {
         NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == "us.zoom.xos" }
     }
 
@@ -160,7 +163,7 @@ final class ZoomSpeakerTagger {
 
     /// 이름 부트스트랩: myName의 4자 이상 단어가 타일 표시명에 포함되면 매칭.
     /// (예: myName "Byung joo Choi" ↔ Zoom "Philip Choi" → "Choi" 일치)
-    static func nameMatches(tile: String, hint: String) -> Bool {
+    nonisolated static func nameMatches(tile: String, hint: String) -> Bool {
         if tile.localizedCaseInsensitiveContains(hint) { return true }
         for part in hint.split(separator: " ") where part.count >= 4 {
             if tile.localizedCaseInsensitiveContains(part) { return true }
@@ -169,7 +172,7 @@ final class ZoomSpeakerTagger {
     }
 
     /// Zoom 표시명에서 직함·소속 꼬리 제거 ("Philip Choi @ Elastic SA, Search Specialist" → "Philip Choi").
-    static func shortName(_ raw: String) -> String {
+    nonisolated static func shortName(_ raw: String) -> String {
         var name = raw
         if let at = name.range(of: " @ ") { name = String(name[..<at.lowerBound]) }
         if let bar = name.range(of: " | ") { name = String(name[..<bar.lowerBound]) }

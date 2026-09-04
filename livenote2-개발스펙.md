@@ -2,7 +2,7 @@
 
 작성일: 2026-08-06 · 대상: 이 문서만 보고 동일한 앱을 재구축해야 하는 제로베이스 AI/개발자
 현재 상태: **1단계 완성 + 출시 패키징 완료** (빌드·실전 사용 검증 완료, /Applications 설치본 운영 중)
-최신 갱신: v1.5.0 (2026-09-03, Phase 1: Recipes, 저장된 프롬프트 템플릿을 회의 범위에 일괄 실행)
+최신 갱신: v1.5.1 (2026-09-04, 버그 수정: Keychain 오류 표면화·업데이트 저장, 무키 로컬 폴백 고지, Summary language 1회 English 리셋, Accessibility 안내 버튼)
 
 ---
 
@@ -212,7 +212,7 @@
 
 **Zoom 뮤트 동기화 (에코 방어 ⓪의 자동화)**: 내 타일(표시명에 myName 포함으로 식별)의 음소거 상태 변화를 감지해 마이크 캡처 뮤트를 자동 추종 (`syncMuteWithZoom`, 기본 켜짐, 메뉴바 토글). Zoom 뮤트 습관 그대로 에코 유입이 차단되고, 동기화 뮤트 중에는 발화 경고를 억제 (회의 밖 발화가 정상이므로). 수동 뮤트 버튼은 그대로 동작.
 
-**한계 (문서화)**: Zoom 데스크톱(macOS) 전용 — Teams/Meet은 폴백 경로. Zoom UI 구조 변경에 취약 (파싱은 "active speaker" 영어 토큰과 자식 버튼 이름에 의존해 로케일 영향 최소화). 화면 공유·발표자 보기에서 타일 노출이 줄면 태그 공백 → 해당 행은 무명 폴백. 동시 발화 시 1명만 표시. 손쉬운 사용 권한 필요 (미허용 시 배너 안내, 태그 없이 진행).
+**한계 (문서화)**: Zoom 데스크톱(macOS) 전용, Teams/Meet은 폴백 경로. Zoom UI 구조 변경에 취약 (파싱은 "active speaker" 영어 토큰과 자식 버튼 이름에 의존해 로케일 영향 최소화). 화면 공유·발표자 보기에서 타일 노출이 줄면 태그 공백으로 해당 행은 무명 폴백. 동시 발화 시 1명만 표시. 손쉬운 사용 권한 필요 (미허용 시 배너 안내 및 Settings 상태 행에 "Open Accessibility Settings" 버튼을 제공하여 `ZoomSpeakerTagger.accessibilitySettingsURL`로 바로 시스템 설정을 엶; Zoom 실행 중 권한 누락 시 zoomtag.log에 미기동 사유 기록). 내 이름 해석은 `AppState.resolveMyName`에서 영속된 Zoom 표시명 > macOS 계정 이름 > "Me" 순서로 결정.
 
 ### 5.3-구 화자 슬롯 매핑 (LS-EEND 폴백 경로)
 
@@ -220,7 +220,7 @@
 
 ### 5.4 번역 — 이원화: 로컬(기본) / 클라우드(옵션, 2026-08-06 추가)
 
-**모드 선택 (2026-08-27 재편)**: **번역 체크박스**(`translationEnabled`) + **백엔드 Picker 로컬/클라우드**(`ProcessingBackend`, 키 "backend")로 분리. 백엔드는 번역뿐 아니라 요약(§5.5)의 제공자를 결정하고, 채팅(§5.9)은 독립 선택. 구 `translationMode`(off/local/cloud) 키에서 자동 이행. 파이프라인 정렬은 `applyTranslationPipeline()` 한 곳에서: 번역 켬+클라우드+키 → Gemini 라이브 기동, 아니면 정지; 번역 켬+로컬 → Apple activate(언어팩 프롬프트는 이때만). 번역이 하나도 없는 회의는 ko.md 생성 생략. 클라우드 최초 선택 시 API 키 시트 → **Keychain 보관**(`GeminiKeychain`). UI에 "오디오가 Google로 전송됨" 명시.
+**모드 선택 (2026-08-27 재편, 2026-09-04 키체인 강화)**: **번역 체크박스**(`translationEnabled`) + **백엔드 Picker 로컬/클라우드**(`ProcessingBackend`, 키 "backend")로 분리. 백엔드는 번역뿐 아니라 요약(§5.5)의 제공자를 결정하고, 채팅(§5.9)은 독립 선택. 구 `translationMode`(off/local/cloud) 키에서 자동 이행. 파이프라인 정렬은 `applyTranslationPipeline()` 한 곳에서: 번역 켬+클라우드+키 → Gemini 라이브 기동, 아니면 정지; 번역 켬+로컬 → Apple activate(언어팩 프롬프트는 이때만). 번역이 하나도 없는 회의는 ko.md 생성 생략. 클라우드 최초 선택 시 API 키 시트 → **Keychain 보관**(`GeminiKeychain`, 제어는 `GeminiKeyController`). UI에 "오디오가 Google로 전송됨" 명시. 키체인 저장은 update-in-place 전용(`SecItemUpdate`)으로 수행하며 delete 후 add 재시도는 절대 하지 않는다. 항목 부재(`errSecItemNotFound`) 시에만 add를 시도하고, ACL 거부나 중복 접근 불가(`errSecDuplicateItem`) 또는 읽기 실패/데이터 손상/빈 값 등은 오류를 삼키지 않고 `GeminiKeychainError`(`.accessDenied`, `.writeFailed`, `.readFailed`, `.corruptData`, `.invalidKeyData`, `.inaccessibleItem`)로 던져 Settings 및 입력 시트에 빨간색 안내로 노출한다(제거 버튼 제공). 모든 키체인 실패와 성공 이벤트는 `cloud.log`에 기록된다.
 
 **로컬 (Apple Translation)**: `TranslationSession`은 직접 생성 불가 — SwiftUI `.translationTask(config)`가 세션을 주입하는 구조. config = `TranslationSession.Configuration(source: en, target: ko)`를 시작 시 set(nil→값). 뷰 최상위(NavigationSplitView 루트)에 부착해 사이드바 전환에도 세션 유지. serve 루프: `prepareTranslation()`(언어팩 다운로드 유도) 후 AppState의 `AsyncStream<TranslationRequest>` 소비 → `session.translate(text).targetText` → `applyTranslation(_:to: rowID)`. **확정 문장만 번역**(잠정 텍스트 번역 금지 — 화면 덜컹거림 방지, 지연 2~3초는 사용자 승인 사양). 실패 시 배너만, 영어 전사는 계속. Apple 세션은 클라우드 모드에서도 항상 activate 유지(전환 대비).
 
@@ -236,7 +236,7 @@
 
 ### 5.5 요약 (SummaryService + GeminiSummarizer)
 
-**이원화 (2026-08-21)**: 클라우드 번역 모드 + API 키 보유 시 요약은 **Gemini 3.7 Flash**(`gemini-3.7-flash`, 2026-08-13 GA, generateContent REST, 프롬프트는 Qwen과 공유)로 실행 — 모델 로드 없이 수 초, 품질 우위, 비용 회의당 수 센트 미만. 실패 시 로컬 Qwen 자동 폴백 (`AppState.runSummary`). 로컬/끔 모드에서는 기존 Qwen 경로.
+**이원화 (2026-08-21)**: 클라우드 번역 모드 + API 키 보유 시 요약은 **Gemini 3.7 Flash**(`gemini-3.7-flash`, 2026-08-13 GA, generateContent REST, 프롬프트는 Qwen과 공유)로 실행, 모델 로드 없이 수 초, 품질 우위, 비용 회의당 수 센트 미만. 실패 시 로컬 Qwen 자동 폴백 (`AppState.runSummary`). 로컬/끔 모드에서는 기존 Qwen 경로. 회의록 출력 언어(`LanguagePrefs.summaryLanguage`) 기본값은 English이며, `migrateSummaryLanguageDefault`를 통해 과거 한국어 기본값으로 저장되었던 설정을 1회 English로 자동 이행한다(사용자가 Settings에서 명시적으로 변경한 선택은 유지).
 
 **로컬 모델 선택 (Settings, UserDefaults `localModelID`, 2026-08-28 확장)**: Qwen3.5 4B(기본)·9B, Qwen3.8 4B·9B(experimental — `SiddhJagani/Qwen3.8-{4B,9B}-mlx-4Bit`). Qwen3.8은 공식 mlx-community 변환이 아직 없어 커뮤니티 변환본 사용, config의 `model_type: "qwen3_5"`라 mlx-swift-lm 레지스트리(qwen3_5)로 로드 가능함을 확인 (2026-08-28). 품질 미검증이라 experimental 표기.
 
@@ -261,7 +261,7 @@
 
 라이브/저장 회의 뷰 하단에 상주하는 질의응답 패널. **범위 자동 전환**: 저장 회의를 열면 그 회의의 전사+요약, 라이브 뷰에서 회의 중(또는 직후)이면 현재 세션의 실시간 전사("회의가 지금 진행 중" 힌트 포함 — 회의 중 캐치업 질문 가능), 둘 다 아니면 전체 아카이브(최근 15개 회의의 요약 또는 전사 앞부분, 총 60K자 상한). 범위 키가 바뀌면 대화 초기화.
 
-**모델은 번역 백엔드와 독립 선택** (`ChatModelMenu`, UserDefaults `chatModel`, 홈 히어로·채팅 패널 공용, 전 범위 전역 유지 — 2026-08-28 v1.1.2 확장): Standard = `Gemini 3.7 Flash`(기본)·`3.5 Flash-Lite`, Thinking = `3.7 Flash Thinking high/medium`·`3.1 Pro`, Local = `Qwen`. Thinking 레벨은 `generationConfig.thinkingConfig.thinkingLevel`("high"/"medium")로 전달 (thinkingBudget은 레거시, 병행 금지). Gemini 경로는 generateContent 멀티턴 contents, 컨텍스트는 첫 user 턴으로 주입. 로컬은 `LocalChatEngine` actor가 첫 질문 때 컨테이너를 로드 후 **상주** (요약과 달리 연속 사용이 잦아 온디맨드 해제 안 함, 메모리 +2.3GB, 문서화된 예외). 이력은 최근 8턴을 프롬프트에 포함. 시스템 프롬프트: 기록 근거 답변, 없는 내용 추측 금지, 질문 언어 추종. 구 rawValue(`cloudGemini`)는 디코드 실패 시 기본값으로 자동 폴백.
+**모델은 번역 백엔드와 독립 선택** (`ChatModelMenu`, UserDefaults `chatModel`, 홈 히어로·채팅 패널 공용, 전 범위 전역 유지, 2026-08-28 v1.1.2 확장): Standard = `Gemini 3.7 Flash`(기본)·`3.5 Flash-Lite`, Thinking = `3.7 Flash Thinking high/medium`·`3.1 Pro`, Local = `Qwen`. Thinking 레벨은 `generationConfig.thinkingConfig.thinkingLevel`("high"/"medium")로 전달 (thinkingBudget은 레거시, 병행 금지). Gemini 경로는 generateContent 멀티턴 contents, 컨텍스트는 첫 user 턴으로 주입. **API 키 부재 시 로컬 폴백 (2026-09-04 추가)**: 클라우드 모델을 골랐으나 키가 없거나 키체인 오류가 있는 경우 `AppState.chatRoute`가 자동으로 로컬 Qwen 엔진으로 폴백하고 답변 상단에 안내 문구(`(No Gemini API key... / (에러문구)...)`)를 붙여 실패 대신 로컬 답변을 반환한다. 로컬은 `LocalChatEngine` actor가 첫 질문 때 컨테이너를 로드 후 **상주** (요약과 달리 연속 사용이 잦아 온디맨드 해제 안 함, 메모리 +2.3GB, 문서화된 예외). 이력은 최근 8턴을 프롬프트에 포함. 시스템 프롬프트: 기록 근거 답변, 없는 내용 추측 금지, 질문 언어 추종. 구 rawValue(`cloudGemini`)는 디코드 실패 시 기본값으로 자동 폴백.
 
 ### 5.8 캘린더 회의 임박 알림 (CalendarMonitor + MeetingAlertPanel, 2026-08-06 추가)
 
@@ -374,8 +374,10 @@ Weekly Update의 system 프롬프트는 SA(Solutions Architect) 주간보고 규
 | `Engine/TranscriptionEngine.swift` | actor. §5.1 상태머신 + §5.2①② 에코 게이트 + ASR 직렬화(asrBusy 폴링 30ms). `prepare()`=모델 다운로드+로드, `ingest(_:channel:)`, `flushAll()`, `setEchoFilter(_)` |
 | `Engine/SpeakerDiarizer.swift` | actor. FluidAudio diarizer API를 만지는 **유일한** 파일(시그니처 드리프트 격리 목적). prepare/ingest/dominantSlot/finish. 실패 시 failed 플래그 → 라벨만 포기 |
 | `Engine/TranslationCoordinator.swift` | @MainActor @Observable. config 보유, `serve(session:state:)` 루프, issueMessage 배너 |
-| `Engine/GeminiLiveTranslator.swift` | actor. §5.4 클라우드 번역: 채널별 WebSocket 2개, PCM 변환·무음 게이트·전송, outputTranscription 누적·claim, 재연결. + `GeminiKeychain`(API 키 Keychain 보관) |
-| `Engine/ZoomSpeakerTagger.swift` | @MainActor. §5.3 Zoom AX 폴링: 타일 파싱(이름·active speaker·뮤트), 활성 화자 타임라인, dominantName, 내 뮤트 변화 콜백. AX API를 만지는 유일한 파일 |
+| `Engine/GeminiKeychain.swift` | `GeminiKeychain`(API 키 Keychain 보관, SecItemUpdate update-in-place 갱신, ACL 거부 감지, 에러 throw, cloud.log 로깅) + `KeychainAPI` 프로토콜(테스트 주입용) |
+| `Engine/GeminiKeyController.swift` | @MainActor @Observable. Gemini 키 로드/저장/삭제 및 통합 에러 상태(geminiKeychainError) 관리 컨트롤러 |
+| `Engine/GeminiLiveTranslator.swift` | actor. §5.4 클라우드 번역: 채널별 WebSocket 2개, PCM 변환·무음 게이트·전송, outputTranscription 누적·claim, 재연결 |
+| `Engine/ZoomSpeakerTagger.swift` | @MainActor. §5.3 Zoom AX 폴링: 타일 파싱(이름·active speaker·뮤트), 활성 화자 타임라인, dominantName, 내 뮤트 변화 콜백, `accessibilitySettingsURL`. AX API를 만지는 유일한 파일 |
 | `Engine/ChatService.swift` | §5.9 채팅: `ChatPrompt`(공유 프롬프트·이력 합성), `LocalChatEngine` actor(Qwen 상주), `GeminiChat`(3.7 Flash 멀티턴 REST) |
 | `Engine/ContextBuilder.swift` | §5.10 (v1.4.0 추가) `@MainActor enum`. `build(meetings:store:budget:perMeetingTranscriptCap:)`로 아카이브 채팅·Recipes(§5.13)·향후 브리핑이 공용하는 컨텍스트 조립 |
 | `Engine/RecipeRunner.swift` | §5.13 (v1.5.0 추가) `@MainActor enum`. `run(recipe:meetings:model:language:store:localEngine:)`, `renderPrompt`, `defaultModel(for:userChoice:)` |
@@ -421,6 +423,7 @@ Weekly Update의 system 프롬프트는 SA(Solutions Architect) 주간보고 규
 18. **로컬 Qwen + 120K자 컨텍스트는 느리다.** 레시피 컨텍스트 예산(120K자, §5.13)은 클라우드 모델 기준으로 잡았다. API 키가 없으면 `RecipeRunner`가 자동으로 `LocalChatEngine`으로 폴백하는데(§5.13, 2026-09-03 round-1 리뷰 전에는 여기서 실패했다), 같은 예산이 그대로 로컬 모델에 들어가 응답이 눈에 띄게 느려진다(실행 시트가 경고 문구로 안내할 뿐 자동으로 줄이지는 않는다). 범위를 좁혀 회의 수를 줄이는 것이 유일한 완화책이다.
 19. **번들 내장 레시피 id는 유일해야 한다.** `Resources/Recipes/*.json`은 PBXFileSystemSynchronizedRootGroup 동기화 그룹이 번들 루트로 평탄화해서 복사한다(하위 폴더 구조가 사라짐). `RecipeStore.loadBuiltin`은 `bundle.url(forResource:withExtension:)`로 파일명(=id)만으로 찾으므로, 새 내장 레시피를 추가할 때 다른 번들 리소스와 파일명이 겹치면 엉뚱한 파일을 읽게 된다.
 20. **레시피 id가 파일명과 다르거나 형식에 안 맞으면 조용히 사라진다.** `RecipeStore.refresh()`는 id가 `^[a-z0-9][a-z0-9-]{0,63}$`에 안 맞거나, 파일명(확장자 제외)과 id가 다르거나, id가 중복이면 그 파일을 목록에서 빼고 `recipe` 로그에만 남긴다(경로 조작 방어가 목적이라 UI에는 알리지 않는다). recipes 폴더의 JSON을 손으로 편집·복사할 때는 파일명과 id를 같게, 소문자·숫자·하이픈만 쓸 것.
+21. **앱 이름 변경/재설치 시 키체인 접근 제어(ACL) 거부 발생.** 앱 번들이 `/Applications/livenote2.app`에서 `/Applications/LiveNote.app`으로 변경되면 과거 빌드가 생성한 키체인 항목의 ACL 신뢰 앱 경로와 불일치해 `SecItemCopyMatching`이나 `SecItemUpdate` 시 `errSecAuthFailed`(-25293)가 반환된다. 이때 update-in-place 원칙에 따라 delete 재시도를 하지 않으며, `GeminiKeychain`은 상태 코드를 삼키지 않고 `GeminiKeychainError`(`.accessDenied`, `.inaccessibleItem`, `.readFailed`, `.corruptData`, `.invalidKeyData`, `.writeFailed`)로 throw한다. UI에서는 Keychain Access(키체인 접근) 앱에서 기존 `com.byungjoo.livenote2.gemini` 항목을 삭제하고 다시 저장하도록 명확한 오류 안내를 보여준다.
 
 ---
 
@@ -432,16 +435,16 @@ Weekly Update의 system 프롬프트는 SA(Solutions Architect) 주간보고 규
 4. **Phase 4**: 저장/사이드바/재저장. 검증: 중지 → md 3종 + 이름 변경 반영 + 앱 재시작 후 목록 유지.
 5. **마이크/자동화**: 레벨 미터, 자동 시작/종료.
 6. **Phase 5**: 메뉴바 + Qwen 요약. 검증: 저장된 장시간 회의에 "요약 생성".
-7. **패키징** (✅ 완료, 스크립트화 — 2026-08-06 배포 위생 도입): `./script/package.sh [버전]` 한 방이 Release 아카이브 → `dist/livenote2-{버전}.dmg`(Applications 심볼릭 링크 포함) + `.sha256` 체크섬 + `INSTALL.md` 생성. 로컬 설치는 아카이브에서 `ditto .../livenote2.app /Applications/`. 실행 중인 앱은 먼저 종료 후 교체. 재설치 후 첫 시작 시 마이크·시스템 오디오 권한 재허용 필요(§7.14). DEVELOPER_DIR은 스크립트가 자동 설정(§7.15 참고: 이 기기 xcode-select는 CLT를 가리킴).
+7. **패키징** (✅ 완료, 스크립트화, 2026-08-06 배포 위생 도입): `./script/package.sh [버전]` 한 방이 Release 아카이브 → `dist/livenote2-{버전}.dmg`(Applications 심볼릭 링크 포함) + `.sha256` 체크섬 + `INSTALL.md` 생성. 로컬 설치는 아카이브에서 `ditto .../livenote2.app /Applications/`. 실행 중인 앱은 먼저 종료 후 교체. 재설치 후 첫 시작 시 마이크·시스템 오디오 권한 재허용 필요(§7.14). DEVELOPER_DIR은 스크립트가 자동 설정(§7.15 참고: 이 기기 xcode-select는 CLT를 가리킴).
 
 ---
 
 ## 9. 참고 근거 자료
 
-- 벤치마크(엔진 선택 근거): Inscribe "Apple Speech API vs Whisper" Round 1/2 — get-inscribe.com/blog/apple-speech-api-benchmark.html, /parakeet-moss-apple-speech-benchmark.html
+- 벤치마크(엔진 선택 근거): Inscribe "Apple Speech API vs Whisper" Round 1/2: get-inscribe.com/blog/apple-speech-api-benchmark.html, /parakeet-moss-apple-speech-benchmark.html
 - FluidAudio: github.com/FluidInference/FluidAudio (Apache 2.0) · Parakeet v2 모델카드: huggingface.co/nvidia/parakeet-tdt-0.6b-v2 (CC-BY-4.0, AMI 11.16 WER)
 - mlx-swift-lm: github.com/ml-explore/mlx-swift-lm (3.x 사용법: Libraries/MLXLMCommon/Documentation.docc/using.md)
 - Qwen3.5-4B: huggingface.co/mlx-community/Qwen3.5-4B-4bit (Apache 2.0)
-- 대체 대상: Granola(granola.ai) · Alt(altalt.io — 화자구분/플러그인 Pro 유료, 엔진 오픈소스판: github.com/altalt-org/Lightning-SimulWhisper, PolyForm NC 라이선스라 업무용 부적합했음)
+- 대체 대상: Granola(granola.ai) · Alt(altalt.io: 화자구분/플러그인 Pro 유료, 엔진 오픈소스판: github.com/altalt-org/Lightning-SimulWhisper, PolyForm NC 라이선스라 업무용 부적합했음)
 
-— 끝. 이 문서와 동일 폴더의 소스 코드가 유일한 진실이다. 문서와 코드가 다르면 코드를 믿고, 외부 라이브러리는 문서 말고 태그된 소스를 믿어라.
+[끝] 이 문서와 동일 폴더의 소스 코드가 유일한 진실이다. 문서와 코드가 다르면 코드를 믿고, 외부 라이브러리는 문서 말고 태그된 소스를 믿어라.

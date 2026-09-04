@@ -53,8 +53,16 @@ struct ContentView: View {
             set: { app.showGeminiKeyPrompt = $0 }
         )) {
             GeminiKeySheet(
+                errorText: app.geminiKeychainError,
+                canRemove: app.hasGeminiKey || app.geminiKeychainError != nil,
                 onSave: { app.saveGeminiKey($0) },
-                onCancel: { app.showGeminiKeyPrompt = false }
+                onRemove: {
+                    app.removeGeminiKey()
+                },
+                onCancel: {
+                    // 오류는 load/save/remove 성공 시에만 지운다 (Settings에서 계속 보여야 함)
+                    app.showGeminiKeyPrompt = false
+                }
             )
         }
         .onChange(of: app.isRunning) { _, running in
@@ -935,7 +943,14 @@ struct LiveMeetingView: View {
             BannerView(text: cloudIssue, color: .orange)
         }
         if let zoomTagIssue = app.zoomTagMessage {
-            BannerView(text: zoomTagIssue, color: .orange)
+            BannerView(
+                text: zoomTagIssue,
+                color: .orange,
+                actionTitle: "Open Accessibility Settings",
+                action: {
+                    NSWorkspace.shared.open(ZoomSpeakerTagger.accessibilitySettingsURL)
+                }
+            )
         }
     }
 
@@ -1417,7 +1432,10 @@ struct ChatPanel: View {
 // MARK: - Gemini API 키 입력 시트
 
 struct GeminiKeySheet: View {
+    let errorText: String?
+    let canRemove: Bool
     let onSave: (String) -> Void
+    let onRemove: () -> Void
     let onCancel: () -> Void
     @State private var key = ""
 
@@ -1433,7 +1451,16 @@ struct GeminiKeySheet: View {
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 360)
                 .onSubmit { onSave(key) }
+            if let errorText {
+                Text(errorText)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             HStack {
+                if canRemove {
+                    Button("Remove Key", role: .destructive, action: onRemove)
+                }
                 Spacer()
                 Button("Cancel", action: onCancel)
                 Button("Save & Use Cloud") { onSave(key) }
@@ -1467,6 +1494,8 @@ struct BannerView: View {
     let text: String
     let color: Color
     var icon: String = "exclamationmark.triangle.fill"
+    var actionTitle: String? = nil
+    var action: (() -> Void)? = nil
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -1476,6 +1505,10 @@ struct BannerView: View {
                 .font(.caption)
                 .textSelection(.enabled)
             Spacer()
+            if let actionTitle, let action {
+                Button(actionTitle, action: action)
+                    .controlSize(.small)
+            }
         }
         .padding(10)
         .background(color.opacity(0.1))
@@ -1490,6 +1523,7 @@ struct SettingsView: View {
     @State private var editingRecipe: Recipe?
     @State private var isCreatingRecipe = false
     @State private var recipeError: String?
+    @State private var accessibilityGranted = false
 
     var body: some View {
         ScrollView {
@@ -1511,6 +1545,16 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                     Button("Set Gemini API Key…") { app.showGeminiKeyPrompt = true }
                         .controlSize(.small)
+                    if let error = app.geminiKeychainError {
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(Theme.vermilion)
+                            .textSelection(.enabled)
+                    } else if app.hasGeminiKey {
+                        Text("Key stored in Keychain")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
 
                     Divider().padding(.vertical, 4)
 
@@ -1610,6 +1654,22 @@ struct SettingsView: View {
                         get: { app.syncMuteWithZoom },
                         set: { app.setSyncMuteWithZoom($0) }
                     ))
+
+                    Divider().padding(.vertical, 4)
+
+                    HStack {
+                        Text("Zoom speaker names")
+                        Spacer()
+                        Text(accessibilityGranted ? "Accessibility: granted" : "Accessibility: not granted")
+                            .font(.caption)
+                            .foregroundStyle(accessibilityGranted ? .secondary : Theme.vermilion)
+                        if !accessibilityGranted {
+                            Button("Open Accessibility Settings") {
+                                NSWorkspace.shared.open(ZoomSpeakerTagger.accessibilitySettingsURL)
+                            }
+                            .controlSize(.small)
+                        }
+                    }
                 }
 
                 settingsCard("Meetings") {
@@ -1726,6 +1786,11 @@ struct SettingsView: View {
         }
         .onAppear {
             jargonDraft = app.internalJargon
+            accessibilityGranted = ZoomSpeakerTagger.accessibilityTrusted(prompt: false)
+            app.refreshGeminiKeyStatus()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            accessibilityGranted = ZoomSpeakerTagger.accessibilityTrusted(prompt: false)
         }
         .sheet(isPresented: $isCreatingRecipe) {
             RecipeEditorView(

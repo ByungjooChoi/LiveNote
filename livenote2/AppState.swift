@@ -46,12 +46,27 @@ final class AppState {
     /// 화자 이름 (전사 라벨·홈 인사말·Zoom 자기 타일 매칭 공용).
     /// 우선순위 (v1.3.1): 이번 세션에서 확정된 Zoom 타일 이름 > 마지막으로 확정됐던 Zoom 이름(영속)
     /// > macOS 계정 이름. Zoom 회의 간 일관성과 빌린 Mac 사용을 위해 Zoom 표시명이 최우선.
-    var myName = UserDefaults.standard.string(forKey: "zoomSelfName") ?? AppState.detectedAccountName()
+    var myName = AppState.resolveMyName(
+        persistedZoomName: UserDefaults.standard.string(forKey: "zoomSelfName"),
+        accountName: AppState.detectedAccountName()
+    )
 
     /// macOS 계정 전체 이름 (예: "Byung joo Choi"). 비어 있으면 "Me".
-    static func detectedAccountName() -> String {
+    nonisolated static func detectedAccountName() -> String {
         let full = NSFullUserName().trimmingCharacters(in: .whitespaces)
         return full.isEmpty ? "Me" : full
+    }
+
+    /// 내 표시 이름 결정 (1순위: 영속된 Zoom 표시명, 2순위: macOS 계정 이름, 3순위: "Me")
+    nonisolated static func resolveMyName(persistedZoomName: String?, accountName: String) -> String {
+        if let persisted = persistedZoomName?.trimmingCharacters(in: .whitespacesAndNewlines), !persisted.isEmpty {
+            return persisted
+        }
+        let trimmedAccount = accountName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedAccount.isEmpty {
+            return trimmedAccount
+        }
+        return "Me"
     }
     var speakerNames: [Int: String] = [:]
     /// 현재 회의의 캘린더 참석자 이름 후보 (화자 rename 원클릭용, 시작 시점에 조회)
@@ -94,8 +109,6 @@ final class AppState {
     var cloudTranslationMessage: String?
     /// 클라우드 번역 연결 상태 (헤더 표시등, nil이면 비활성)
     var cloudStatus: CloudStatus?
-    /// Gemini API 키 입력 시트 표시
-    var showGeminiKeyPrompt = false
 
     // MARK: - AI 채팅 (Granola식 하단 대화창)
 
@@ -124,7 +137,28 @@ final class AppState {
     let recipeStore = RecipeStore()
     var isRecipeRunning = false
     var lastRecipeError: String?
-    var hasGeminiKey: Bool { GeminiKeychain.load() != nil }
+
+    let geminiKey = GeminiKeyController()
+
+    var showGeminiKeyPrompt: Bool {
+        get { geminiKey.showPrompt }
+        set { geminiKey.showPrompt = newValue }
+    }
+    var geminiKeychainError: String? {
+        get { geminiKey.errorText }
+        set { geminiKey.errorText = newValue }
+    }
+    var hasGeminiKey: Bool {
+        geminiKey.hasKey
+    }
+
+    func loadGeminiKey() -> String? {
+        geminiKey.load()
+    }
+
+    func refreshGeminiKeyStatus() {
+        geminiKey.refresh()
+    }
     /// 현재 진행 중인 대화의 저장 ID (첫 질문 때 발급)
     @ObservationIgnored private var currentChatID: UUID?
     @ObservationIgnored private var chatScopeKey: String?
@@ -218,7 +252,8 @@ final class AppState {
                 model: resolvedModel,
                 language: language,
                 store: meetingStore,
-                localEngine: localChat
+                localEngine: localChat,
+                backend: .live(apiKey: { [weak self] in self?.loadGeminiKey() })
             )
 
             startNewChat()
@@ -231,7 +266,18 @@ final class AppState {
                 truncated: result.truncated
             )
             chatMessages.append(ChatMessage(role: .user, text: userLabel, promptText: result.promptText))
-            chatMessages.append(ChatMessage(role: .assistant, text: result.text))
+
+            if result.usedLocalEngine && resolvedModel != .localQwen {
+                let reason = geminiKeychainError ?? "No Gemini API key"
+                AppLog.write("recipe", "\(reason) → 로컬 엔진 폴백")
+            }
+            let assistantText = Self.recipeAssistantText(
+                resultText: result.text,
+                usedLocalEngine: result.usedLocalEngine,
+                requestedModel: resolvedModel,
+                keyError: geminiKeychainError
+            )
+            chatMessages.append(ChatMessage(role: .assistant, text: assistantText))
             persistCurrentChat()
 
             let elapsed = String(format: "%.1f", Date().timeIntervalSince(started))
@@ -261,6 +307,72 @@ final class AppState {
         }
     }
 
+    nonisolated static func localFallbackNotice(reason: String?, feature: String) -> String {
+        let baseReason: String
+        if let reason = reason?.trimmingCharacters(in: .whitespacesAndNewlines), !reason.isEmpty {
+            baseReason = reason
+        } else {
+            baseReason = "No Gemini API key"
+        }
+        let cleanFeature = feature.trimmingCharacters(in: .whitespacesAndNewlines)
+        return "\(baseReason). \(cleanFeature)"
+    }
+
+    nonisolated static func recipeAssistantText(
+        resultText: String,
+        usedLocalEngine: Bool,
+        requestedModel: ChatModelChoice,
+        keyError: String?
+    ) -> String {
+        guard usedLocalEngine, requestedModel != .localQwen else {
+            return resultText
+        }
+        let noticeBody = localFallbackNotice(
+            reason: keyError,
+            feature: "Answered with the local model. Add a key in Settings for cloud answers."
+        )
+        return "(\(noticeBody))\n\n" + resultText
+    }
+
+    enum SummaryRoute: Equatable {
+        case cloud(key: String)
+        case local(notice: String?)
+    }
+
+    nonisolated static func summaryRoute(backend: ProcessingBackend, key: String?, keyError: String?) -> SummaryRoute {
+        guard backend == .cloud else {
+            return .local(notice: nil)
+        }
+        if let trimmedKey = key?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmedKey.isEmpty {
+            return .cloud(key: trimmedKey)
+        }
+        let notice = localFallbackNotice(
+            reason: keyError,
+            feature: "Minutes were generated with the local model."
+        )
+        return .local(notice: notice)
+    }
+
+    enum ChatRoute: Equatable {
+        case cloud(apiModel: String)
+        case local(notice: String?)
+    }
+
+    nonisolated static func chatRoute(model: ChatModelChoice, key: String?, keyError: String?) -> ChatRoute {
+        guard let apiModel = model.apiModel else {
+            return .local(notice: nil)
+        }
+        if let key = key?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty {
+            return .cloud(apiModel: apiModel)
+        }
+        let noticeBody = localFallbackNotice(
+            reason: keyError,
+            feature: "Answered with the local model. Add a key in Settings for cloud answers."
+        )
+        let notice = "(\(noticeBody))\n\n"
+        return .local(notice: notice)
+    }
+
     func askChat(_ question: String, scope: ChatScope) {
         let trimmed = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !chatBusy else { return }
@@ -281,22 +393,33 @@ final class AppState {
             history = previous.suffix(8).map { (isUser: $0.role == .user, text: $0.promptText ?? $0.text) }
         }
         let model = chatModel
+        let key = loadGeminiKey()
+        let route = Self.chatRoute(model: model, key: key, keyError: geminiKeychainError)
         let localRef = localChat
 
         Task { [weak self] in
             var answer: String
             do {
-                if let apiModel = model.apiModel {
-                    guard let key = GeminiKeychain.load() else {
+                switch route {
+                case .cloud(let apiModel):
+                    guard let key else {
                         throw NSError(domain: "livenote2.chat", code: 1, userInfo: [
-                            NSLocalizedDescriptionKey: "No Gemini API key. Select the Cloud backend once in Settings to register a key."])
+                            NSLocalizedDescriptionKey: "No Gemini API key."])
                     }
                     answer = try await GeminiChat.respond(
                         context: context, history: Array(history), question: trimmed,
                         apiKey: key, model: apiModel, thinkingLevel: model.thinkingLevel)
-                } else {
-                    answer = try await localRef.respond(
+                case .local(let notice):
+                    if notice != nil {
+                        AppLog.write("chat", "Gemini 키 없음 → 로컬 엔진 폴백")
+                    }
+                    let localAnswer = try await localRef.respond(
                         context: context, history: Array(history), question: trimmed)
+                    if let notice {
+                        answer = notice + localAnswer
+                    } else {
+                        answer = localAnswer
+                    }
                 }
             } catch {
                 answer = "Failed: \(error.localizedDescription)"
@@ -442,8 +565,12 @@ final class AppState {
     // MARK: - 초기화 (설정 복원)
 
     init() {
+        LanguagePrefs.migrateSummaryLanguageDefault()
+        refreshGeminiKeyStatus()
         let defaults = UserDefaults.standard
-        // myName은 macOS 계정 이름 자동 인식만 사용 (저장값 무시 — Profile 설정 삭제됨)
+        summaryLanguage = LanguagePrefs.summaryLanguage
+        translationLanguage = LanguagePrefs.translationLanguage
+        transcriptionLanguage = LanguagePrefs.transcriptionLanguage
         if defaults.object(forKey: "echoFilter") != nil {
             echoFilterEnabled = defaults.bool(forKey: "echoFilter")
         }
@@ -690,7 +817,7 @@ final class AppState {
 
     func setBackend(_ newBackend: ProcessingBackend) {
         // 클라우드 전환 시 API 키가 없으면 먼저 입력받음 (저장 후 재호출됨)
-        if newBackend == .cloud, GeminiKeychain.load() == nil {
+        if newBackend == .cloud, loadGeminiKey() == nil {
             showGeminiKeyPrompt = true
             return
         }
@@ -704,7 +831,7 @@ final class AppState {
     /// 현재 토글·백엔드 상태에 맞게 번역 파이프라인(Apple 세션/Gemini 라이브)을 정렬.
     private func applyTranslationPipeline() {
         let geminiRef = gemini
-        if translationEnabled, backend == .cloud, let key = GeminiKeychain.load() {
+        if translationEnabled, backend == .cloud, let key = loadGeminiKey() {
             Task {
                 await geminiRef.configure(apiKey: key)
                 await geminiRef.start()
@@ -717,12 +844,18 @@ final class AppState {
         }
     }
 
+    /// 키 저장에 성공한 경우에만 클라우드 백엔드로 전환한다.
+    /// save()가 실패(빈 키, 키체인 오류)하면 hasKey는 false로 유지되고 showPrompt는 true로 남아 백엔드가 변경되지 않는다.
     func saveGeminiKey(_ key: String) {
-        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        showGeminiKeyPrompt = false
-        guard !trimmed.isEmpty else { return }
-        GeminiKeychain.save(trimmed)
-        setBackend(.cloud)
+        if geminiKey.save(key) {
+            setBackend(.cloud)
+        }
+    }
+
+    func removeGeminiKey() {
+        if geminiKey.remove(), backend == .cloud {
+            setBackend(.local)
+        }
     }
 
     // MARK: - 시작/중지
@@ -764,10 +897,14 @@ final class AppState {
 
         // Zoom 화자 태그: Zoom이 떠 있으면 폴링 시작 (권한 없으면 요청 다이얼로그 + 안내)
         // 대면 모드는 Zoom 타일과 무관하므로 태거를 띄우지 않는다.
-        if mode == .online, ZoomSpeakerTagger.zoomRunning() {
-            if ZoomSpeakerTagger.accessibilityTrusted(prompt: false) {
+        let zoomRunning = ZoomSpeakerTagger.zoomRunning()
+        let axTrusted = ZoomSpeakerTagger.accessibilityTrusted(prompt: false)
+        AppLog.write("zoomtag", "세션 시작 mode=\(mode) zoomRunning=\(zoomRunning) accessibility=\(axTrusted) myName=\(myName)")
+        if mode == .online, zoomRunning {
+            if axTrusted {
                 zoomTagger.start(myName: myName)
             } else {
+                AppLog.write("zoomtag", "손쉬운 사용 권한 없음 → 태거 미시작")
                 _ = ZoomSpeakerTagger.accessibilityTrusted(prompt: true)
                 zoomTagMessage = "Zoom speaker recognition needs Accessibility permission. Enable LiveNote in System Settings > Privacy & Security > Accessibility."
                 watchForAccessibilityGrant()
@@ -911,7 +1048,7 @@ final class AppState {
             // 7) 번역 활성화. Apple 세션은 번역 켬+로컬일 때만 준비
             //    (끔/클라우드에서는 한국어 언어팩 다운로드 프롬프트를 띄우지 않음 — 팀원 배포 배려)
             cloudTranslationMessage = nil
-            if translationEnabled, backend == .cloud, GeminiKeychain.load() == nil {
+            if translationEnabled, backend == .cloud, loadGeminiKey() == nil {
                 backend = .local
                 cloudTranslationMessage = "No Gemini API key — started with the local backend. Select Cloud again in Settings to add a key."
             }
@@ -1269,11 +1406,22 @@ final class AppState {
     /// 요약 실행 라우팅: 클라우드 백엔드 + API 키 보유 시 Gemini 3.7 Flash
     /// (빠르고 품질 우위, 모델 로드 불필요), 실패하거나 로컬 백엔드면 Qwen 로컬.
     private func runSummary(transcript: String) async throws -> String {
-        if backend == .cloud, let key = GeminiKeychain.load() {
+        let route = Self.summaryRoute(
+            backend: backend,
+            key: loadGeminiKey(),
+            keyError: geminiKeychainError
+        )
+        switch route {
+        case .cloud(let key):
             do {
                 return try await GeminiSummarizer.generateSummary(transcript: transcript, apiKey: key)
             } catch {
                 AppLog.write("summary", "클라우드 실패 → 로컬 Qwen 폴백: \(error.localizedDescription.prefix(150))")
+            }
+        case .local(let notice):
+            if let notice {
+                noticeMessage = notice
+                AppLog.write("summary", "Gemini 키 없음 → 로컬 요약")
             }
         }
         AppLog.write("summary", "로컬 Qwen 요약 시작 transcript=\(transcript.count)자")
