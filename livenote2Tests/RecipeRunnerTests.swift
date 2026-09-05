@@ -383,7 +383,7 @@ final class RecipeRunnerTests: XCTestCase {
     }
 
     private func saveMeeting(title: String, hour: Int, summary: String) throws {
-        let saved = store.save(
+        let saved = try store.save(
             rows: [MeetingStoreFixture.row(text: "transcript")],
             myName: "Philip",
             speakerNames: [0: "Craig"],

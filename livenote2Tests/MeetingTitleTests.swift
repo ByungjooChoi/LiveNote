@@ -89,7 +89,7 @@ final class MeetingTitleTests: XCTestCase {
         let store = try MeetingStoreFixture.makeStore()
         defer { MeetingStoreFixture.cleanUp(store) }
 
-        let url = try XCTUnwrap(store.save(
+        let url = try store.save(
             rows: [MeetingStoreFixture.row(text: "hello")],
             myName: "Philip",
             speakerNames: [:],
@@ -99,7 +99,7 @@ final class MeetingTitleTests: XCTestCase {
             summary: nil,
             attendees: nil,
             existingURL: nil
-        ))
+        )
 
         let renamed = try XCTUnwrap(store.rename(at: url, title: "Weekly sync"))
         XCTAssertEqual(renamed, url)
@@ -176,8 +176,53 @@ final class MeetingTitleTests: XCTestCase {
         XCTAssertEqual(store.load(original)?.title, "Weekly sync")
     }
 
+    /// 읽기 전용 루트 디렉토리에서 회의 저장이 실패하고 오류를 던진다.
+    func testSaveThrowsWhenRootIsReadOnly() throws {
+        let store = try MeetingStoreFixture.makeStore()
+        defer { MeetingStoreFixture.cleanUp(store) }
+
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o500], ofItemAtPath: store.rootURL.path)
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o700], ofItemAtPath: store.rootURL.path)
+        }
+
+        XCTAssertThrowsError(try store.save(
+            rows: [MeetingStoreFixture.row(text: "testing read only")],
+            myName: "Philip",
+            speakerNames: [:],
+            startedAt: MeetingStoreFixture.date(hour: 10),
+            durationSeconds: 60,
+            title: "Read Only Test",
+            summary: nil,
+            attendees: nil,
+            existingURL: nil
+        ))
+    }
+
+    /// 빈 행 목록을 저장하려고 하면 emptyRows 오류를 던진다.
+    func testSaveThrowsForEmptyRowsWithoutExistingURL() throws {
+        let store = try MeetingStoreFixture.makeStore()
+        defer { MeetingStoreFixture.cleanUp(store) }
+
+        XCTAssertThrowsError(try store.save(
+            rows: [],
+            myName: "Philip",
+            speakerNames: [:],
+            startedAt: MeetingStoreFixture.date(hour: 10),
+            durationSeconds: 0,
+            title: "Empty Meeting",
+            summary: nil,
+            attendees: nil,
+            existingURL: nil
+        )) { error in
+            XCTAssertEqual(error as? MeetingStoreError, MeetingStoreError.emptyRows)
+        }
+    }
+
     private func saveUntitledMeeting(in store: MeetingStore, hour: Int) -> URL? {
-        store.save(
+        try? store.save(
             rows: [MeetingStoreFixture.row(text: "hello there")],
             myName: "Philip",
             speakerNames: [:],

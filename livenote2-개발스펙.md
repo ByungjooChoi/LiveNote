@@ -2,7 +2,7 @@
 
 작성일: 2026-08-06 · 대상: 이 문서만 보고 동일한 앱을 재구축해야 하는 제로베이스 AI/개발자
 현재 상태: **1단계 완성 + 출시 패키징 완료** (빌드·실전 사용 검증 완료, /Applications 설치본 운영 중)
-최신 갱신: v1.6.0 (2026-09-05, Phase 2: Tasks 추출·화면 §5.14, 사전 브리핑 §5.15)
+최신 갱신: v1.7.0 (2026-09-05, Phase 3: 성문 기억·화자 메모리 §5.16, 2-pass 다이어라이제이션 §5.3)
 
 ---
 
@@ -411,6 +411,39 @@ Weekly Update의 system 프롬프트는 SA(Solutions Architect) 주간보고 규
 - 캐시 존재 시 재생성을 건너뛰며, `force: true` 시 무효화 후 재생성.
 - 회의 시작 시 `beginSession(item:)`으로 `currentBrief`를 활성화하고, 종료 시 `endSession()` 및 `copyBriefIfAvailable` 수행.
 
+### 5.16 화자 메모리 및 성문 인식 (Phase 3, v1.7.0)
+
+**1. 성문 저장소 (`Storage/VoiceprintStore.swift`, `~/Documents/LiveNote/voiceprints.json`)**:
+- WeSpeaker v2 256차원 L2 정규화 성문 임베딩을 인물(`Person`)별 다중 중심(`VoiceCentroid`, 최대 8개)으로 보관.
+- 코사인 거리(vDSP 가속 dot product: $1 - \text{dot}$) 기반 매칭.
+- 매칭 판정: 최단 거리 $d_1 \le 0.35$ 및 2순위와의 마진 $(d_2 - d_1) \ge 0.10$ 충족 시 확신(`confident = true`).
+- 등록(`enroll`): 최소 발화 5.0초 및 평균 품질 0.50 이상 조건. 기존 중심과의 거리 $< 0.15$ 시 가중 평균으로 흡수 병합, 이상이면 새 중심 추가.
+- 충돌 완화(`recordConflict`): 확정 이름과 불일치 시 중심의 충돌 횟수를 누적하여 3회 도달 시 해당 중심 자동 제거.
+- 원자적 파일 쓰기(`options: .atomic`) 및 디코딩 실패 시 `.corrupt-<timestamp>` 백업 생성 후 안전 격리.
+
+**2. 2-pass 오프라인 다이어라이제이션 (`Engine/OfflineDiarizer.swift`)**:
+- 세션 종료 시 녹음된 시스템 오디오 WAV(16kHz mono 16-bit PCM)를 `FluidOfflineEngine`(`DiarizerManager`, Pyannote 세그멘테이션 + WeSpeaker 임베딩)으로 일괄 분석.
+- `skipSilence` 에너지 게이트(RMS 임계값 미만 프레임 필터링) 지원.
+- 1시간 오디오당 60초 초과 처리 시 `voice` 로그에 성능 경고 기록.
+- `TranscriptRefiner.assignClusters`를 통해 정제된 `.them` 채널 행에 구간 최다 중첩 클러스터 ID(`clusterID`)를 부여.
+
+**3. 라이브 성문 승격 (`Engine/LiveVoicePromoter.swift`)**:
+- 라이브 스트리밍 중 최근 90초간의 오디오 샘플을 링 버퍼에 보관.
+- LS-EEND 화자 슬롯의 발화 시간이 30초에 도달하면 백그라운드(`.utility`)에서 슬라이스를 추출하여 성문 임베딩 생성.
+- `onEmbedding` 콜백을 통해 MainActor에서 `VoiceprintStore.match`를 수행하고 등록 화자로 자동 명명 및 승격.
+
+**4. 화자 명명 및 성문 등록 오케스트레이션 (`Engine/SpeakerMemory.swift`)**:
+- `assignNames`: 클러스터별 중심 임베딩으로 `VoiceprintStore.match` 수행 후 우선순위(Zoom 화자 태그 > 확신 성문 매칭 > 기존 슬롯 이름 > 폴백 이름)에 따라 화자 배정. 마진 미달 시 `candidateNames`(최대 2명)를 기록하고, 수동 지정(`.manual`) 행은 절대 덮어쓰지 않고 보호.
+- `confirmedNames`: Zoom 태그 및 수동 지정 행에 대해 다수결 투표로 클러스터별 확정 이름 도출(동률 시 제외).
+- `enroll`: 확정된 클러스터 화자의 세그먼트들로 성문 등록. 다른 인물과 확신 매칭된 경우 충돌(`recordConflict`) 기록 후 신규 이름 등록.
+- `enrollMe`: 마이크(me) 채널 오디오 샘플로 본인 성문 등록.
+
+**5. UI 컴포넌트 (`Views/SpeakerChip.swift`, `Views/SpeakerNamePopover.swift`, `Views/SpeakersSettings.swift`, `Views/SpeakersSummaryLine.swift`)**:
+- `SpeakerChipLabel`: 화자 이름 출처별 SF Symbol 아이콘 매핑 (zoom -> "video", voice -> "waveform", manual -> "pencil", slot -> 없음).
+- `SpeakerNamePopover`: 화자 이름 편집 및 성문 저장 체크박스("Remember this voice", 기본 선택), 후보 제안 버튼 목록.
+- `SpeakersSettingsCard`: Settings > Speakers 성문 관리 카드 (인물 목록, 회의 수 및 최근 확인일, 인라인 이름 변경, 2명 선택 병합, 개별/전체 삭제, 로컬 프라이버시 안내 문구).
+- `SpeakersSummaryLine`: 회의 상세 상단에 화자별 총 발화 시간 요약 라인 렌더링.
+
 ---
 
 ## 6. 파일별 스펙 (livenote2/livenote2/ 아래 주요 파일)
@@ -418,12 +451,22 @@ Weekly Update의 system 프롬프트는 SA(Solutions Architect) 주간보고 규
 | 파일 | 역할 · 핵심 내용 |
 |---|---|
 | `livenote2App.swift` | `WindowGroup(id:"main")` 1020×680(min 840×520) + `MenuBarExtra`(waveform 아이콘, 실행 중 filled). MenuBarView: 상태줄, 시작/중지, 메인 창 열기(openWindow+activate), 자동 시작 토글, 종료(실행 중이면 stop 후 4.5s 지연 terminate — 저장 보장) |
-| `Models/TranscriptModels.swift` | `AudioChannel{me,them}`(Codable) · `TranscriptRow{id,channel,speakerSlot?,english,korean?,startSeconds,endSeconds}`(Identifiable+Codable, timeLabel mm:ss) · `FinalSegment` |
+| `Models/TranscriptModels.swift` | `AudioChannel{me,them}`(Codable) · `TranscriptRow{id,channel,speakerSlot?,speakerName?,nameSource?,clusterID?,english,korean?,startSeconds,endSeconds}`(Identifiable+Codable, timeLabel mm:ss) · `FinalSegment` · `NameSource{zoom,voice,manual}` |
+| `Models/SpeakerMemoryModels.swift` | §5.16 (v1.7.0 추가) `Person` · `VoiceCentroid` · `EnrollmentSample` · `VoiceMatch` · `SpeakerSegment` · `OfflineDiarization` · `VoiceprintThresholds` · `VoiceprintStoring` 프로토콜 |
 | `Audio/AudioConverter16k.swift` | AVAudioConverter 래퍼: 임의 포맷 → 16kHz mono Float32. 스트림당 1인스턴스(리샘플 상태 유지). 입력버퍼 1회 공급 클로저 패턴 |
 | `Audio/MicCapture.swift` | AVAudioEngine inputNode 탭(4096). **VPIO 사용 안 함**(§7.3). onSamples + onLevel(0.25s마다 peak RMS×8). `requestPermission()` = AVCaptureDevice.requestAccess(.audio) |
 | `Audio/SystemAudioTap.swift` | `CATapDescription(stereoGlobalTapButExcludeProcesses: [])`, isPrivate, unmuted → `AudioHardwareCreateProcessTap` → 비공개 aggregate device(TapList에 tap UUID, DriftCompensation, TapAutoStart; SubDeviceList 빈 배열) → `AudioDeviceCreateIOProcIDWithBlock` → `AVAudioPCMBuffer(bufferListNoCopy:)` 제로카피 → 변환. 포맷은 `kAudioTapPropertyFormat`으로 조회. 실패 시 OSStatus+단계명 담은 에러(마이크 전용 모드로 계속) |
 | `Engine/TranscriptionEngine.swift` | actor. §5.1 상태머신 + §5.2①② 에코 게이트 + ASR 직렬화(asrBusy 폴링 30ms). `prepare()`=모델 다운로드+로드, `ingest(_:channel:)`, `flushAll()`, `setEchoFilter(_)` |
-| `Engine/SpeakerDiarizer.swift` | actor. FluidAudio diarizer API를 만지는 **유일한** 파일(시그니처 드리프트 격리 목적). prepare/ingest/dominantSlot/finish. 실패 시 failed 플래그 → 라벨만 포기 |
+| `Engine/SpeakerDiarizer.swift` | actor. FluidAudio diarizer API를 만지는 **유일한** 파일(시그니처 드리프트 격리 목적). prepare/ingest/dominantSlot/finalizedSegments/finish. 실패 시 failed 플래그 → 라벨만 포기 |
+| `Engine/OfflineDiarizer.swift` | §5.16 (v1.7.0 추가) actor. `OfflineDiarizationEngine` + `FluidOfflineEngine`. 16-bit WAV 로더, 무음 필터링, 오프라인 2-pass 다이어라이제이션 및 임베딩 추출 |
+| `Engine/LiveVoicePromoter.swift` | §5.16 (v1.7.0 추가) actor. 90초 링 버퍼, 슬롯별 30초 발화 축적 시 성문 임베딩 추출 및 실시간 승격 알림 |
+| `Engine/TranscriptRefiner.swift` | §5.1-2 + §5.16 2-pass 전사 재디코딩 및 오프라인 다이어라이제이션 dominantCluster ID 할당 |
+| `Engine/SpeakerMemory.swift` | §5.16 (v1.7.0 추가) @MainActor. 성문 매칭 화자 명명(Zoom > Voice > Slot 우선순위), 다수결 확정 이름 도출, 자동 성문 등록 및 충돌 완화 |
+| `Storage/VoiceprintStore.swift` | §5.16 (v1.7.0 추가) @MainActor final class. `VoiceprintStoring` 구현체. vDSP 가속 성문 매칭, 다중 중심 등록/병합, 충돌 완화, 원자적 JSON 영속화 |
+| `Views/SpeakerChip.swift` | §5.16 (v1.7.0 추가) `SpeakerChipLabel` 화자 칩 레이블 및 이름 출처별 아이콘 매핑 |
+| `Views/SpeakerNamePopover.swift` | §5.16 (v1.7.0 추가) 화자 이름 변경, 성문 기억 토글, 후보 제안 팝오버 |
+| `Views/SpeakersSettings.swift` | §5.16 (v1.7.0 추가) Settings > Speakers 성문 관리 카드 (인물 목록, 이름 변경, 병합, 삭제, 전체 삭제) |
+| `Views/SpeakersSummaryLine.swift` | §5.16 (v1.7.0 추가) 회의 상세 화면 상단 화자별 총 발화 시간 요약 줄 |
 | `Engine/TranslationCoordinator.swift` | @MainActor @Observable. config 보유, `serve(session:state:)` 루프, issueMessage 배너 |
 | `Engine/GeminiKeychain.swift` | `GeminiKeychain`(API 키 Keychain 보관, SecItemUpdate update-in-place 갱신, ACL 거부 감지, 에러 throw, cloud.log 로깅) + `KeychainAPI` 프로토콜(테스트 주입용) |
 | `Engine/GeminiKeyController.swift` | @MainActor @Observable. Gemini 키 로드/저장/삭제 및 통합 에러 상태(geminiKeychainError) 관리 컨트롤러 |
@@ -443,6 +486,20 @@ Weekly Update의 system 프롬프트는 SA(Solutions Architect) 주간보고 규
 | `Storage/MeetingStore.swift` | §5.7 + `resolveName(row:myName:speakerNames:)` 정적 헬퍼(이름 해석 단일 소스) + 마크다운 생성기 4종 + `transcriptForSummary` + v1.4.0: `attendees` 필드, `rename(at:title:)`, `titleFromSummary(_:)`(자동 제목) |
 | `Storage/RecipeStore.swift` | §5.13 (v1.5.0 추가) @MainActor @Observable. `recipes`, `upsert`, `delete`, `resetBuiltins`, `seedBuiltinsIfNeeded`, `uniqueID(for:)` |
 | `Storage/RecipeOutputStore.swift` | §5.13 (v1.5.0 추가) `recipes-output/<yyyy-MM-dd> <title>.md` 저장, 파일명 충돌 시 " (2)" 접미사 |
+| `Storage/BriefStore.swift` | §5.15 (v1.6.0 추가) `briefs/<safe eventKey>.md` 브리핑 마크다운 및 메타데이터 저장소 |
+| `Models/RecipeScope.swift` | §5.13 (v1.5.0 추가) 범위 enum + `resolve(meetings:now:calendar:)`(순수 함수) |
+| `Views/StartMenu.swift` | §5.11 (v1.4.0 추가) Home Start 분할 버튼: 본체=online 시작, ▾ 메뉴="Start in-person" |
+| `Views/ModeBadge.swift` | §5.11 (v1.4.0 추가) 헤더용 캡슐 배지 (대면 모드 "In person" 표시에 사용) |
+| `Views/RecipesRow.swift` | §5.13 (v1.5.0 추가) Chat 홈 히어로 아래 레시피 칩 행 |
+| `Views/RecipeRunSheet.swift` | §5.13 (v1.5.0 추가) 레시피 실행 대화상자: 범위·회의 선택·모델·언어·[Run] |
+| `Views/RecipeEditorView.swift` | §5.13 (v1.5.0 추가) 레시피 생성·편집 폼 |
+| `Views/BriefPanel.swift` | §5.15 (v1.6.0 추가) Home Coming up 및 Live 세션 브리핑 뷰 컴포넌트 |
+| `Views/BriefSettingsRows.swift` | §5.15 (v1.6.0 추가) Settings > Meetings 브리핑 설정 토글 및 배치 시각 선택 |
+| `Views/SpeakerChip.swift` | §5.16 (v1.7.0 추가) `SpeakerChipLabel` 뷰 및 `NameSource` 기반 아이콘(`video`, `waveform`, `pencil`) 매핑 |
+| `Views/SpeakerNamePopover.swift` | §5.16 (v1.7.0 추가) 화자 이름 편집 및 성문 기억(`rememberVoice`) 토글 팝오버 |
+| `Views/SpeakersSettings.swift` | §5.16 (v1.7.0 추가) Settings > Speakers 성문 목록 조회, 이름 변경, 병합, 삭제, 일괄 망각 |
+| `Views/SpeakersSummaryLine.swift` | §5.16 (v1.7.0 추가) 회의 상세 화면 화자별 발화 시간 통계 요약 행 |
+| `Storage/TaskStore.swift` | §5.14 (v1.6.0 추가) `TaskItem` Codable, 회의 폴더 `tasks.json` 원본 보존 및 `tasks/index.json` 전역 색인 관리, replaceTasks 병합, `TaskOwnerNormalizer` |
 | `Storage/BriefStore.swift` | §5.15 (v1.6.0 추가) `briefs/<safe eventKey>.md` 브리핑 마크다운 및 메타데이터 저장소 |
 | `Models/RecipeScope.swift` | §5.13 (v1.5.0 추가) 범위 enum + `resolve(meetings:now:calendar:)`(순수 함수) |
 | `Views/StartMenu.swift` | §5.11 (v1.4.0 추가) Home Start 분할 버튼: 본체=online 시작, ▾ 메뉴="Start in-person" |

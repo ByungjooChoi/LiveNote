@@ -64,7 +64,7 @@ final class BriefingControllerTests: XCTestCase {
         let fixedNow = Date(timeIntervalSince1970: 1788220800)
 
         // Save a past meeting into meetingStore
-        _ = meetingStore.save(
+        _ = try? meetingStore.save(
             rows: [MeetingStoreFixture.row(text: "Discussed project status")],
             myName: "Philip",
             speakerNames: [:],
@@ -249,7 +249,7 @@ final class BriefingControllerTests: XCTestCase {
 
     func testForceRefreshFailureKeepsOldCachedBrief() async throws {
         let fixedNow = Date(timeIntervalSince1970: 1788220800)
-        _ = meetingStore.save(
+        _ = try? meetingStore.save(
             rows: [MeetingStoreFixture.row(text: "Past discussion")],
             myName: "Philip",
             speakerNames: [:],
@@ -317,7 +317,7 @@ final class BriefingControllerTests: XCTestCase {
 
     func testConcurrentEnsureBriefGeneratesOnce() async {
         let fixedNow = Date(timeIntervalSince1970: 1788220800)
-        _ = meetingStore.save(
+        _ = try? meetingStore.save(
             rows: [MeetingStoreFixture.row(text: "Past discussion")],
             myName: "Philip",
             speakerNames: [:],
@@ -387,7 +387,7 @@ final class BriefingControllerTests: XCTestCase {
 
         let currentDate = AtomicBox(date8AM)
 
-        _ = meetingStore.save(
+        _ = try? meetingStore.save(
             rows: [MeetingStoreFixture.row(text: "Past discussion")],
             myName: "Philip",
             speakerNames: [:],
@@ -455,7 +455,7 @@ final class BriefingControllerTests: XCTestCase {
 
     func testScheduleMorningBatchCalledTwiceRegistersOneObserver() async {
         let fixedNow = Date(timeIntervalSince1970: 1788220800)
-        _ = meetingStore.save(
+        _ = try? meetingStore.save(
             rows: [MeetingStoreFixture.row(text: "Past discussion")],
             myName: "Philip",
             speakerNames: [:],
@@ -522,7 +522,7 @@ final class BriefingControllerTests: XCTestCase {
 
     func testMalformedBriefNotCachedAndLastErrorSet() async {
         let fixedNow = Date(timeIntervalSince1970: 1788220800)
-        _ = meetingStore.save(
+        _ = try? meetingStore.save(
             rows: [MeetingStoreFixture.row(text: "Past discussion")],
             myName: "Philip",
             speakerNames: [:],
@@ -578,7 +578,7 @@ final class BriefingControllerTests: XCTestCase {
 
     func testAgendaBulletCountNotThreeRejectedAndNotCached() async {
         let fixedNow = Date(timeIntervalSince1970: 1788220800)
-        _ = meetingStore.save(
+        _ = try? meetingStore.save(
             rows: [MeetingStoreFixture.row(text: "Past discussion")],
             myName: "Philip",
             speakerNames: [:],
@@ -651,7 +651,7 @@ final class BriefingControllerTests: XCTestCase {
 
     func testOpenTasksProviderThrowsSetsErrorAndDoesNotGenerate() async {
         let fixedNow = Date(timeIntervalSince1970: 1788220800)
-        _ = meetingStore.save(
+        _ = try? meetingStore.save(
             rows: [MeetingStoreFixture.row(text: "Past discussion")],
             myName: "Philip",
             speakerNames: [:],
@@ -919,7 +919,7 @@ final class BriefingControllerTests: XCTestCase {
             local: { _, _ in "" }
         )
 
-        _ = meetingStore.save(
+        _ = try? meetingStore.save(
             rows: [MeetingStoreFixture.row(text: "Past discussion")],
             myName: "Philip",
             speakerNames: [:],
@@ -1080,7 +1080,7 @@ final class BriefingControllerTests: XCTestCase {
 
     func testBriefStoreSaveFailureSetsErrorsAndFailedStatus() async throws {
         let fixedNow = Date(timeIntervalSince1970: 1788220800)
-        _ = meetingStore.save(
+        _ = try? meetingStore.save(
             rows: [MeetingStoreFixture.row(text: "Past discussion")],
             myName: "Philip",
             speakerNames: [:],
@@ -1143,7 +1143,7 @@ final class BriefingControllerTests: XCTestCase {
         let fixedNow = Date(timeIntervalSince1970: 1788220800)
 
         // Save a past meeting into meetingStore
-        _ = meetingStore.save(
+        _ = try? meetingStore.save(
             rows: [MeetingStoreFixture.row(text: "Discussed roadmap")],
             myName: "Philip",
             speakerNames: [:],
@@ -1264,7 +1264,7 @@ final class BriefingControllerTests: XCTestCase {
         )
 
         // Seed a past meeting so candidates exist
-        _ = meetingStore.save(
+        _ = try? meetingStore.save(
             rows: [MeetingStoreFixture.row(text: "Kickoff discussion")],
             myName: "Philip",
             speakerNames: [:],
@@ -1316,7 +1316,7 @@ final class BriefingControllerTests: XCTestCase {
 
     func testCorruptCachedBriefNonForceFailsWithoutCallingBackendAndLeavesFileUnchanged() async throws {
         let fixedNow = Date(timeIntervalSince1970: 1788220800)
-        _ = meetingStore.save(
+        _ = try? meetingStore.save(
             rows: [MeetingStoreFixture.row(text: "Past discussion")],
             myName: "Philip",
             speakerNames: [:],
@@ -1388,7 +1388,7 @@ final class BriefingControllerTests: XCTestCase {
 
     func testCorruptCachedBriefForceRegeneratesAndOverwrites() async throws {
         let fixedNow = Date(timeIntervalSince1970: 1788220800)
-        _ = meetingStore.save(
+        _ = try? meetingStore.save(
             rows: [MeetingStoreFixture.row(text: "Past discussion")],
             myName: "Philip",
             speakerNames: [:],
@@ -1503,7 +1503,7 @@ final class BriefingControllerTests: XCTestCase {
         let date8AM = testCalendar.date(from: comps)!
         let currentDate = AtomicBox(date8AM)
 
-        _ = meetingStore.save(
+        _ = try? meetingStore.save(
             rows: [MeetingStoreFixture.row(text: "Past discussion")],
             myName: "Philip",
             speakerNames: [:],

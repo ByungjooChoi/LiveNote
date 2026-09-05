@@ -5,7 +5,7 @@ macOS 네이티브 회의 노트테이커 (SwiftUI, Apple Silicon). 봇 없이 �
 ## 먼저 읽을 문서
 - `livenote2-개발스펙.md`: 아키텍처·알고리즘·튜닝 상수·함정(§7). 기능 변경 시 해당 절을 갱신한다.
 - `docs/product-plan-v2-2026-09.md`: 다음 기능들의 제품 기획 (Recipes, 사전 브리핑, Speaker Memory, Tasks, 전사 편집, 소소한 개선).
-- `docs/implementation-plan-v2-2026-09.md`: 위 기획의 Phase별 구현 계획. **Phase 0·1·2 완료. 다음 작업은 Phase 3 (v1.7.0, Speaker Memory)부터.**
+- `docs/implementation-plan-v2-2026-09.md`: 위 기획의 Phase별 구현 계획. **Phase 0·1·2 완료. Phase 3 (v1.7.0, Speaker Memory): 구현 완료, 리뷰 필요 (codex 미승인, 2026-09-05). 미해결 항목은 implementation-plan의 "Phase 3 리뷰 필요" 절과 `.omc/progress.txt` 참고.**
 - `docs/feature-plan-jamie-granola-2026-09.md`: 경쟁 분석 배경.
 - `README.md`: 사용자 관점 기능 설명.
 

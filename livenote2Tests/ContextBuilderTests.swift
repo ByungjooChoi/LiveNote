@@ -173,7 +173,7 @@ final class ContextBuilderTests: XCTestCase {
         summary: String?,
         attendees: [Attendee]? = nil
     ) throws {
-        let saved = store.save(
+        let saved = try store.save(
             rows: [MeetingStoreFixture.row(text: transcript)],
             myName: "Philip",
             speakerNames: [0: "Craig"],

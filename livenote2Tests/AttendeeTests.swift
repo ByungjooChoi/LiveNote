@@ -141,7 +141,7 @@ final class AttendeeTests: XCTestCase {
         defer { MeetingStoreFixture.cleanUp(store) }
 
         let attendees = [Attendee(name: "Jane Doe", email: "jane@example.com")]
-        let url = try XCTUnwrap(store.save(
+        let url = try store.save(
             rows: [MeetingStoreFixture.row(text: "hello")],
             myName: "Philip",
             speakerNames: [:],
@@ -151,7 +151,7 @@ final class AttendeeTests: XCTestCase {
             summary: nil,
             attendees: attendees,
             existingURL: nil
-        ))
+        )
 
         XCTAssertEqual(store.load(url)?.attendees, attendees)
         XCTAssertEqual(store.meetings.first?.attendees, attendees)

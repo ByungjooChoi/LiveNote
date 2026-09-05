@@ -3,8 +3,9 @@ import Foundation
 /// 번들 동봉 모델을 최초 실행 시 캐시 위치로 복사 (다운로드 생략).
 ///
 /// `BUNDLE_MODELS=1 ./script/package.sh`로 빌드하면 FluidAudio 모델
-/// (Parakeet v2 + LS-EEND + VAD, 약 0.5GB)이 앱 Resources/BundledModels에 동봉되고,
+/// (Parakeet v2 + LS-EEND + VAD + Diarizer pyannote/wespeaker, 약 0.5GB)이 앱 Resources/BundledModels에 동봉되고,
 /// 첫 실행 때 `~/Library/Application Support/FluidAudio/Models`로 복사된다.
+/// Diarizer 모델: `speaker-diarization-coreml` (`pyannote_segmentation.mlmodelc`, `wespeaker_v2.mlmodelc`).
 /// Qwen(2.3GB+)은 GitHub 릴리스 자산 2GB 한도 때문에 동봉하지 않는다 (첫 사용 시 다운로드).
 enum ModelSeeder {
 

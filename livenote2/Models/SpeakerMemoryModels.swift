@@ -81,33 +81,42 @@ struct OfflineDiarization: Codable, Equatable, Sendable {
         var totalWeight: Float = 0
         var totalSeconds: Double = 0
         var totalQuality: Float = 0
+        var validCount = 0
 
         for seg in matching {
             guard seg.embedding.count == dim else { continue }
+            guard seg.embedding.allSatisfy({ $0.isFinite }) else { continue }
+
+            var sumSq: Float = 0
+            for x in seg.embedding {
+                sumSq += x * x
+            }
+            let norm = sqrt(sumSq)
+            guard norm.isFinite, norm > 1e-7 else { continue }
+
             let weight = max(1e-4, seg.quality)
             totalWeight += weight
             totalSeconds += seg.duration
             totalQuality += seg.quality
+            validCount += 1
+
             for i in 0..<dim {
-                weightedSum[i] += seg.embedding[i] * weight
+                weightedSum[i] += (seg.embedding[i] / norm) * weight
             }
         }
 
-        guard totalWeight > 0 else { return nil }
-        let avgQuality = totalQuality / Float(matching.count)
+        guard totalWeight > 0, validCount > 0 else { return nil }
+        let avgQuality = totalQuality / Float(validCount)
 
-        // L2 정규화
+        // 합 벡터 L2 정규화
         var sumSquares: Float = 0
         for i in 0..<dim {
             sumSquares += weightedSum[i] * weightedSum[i]
         }
-        let norm = sqrt(sumSquares)
-        let normalized: [Float]
-        if norm > 1e-7 {
-            normalized = weightedSum.map { $0 / norm }
-        } else {
-            normalized = weightedSum
-        }
+        let sumNorm = sqrt(sumSquares)
+        guard sumNorm.isFinite, sumNorm > 1e-7 else { return nil }
+
+        let normalized = weightedSum.map { $0 / sumNorm }
 
         return ClusterCentroid(
             clusterID: clusterID,
@@ -132,17 +141,19 @@ struct VoiceCentroid: Codable, Equatable, Sendable {
     var quality: Float
     var updated: Date
     var conflicts: Int = 0
+    var weight: Float
 
     enum CodingKeys: String, CodingKey {
-        case v, n, quality, updated, conflicts
+        case v, n, quality, updated, conflicts, weight
     }
 
-    init(v: [Float], n: Int, quality: Float, updated: Date, conflicts: Int = 0) {
+    init(v: [Float], n: Int, quality: Float, updated: Date, conflicts: Int = 0, weight: Float? = nil) {
         self.v = v
         self.n = n
         self.quality = quality
         self.updated = updated
         self.conflicts = conflicts
+        self.weight = weight ?? Float(n)
     }
 
     init(from decoder: Decoder) throws {
@@ -152,6 +163,7 @@ struct VoiceCentroid: Codable, Equatable, Sendable {
         self.quality = try container.decode(Float.self, forKey: .quality)
         self.updated = try container.decode(Date.self, forKey: .updated)
         self.conflicts = try container.decodeIfPresent(Int.self, forKey: .conflicts) ?? 0
+        self.weight = try container.decodeIfPresent(Float.self, forKey: .weight) ?? Float(self.n)
     }
 }
 
@@ -230,12 +242,45 @@ struct VoiceprintThresholds: Codable, Equatable, Sendable {
 
     static let defaultsKey = "voiceprintThresholds"
 
+    /// 임계값 유효성 검사 (오류 메시지 목록 반환, 비어있으면 유효)
+    func validate() -> [String] {
+        var errors: [String] = []
+        if matchThreshold < 0.0 || matchThreshold > 2.0 {
+            errors.append("matchThreshold must be between 0.0 and 2.0")
+        }
+        if mergeThreshold < 0.0 || mergeThreshold > 2.0 || mergeThreshold > matchThreshold {
+            errors.append("mergeThreshold must be between 0.0 and 2.0 and <= matchThreshold")
+        }
+        if margin < 0.0 || margin > 2.0 {
+            errors.append("margin must be between 0.0 and 2.0")
+        }
+        if minQuality < 0.0 || minQuality > 1.0 {
+            errors.append("minQuality must be between 0.0 and 1.0")
+        }
+        if minEnrollSeconds <= 0.0 {
+            errors.append("minEnrollSeconds must be > 0.0")
+        }
+        if maxCentroids < 1 || maxCentroids > 5 {
+            errors.append("maxCentroids must be between 1 and 5")
+        }
+        if conflictLimit < 1 {
+            errors.append("conflictLimit must be >= 1")
+        }
+        return errors
+    }
+
     static func load(defaults: UserDefaults = .standard) -> VoiceprintThresholds {
         guard let data = defaults.data(forKey: defaultsKey) else {
             return VoiceprintThresholds()
         }
         do {
-            return try JSONDecoder().decode(VoiceprintThresholds.self, from: data)
+            let decoded = try JSONDecoder().decode(VoiceprintThresholds.self, from: data)
+            let errors = decoded.validate()
+            if !errors.isEmpty {
+                AppLog.write("voice", "Invalid voiceprintThresholds in defaults (\(errors.joined(separator: ", "))), using defaults")
+                return VoiceprintThresholds()
+            }
+            return decoded
         } catch {
             AppLog.write("voice", "Failed to decode voiceprintThresholds, using defaults: \(error.localizedDescription)")
             return VoiceprintThresholds()
@@ -266,20 +311,24 @@ enum VoiceprintError: LocalizedError, Equatable {
     case unreadable(String)
     case corrupt(String)
     case writeFailed(String)
+    case readOnly(String)
     case personNotFound(String)
     case tooLittleAudio(seconds: Double)
     case lowQuality(Float)
     case sameDimensionRequired
+    case noValidSamples
 
     var errorDescription: String? {
         switch self {
         case .unreadable(let msg): return "Unreadable voiceprint file: \(msg)"
         case .corrupt(let msg): return "Corrupted voiceprint database: \(msg)"
         case .writeFailed(let msg): return "Failed to write voiceprint database: \(msg)"
+        case .readOnly(let msg): return "Voiceprint database is read-only: \(msg)"
         case .personNotFound(let id): return "Person not found: \(id)"
         case .tooLittleAudio(let seconds): return "Too little speech audio for enrollment: \(String(format: "%.1f", seconds))s"
         case .lowQuality(let q): return "Audio quality too low for enrollment: \(String(format: "%.2f", q))"
         case .sameDimensionRequired: return "Embedding dimensions must match"
+        case .noValidSamples: return "No valid audio samples for enrollment"
         }
     }
 }
@@ -291,6 +340,7 @@ enum VoiceprintError: LocalizedError, Equatable {
     var lastError: String? { get }
     func reload() throws
     func match(_ embedding: [Float]) -> VoiceMatch
+    func match(_ embedding: [Float], excludingMe: Bool) -> VoiceMatch
     /// 이름(+email)으로 기존 person을 찾거나 새로 만들고 중심을 갱신. 최소 발화·품질 미달이면 throw. 반환: 갱신된 Person.
     @discardableResult func enroll(name: String, email: String?, samples: [EnrollmentSample], source: VoiceSource, isMe: Bool) throws -> Person
     /// 성문 이름 != 확정 이름 충돌: 해당 person의 최근접 중심 conflicts += 1, conflictLimit 도달 시 그 중심 삭제. 반환: 삭제 여부.
@@ -300,4 +350,11 @@ enum VoiceprintError: LocalizedError, Equatable {
     func delete(id: String) throws
     func forgetAll() throws
     func person(named name: String) -> Person?   // name 또는 alias, case-insensitive
+}
+
+extension VoiceprintStoring {
+    /// 기본 match(_:)는 isMe 화자를 포함하여 매칭 (excludingMe: false)
+    func match(_ embedding: [Float]) -> VoiceMatch {
+        match(embedding, excludingMe: false)
+    }
 }

@@ -1,7 +1,7 @@
 import Foundation
 import FluidAudio
 
-/// 2-pass 전사 정제 — stop 시점에 세션 전체 오디오를 Parakeet으로 재디코딩.
+/// 2-pass 전사 정제: stop 시점에 세션 전체 오디오를 Parakeet으로 재디코딩.
 ///
 /// 라이브 경로는 짧은 창을 잘라 디코딩하므로 경계 잘림·구두점 아티팩트가 생긴다.
 /// 재디코딩은 전체 문맥을 한 번에 읽어(디스크 기반 청크 병합, FluidAudio) 더 정확한
@@ -17,7 +17,8 @@ enum TranscriptRefiner {
     static func refine(
         files: [AudioChannel: URL],
         liveRows: [TranscriptRow],
-        engine: TranscriptionEngine
+        engine: TranscriptionEngine,
+        diarization: OfflineDiarization? = nil
     ) async -> [TranscriptRow]? {
         var refined: [TranscriptRow] = []
         let started = Date()
@@ -29,6 +30,7 @@ enum TranscriptRefiner {
             let channelLive = liveRows.filter { $0.channel == channel }
             for sentence in split(timings) {
                 let donor = bestOverlap(start: sentence.start, end: sentence.end, in: channelLive)
+                let cluster = (channel == .them) ? (diarization?.dominantCluster(from: sentence.start, to: sentence.end) ?? donor?.clusterID) : donor?.clusterID
                 refined.append(TranscriptRow(
                     id: UUID(),
                     channel: channel,
@@ -37,7 +39,10 @@ enum TranscriptRefiner {
                     english: sentence.text,
                     korean: nil,
                     startSeconds: sentence.start,
-                    endSeconds: sentence.end
+                    endSeconds: sentence.end,
+                    nameSource: donor?.nameSource,
+                    candidateNames: donor?.candidateNames,
+                    clusterID: cluster
                 ))
             }
         }
@@ -47,7 +52,7 @@ enum TranscriptRefiner {
         let liveLength = liveRows.reduce(0) { $0 + $1.english.count }
         let refinedLength = refined.reduce(0) { $0 + $1.english.count }
         guard refinedLength * 2 >= liveLength else {
-            AppLog.write("app", "2-pass 품질 가드 발동 (live=\(liveLength)자 refined=\(refinedLength)자) — 라이브 전사 유지")
+            AppLog.write("app", "2-pass 품질 가드 발동 (live=\(liveLength)자 refined=\(refinedLength)자) - 라이브 전사 유지")
             return nil
         }
 
@@ -69,8 +74,21 @@ enum TranscriptRefiner {
         // 채널 간 에코 중복 제거 (마이크 WAV는 게이트 없이 재디코딩되므로 여기서 걸러야 함)
         // + 구두점만 남은 빈 행 제거
         let deduped = EchoDedup.removeEchoRows(refined)
-        AppLog.write("app", "2-pass 재디코딩 \(String(format: "%.1f", Date().timeIntervalSince(started)))s — rows \(liveRows.count)→\(deduped.rows.count) (에코·빈행 \(deduped.removed)개 제거), \(liveLength)→\(refinedLength)자")
-        return deduped.rows
+        let finalRows = assignClusters(rows: deduped.rows, diarization: diarization)
+        AppLog.write("app", "2-pass 재디코딩 \(String(format: "%.1f", Date().timeIntervalSince(started)))s - rows \(liveRows.count)→\(finalRows.count) (에코·빈행 \(deduped.removed)개 제거), \(liveLength)→\(refinedLength)자")
+        return finalRows
+    }
+
+    /// them 채널 정제 행에 다이어라이제이션 클러스터 ID 할당
+    static func assignClusters(rows: [TranscriptRow], diarization: OfflineDiarization?) -> [TranscriptRow] {
+        guard let diarization else { return rows }
+        return rows.map { row in
+            var updated = row
+            if row.channel == .them {
+                updated.clusterID = diarization.dominantCluster(from: row.startSeconds, to: row.endSeconds)
+            }
+            return updated
+        }
     }
 
     // MARK: - 문장 분리 (토큰 타임스탬프 기반)
@@ -121,11 +139,11 @@ enum TranscriptRefiner {
 
     // MARK: - 시간 겹침 매칭
 
-    private static func overlap(_ aStart: Double, _ aEnd: Double, _ bStart: Double, _ bEnd: Double) -> Double {
+    static func overlap(_ aStart: Double, _ aEnd: Double, _ bStart: Double, _ bEnd: Double) -> Double {
         max(0, min(aEnd, bEnd) - max(aStart, bStart))
     }
 
-    private static func bestOverlap(start: Double, end: Double, in rows: [TranscriptRow]) -> TranscriptRow? {
+    static func bestOverlap(start: Double, end: Double, in rows: [TranscriptRow]) -> TranscriptRow? {
         rows.max { lhs, rhs in
             overlap(start, end, lhs.startSeconds, lhs.endSeconds)
                 < overlap(start, end, rhs.startSeconds, rhs.endSeconds)

@@ -39,6 +39,24 @@ struct SavedMeeting: Codable {
     var attendees: [Attendee]? = nil
 }
 
+/// 회의 저장소 관련 오류.
+enum MeetingStoreError: LocalizedError, Equatable {
+    case emptyRows
+    case meetingNotFound
+    case writeFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .emptyRows:
+            return "Cannot save meeting with empty transcript."
+        case .meetingNotFound:
+            return "Meeting not found."
+        case .writeFailed(let message):
+            return "Failed to save meeting: \(message)"
+        }
+    }
+}
+
 /// 회의 저장소 — `~/Documents/livenote2/` 아래 회의별 폴더.
 ///
 /// 각 회의 폴더 구성:
@@ -125,6 +143,7 @@ final class MeetingStore {
     // MARK: - 저장
 
     /// 회의를 저장하고 폴더 URL을 반환. existingURL이 있으면 같은 폴더에 덮어씀(이름 변경·늦은 번역 반영).
+    @discardableResult
     func save(
         rows: [TranscriptRow],
         myName: String,
@@ -135,8 +154,11 @@ final class MeetingStore {
         summary: String?,
         attendees: [Attendee]?,
         existingURL: URL?
-    ) -> URL? {
-        guard !rows.isEmpty else { return existingURL }
+    ) throws -> URL {
+        guard !rows.isEmpty else {
+            if let existingURL { return existingURL }
+            throw MeetingStoreError.emptyRows
+        }
 
         let folder: URL
         if let existingURL {
@@ -156,13 +178,9 @@ final class MeetingStore {
             attendees: attendees
         )
 
-        do {
-            try writeAll(meeting, to: folder)
-            refresh()
-            return folder
-        } catch {
-            return existingURL
-        }
+        try writeAll(meeting, to: folder)
+        refresh()
+        return folder
     }
 
     /// 채널 간 에코 중복·빈 행 소급 정리 (v1.3.1, 2-pass 도입 이후 저장본 대상, 1회).
@@ -238,6 +256,17 @@ final class MeetingStore {
         guard var meeting = load(url) else { return }
         meeting.summary = summary
         try? writeAll(meeting, to: url)
+    }
+
+    /// 저장된 회의의 rows 및 speakerNames 갱신 (다이어라이제이션 완료 후 소급 반영용).
+    func updateRows(at url: URL, rows: [TranscriptRow], speakerNames: [Int: String]) throws {
+        guard var meeting = load(url) else {
+            throw MeetingStoreError.meetingNotFound
+        }
+        meeting.rows = rows
+        meeting.speakerNames = speakerNames
+        try writeAll(meeting, to: url)
+        refresh()
     }
 
     private func writeAll(_ meeting: SavedMeeting, to folder: URL) throws {

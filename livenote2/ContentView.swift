@@ -471,6 +471,8 @@ struct MeetingDetailView: View {
     @State private var meeting: SavedMeeting?
     @State private var showTranscript = false
     @State private var selectedRecipe: Recipe?
+    @State private var editingRowID: UUID?
+    @State private var popoverError: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -481,6 +483,11 @@ struct MeetingDetailView: View {
                     VStack(alignment: .leading, spacing: 16) {
                         Text(meeting.title ?? MeetingStore.resolveTitleFallback(meeting))
                             .font(.system(size: 24, weight: .bold, design: .serif))
+
+                        SpeakersSummaryLine(stats: SpeakerSummary.speakerStats(rows: meeting.rows, resolve: { row in
+                            MeetingStore.resolveName(row: row, myName: meeting.myName, speakerNames: meeting.speakerNames)
+                        }))
+
                         metaLine(meeting)
 
                         if app.summaryPhase == .generating {
@@ -612,8 +619,39 @@ struct MeetingDetailView: View {
     private func transcriptRow(_ row: TranscriptRow, meeting: SavedMeeting) -> some View {
         let name = MeetingStore.resolveName(row: row, myName: meeting.myName, speakerNames: meeting.speakerNames)
         let color = LiveMeetingView.chipColor(channel: row.channel, slot: row.speakerSlot, name: row.speakerName)
+        let icon = SpeakerChipLabel.icon(for: row.nameSource)
+
         return HStack(alignment: .top, spacing: 10) {
-            SpeakerChipLabel(name: name, color: color)
+            Button {
+                editingRowID = row.id
+            } label: {
+                SpeakerChipLabel(name: name, color: color, icon: icon)
+            }
+            .buttonStyle(.plain)
+            .help("Click to rename speaker")
+            .popover(isPresented: Binding(
+                get: { editingRowID == row.id },
+                set: { if !$0 { editingRowID = nil; popoverError = nil } }
+            )) {
+                let candidates = row.candidateNames ?? []
+                SpeakerNamePopover(
+                    row: row,
+                    currentName: name,
+                    candidates: candidates,
+                    allowRememberVoice: false,
+                    errorMessage: popoverError
+                ) { newName, _ in
+                    switch app.renameSavedSpeaker(meetingURL: url, row: row, name: newName) {
+                    case .success(let updated):
+                        self.meeting = updated
+                        self.popoverError = nil
+                        self.editingRowID = nil
+                    case .failure(let error):
+                        self.popoverError = error.localizedDescription
+                    }
+                }
+            }
+
             VStack(alignment: .leading, spacing: 4) {
                 Text(row.english)
                     .font(.callout)
@@ -843,6 +881,7 @@ struct LiveMeetingView: View {
     @Environment(AppState.self) private var app
     @State private var editingRowID: UUID?
     @State private var draftName: String = ""
+    @State private var rememberVoice: Bool = true
 
     static let slotColors: [Color] = [
         .green, .orange, .purple, .pink, .teal, .indigo, .mint, .brown,
@@ -1051,77 +1090,34 @@ struct LiveMeetingView: View {
     private func speakerChip(for row: TranscriptRow) -> some View {
         let name = app.displayName(for: row)
         let color = Self.chipColor(channel: row.channel, slot: row.speakerSlot, name: row.speakerName)
-        if row.speakerName != nil {
-            SpeakerChipLabel(name: name, color: color)
-                .help("Auto-recognized from Zoom")
-        } else {
-            Button {
-                draftName = name
-                editingRowID = row.id
-            } label: {
-                SpeakerChipLabel(name: name, color: color)
-            }
-            .buttonStyle(.plain)
-            .help("Click to rename speaker")
-            .popover(isPresented: Binding(
-                get: { editingRowID == row.id },
-                set: { if !$0 { editingRowID = nil } }
-            )) {
-                renamePopover(for: row)
+        let icon = SpeakerChipLabel.icon(for: row.nameSource)
+        let existingCandidates = row.candidateNames ?? []
+        let extraCandidates = app.attendeeCandidates.filter { !existingCandidates.contains($0) }
+        let candidates = existingCandidates + extraCandidates
+
+        Button {
+            draftName = name
+            rememberVoice = true
+            editingRowID = row.id
+        } label: {
+            SpeakerChipLabel(name: name, color: color, icon: icon)
+        }
+        .buttonStyle(.plain)
+        .help("Click to rename speaker")
+        .popover(isPresented: Binding(
+            get: { editingRowID == row.id },
+            set: { if !$0 { editingRowID = nil } }
+        )) {
+            SpeakerNamePopover(
+                row: row,
+                currentName: name,
+                candidates: candidates,
+                rememberVoice: $rememberVoice
+            ) { newName, remember in
+                app.setSpeakerName(row: row, name: newName, rememberVoice: remember)
+                editingRowID = nil
             }
         }
-    }
-
-    private func renamePopover(for row: TranscriptRow) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(row.channel == .me ? "My name" : "Speaker name")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            TextField("Name", text: $draftName)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 200)
-                .onSubmit { commitRename(for: row) }
-
-            if row.channel == .them, !app.attendeeCandidates.isEmpty {
-                Divider()
-                Text("Calendar attendees")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                ForEach(app.attendeeCandidates.prefix(8), id: \.self) { candidate in
-                    Button {
-                        draftName = candidate
-                        commitRename(for: row)
-                    } label: {
-                        Label(candidate, systemImage: "person.crop.circle")
-                            .font(.callout)
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(Theme.accent)
-                }
-            }
-
-            HStack {
-                Spacer()
-                Button("Save") { commitRename(for: row) }
-                    .keyboardShortcut(.defaultAction)
-            }
-        }
-        .padding(12)
-    }
-
-    private func commitRename(for row: TranscriptRow) {
-        let name = draftName.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !name.isEmpty {
-            switch row.channel {
-            case .me:
-                app.renameMe(to: name)
-            case .them:
-                if let slot = row.speakerSlot {
-                    app.renameSpeaker(slot: slot, to: name)
-                }
-            }
-        }
-        editingRowID = nil
     }
 
     static func chipColor(channel: AudioChannel, slot: Int?, name: String? = nil) -> Color {
@@ -1510,22 +1506,6 @@ struct GeminiKeySheet: View {
 
 // MARK: - 공용 소품
 
-struct SpeakerChipLabel: View {
-    let name: String
-    let color: Color
-
-    var body: some View {
-        Text(name)
-            .font(.caption.weight(.semibold))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
-            .background(color.opacity(0.15))
-            .foregroundStyle(color)
-            .clipShape(Capsule())
-            .frame(minWidth: 64, alignment: .leading)
-    }
-}
-
 struct BannerView: View {
     let text: String
     let color: Color
@@ -1730,6 +1710,10 @@ struct SettingsView: View {
                     ))
                     Divider().padding(.vertical, 4)
                     BriefSettingsRows(controller: app.briefing)
+                }
+
+                settingsCard("Speakers") {
+                    SpeakersSettingsCard(store: app.voiceprints)
                 }
 
                 settingsCard("Recipes") {

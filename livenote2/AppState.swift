@@ -11,6 +11,61 @@ private let meetingAppBundleIDs: Set<String> = [
     "Cisco-Systems.Spark",      // Webex
 ]
 
+/// 2-pass 다이어라이제이션 완료 경로를 위한 세션 스냅샷 (불변)
+struct TwoPassSnapshot: Sendable {
+    let sessionID: UUID
+    var meetingURL: URL?
+    let startedAt: Date
+    var rows: [TranscriptRow]
+    var speakerNames: [Int: String]
+    let manualSlots: Set<Int>
+    let queuedManualEnrollments: [Int: String]
+    let attendees: [Attendee]
+    let myName: String
+    let fallbackName: String?
+
+    init(
+        sessionID: UUID,
+        meetingURL: URL?,
+        startedAt: Date,
+        rows: [TranscriptRow],
+        speakerNames: [Int: String],
+        manualSlots: Set<Int>,
+        queuedManualEnrollments: [Int: String],
+        attendees: [Attendee],
+        myName: String,
+        fallbackName: String?
+    ) {
+        self.sessionID = sessionID
+        self.meetingURL = meetingURL
+        self.startedAt = startedAt
+        self.rows = rows
+        self.speakerNames = speakerNames
+        self.manualSlots = manualSlots
+        self.queuedManualEnrollments = queuedManualEnrollments
+        self.attendees = attendees
+        self.myName = myName
+        self.fallbackName = fallbackName
+    }
+}
+
+/// 2-pass 백그라운드 파이프라인 작업 컨텍스트 (AppState 강참조 방지)
+struct TwoPassJob: Sendable {
+    var snapshot: TwoPassSnapshot
+    let recorderRef: SessionAudioRecorder?
+    let engineRef: TranscriptionEngine?
+    let diarizerRef: SpeakerDiarizer?
+    let geminiRef: GeminiLiveTranslator
+    let offlineDiarizer: OfflineDiarizer
+    let voiceprints: VoiceprintStore
+    let meetingStore: MeetingStore
+    let promoter: LiveVoicePromoter
+    let thresholds: VoiceprintThresholds
+    let zoomNameLookup: @Sendable (TranscriptRow) -> String?
+    let fallbackName: String?
+    let myName: String
+}
+
 /// 앱 전체 상태와 파이프라인 배선.
 /// 오디오 콜백(오디오 스레드) → AsyncStream → 엔진/화자구분(actor) → 콜백 → MainActor UI 갱신.
 /// 회의가 끝나면 MeetingStore를 통해 ~/Documents/livenote2/ 에 저장됩니다 (오디오 미저장).
@@ -141,6 +196,17 @@ final class AppState {
     let briefing: BriefingController
     var isRecipeRunning = false
     var lastRecipeError: String?
+
+    /// 성문 저장소 (Phase 3 Speaker Memory)
+    let voiceprints = VoiceprintStore()
+    /// 2-pass 오프라인 다이어라이저
+    @ObservationIgnored let offlineDiarizer: OfflineDiarizer
+    /// 라이브 화자 승격 프로모터
+    @ObservationIgnored let livePromoter: LiveVoicePromoter
+    /// 라이브 화자 승격 세대 번호 (세션 교체 시 이전 콜백 무시용)
+    @ObservationIgnored private(set) var livePromoterGeneration: Int = 0
+    /// 마지막 회의의 오프라인 다이어라이제이션 결과
+    @ObservationIgnored var lastDiarization: OfflineDiarization?
 
     let geminiKey = GeminiKeyController()
 
@@ -529,6 +595,9 @@ final class AppState {
     /// 현재(또는 마지막) 세션의 시작 방식. 대면 모드 배지·경로 분기에 사용.
     private(set) var currentStartMode: StartMode = .online
 
+    /// 고유 세션 ID (start()마다 새로 발급되어 2-pass 완료 시 현재 세션 여부 판별에 사용).
+    private(set) var sessionID = UUID()
+
     /// 방금 끝난 회의가 저장된 폴더 (중지 후 이름 변경·늦은 번역 도착 시 재저장 대상).
     private(set) var currentMeetingURL: URL?
 
@@ -590,6 +659,11 @@ final class AppState {
     // MARK: - 초기화 (설정 복원)
 
     init() {
+        let offlineDiarizer = OfflineDiarizer(engine: FluidOfflineEngine())
+        self.offlineDiarizer = offlineDiarizer
+        let promoter = LiveVoicePromoter(diarizer: offlineDiarizer)
+        self.livePromoter = promoter
+
         let localChatRef = localChat
         let tasksRef = tasks
         let meetingStoreRef = meetingStore
@@ -605,6 +679,46 @@ final class AppState {
             },
             language: { LanguagePrefs.summaryLanguage }
         )
+
+        let promoterRef = promoter
+        Task {
+            await promoterRef.setOnEmbedding { [weak self] slot, emb, secs, gen in
+                Task { @MainActor in
+                    guard let self, self.isRunning, self.livePromoterGeneration == gen else { return }
+                    let m = self.voiceprints.match(emb, excludingMe: true)
+                    if m.confident, let person = m.person, !person.isMe {
+                        let (updatedRows, renamed) = Self.applyLivePromotion(
+                            rows: self.rows,
+                            slot: slot,
+                            name: person.name,
+                            manualSlots: self.manualSlots
+                        )
+                        if renamed {
+                            self.rows = updatedRows
+                            self.renameSpeaker(slot: slot, to: person.name)
+                            AppLog.write("voice", "Live promoter matched slot \(slot) to '\(person.name)' (d1=\(String(format: "%.3f", m.d1)), d2=\(String(format: "%.3f", m.d2)), secs=\(String(format: "%.1f", secs)))")
+                        } else {
+                            AppLog.write("voice", "Live promoter skipped slot \(slot) for '\(person.name)' due to manual override")
+                        }
+                    } else if !m.confident {
+                        let candidateNames = Array(m.candidates.filter { !$0.isMe }.prefix(2).map(\.name))
+                        if !candidateNames.isEmpty {
+                            let (updatedRows, updated) = Self.applyLiveCandidates(
+                                rows: self.rows,
+                                slot: slot,
+                                candidates: candidateNames,
+                                manualSlots: self.manualSlots
+                            )
+                            if updated {
+                                self.rows = updatedRows
+                                self.scheduleResave()
+                                AppLog.write("voice", "Live promoter set candidate names \(candidateNames) for slot \(slot) (ambiguous match d1=\(String(format: "%.3f", m.d1)), d2=\(String(format: "%.3f", m.d2)))")
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         LanguagePrefs.migrateSummaryLanguageDefault()
         refreshGeminiKeyStatus()
@@ -778,6 +892,647 @@ final class AppState {
         scheduleResave()
     }
 
+    private(set) var manualSlots: Set<Int> = []
+
+    func markSlotManual(_ slot: Int) {
+        manualSlots.insert(slot)
+    }
+
+    /// 라이브 화자 승격 적용 (수동 설정 보호 및 voice 태그 부여)
+    static func applyLivePromotion(
+        rows: [TranscriptRow],
+        slot: Int,
+        name: String,
+        manualSlots: Set<Int>
+    ) -> (rows: [TranscriptRow], renamed: Bool) {
+        if manualSlots.contains(slot) {
+            return (rows, false)
+        }
+        let hasManualRow = rows.contains { r in
+            r.channel == .them && r.speakerSlot == slot && r.nameSource == .manual
+        }
+        if hasManualRow {
+            return (rows, false)
+        }
+
+        var updatedRows = rows
+        var didModify = false
+        for i in updatedRows.indices {
+            if updatedRows[i].channel == .them && updatedRows[i].speakerSlot == slot {
+                let currentSource = updatedRows[i].nameSource
+                if currentSource == nil || currentSource == .slot || currentSource == .voice {
+                    updatedRows[i].speakerName = name
+                    updatedRows[i].nameSource = .voice
+                    updatedRows[i].candidateNames = nil
+                    didModify = true
+                }
+            }
+        }
+        return (updatedRows, didModify)
+    }
+
+    /// 라이브 모호 매칭 시 후보군 제안 (수동/voice 미설정 행에 candidateNames만 설정, 이름은 미변경)
+    static func applyLiveCandidates(
+        rows: [TranscriptRow],
+        slot: Int,
+        candidates: [String],
+        manualSlots: Set<Int>
+    ) -> (rows: [TranscriptRow], updated: Bool) {
+        if manualSlots.contains(slot) {
+            return (rows, false)
+        }
+        let hasManualRow = rows.contains { r in
+            r.channel == .them && r.speakerSlot == slot && r.nameSource == .manual
+        }
+        if hasManualRow {
+            return (rows, false)
+        }
+
+        var updatedRows = rows
+        var didModify = false
+        for i in updatedRows.indices {
+            if updatedRows[i].channel == .them && updatedRows[i].speakerSlot == slot {
+                let currentSource = updatedRows[i].nameSource
+                if currentSource != .manual && currentSource != .voice {
+                    updatedRows[i].candidateNames = candidates
+                    didModify = true
+                }
+            }
+        }
+        return (updatedRows, didModify)
+    }
+
+    private var queuedManualEnrollments: [Int: String] = [:]
+
+    func setSpeakerName(row: TranscriptRow, name: String, rememberVoice: Bool) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        if row.channel == .me {
+            renameMe(to: trimmed)
+            return
+        }
+
+        if let slot = row.speakerSlot {
+            markSlotManual(slot)
+        }
+
+        // rows 갱신 (해당 슬롯/클러스터/행을 모두 .manual로 설정)
+        for i in 0..<rows.count {
+            guard rows[i].channel == .them else { continue }
+            let matchesSlot = (row.speakerSlot != nil && rows[i].speakerSlot == row.speakerSlot)
+            let matchesCluster = (row.clusterID != nil && rows[i].clusterID == row.clusterID)
+            let matchesID = (rows[i].id == row.id)
+
+            if matchesSlot || matchesCluster || matchesID {
+                rows[i].speakerName = trimmed
+                rows[i].nameSource = .manual
+                rows[i].candidateNames = nil
+            }
+        }
+
+        if let slot = row.speakerSlot {
+            renameSpeaker(slot: slot, to: trimmed)
+        } else {
+            scheduleResave()
+        }
+
+        // 성문 기억 (rememberVoice)
+        if rememberVoice {
+            if let diarization = lastDiarization {
+                // 이미 오프라인 다이어라이제이션 결과가 있는 경우 즉시 등록
+                let clusterID = row.clusterID ?? diarization.dominantCluster(from: row.startSeconds, to: row.endSeconds)
+                if let clusterID {
+                    let memory = SpeakerMemory(store: voiceprints)
+                    let report = memory.enroll(
+                        rows: rows,
+                        diarization: diarization,
+                        confirmedNames: [clusterID: trimmed],
+                        emails: [:],
+                        source: .manual
+                    )
+                    for l in report.log {
+                        AppLog.write("voice", l)
+                    }
+                    if let error = voiceprints.lastError {
+                        noticeMessage = "Speaker memory error: \(error)"
+                    } else if !report.enrolled.isEmpty {
+                        noticeMessage = "Saved voiceprint for '\(trimmed)'."
+                    }
+                }
+            } else {
+                // 라이브 진행 중: 회의 종료(stop) 시 오프라인 다이어라이제이션 후 등록되도록 대기
+                if let slot = row.speakerSlot {
+                    queuedManualEnrollments[slot] = trimmed
+                }
+            }
+        }
+    }
+
+    /// 저장된 회의 행들에서 대상 행과 일치하는 화자의 이름과 출처(.manual)를 갱신하는 순수 함수
+    static func rewriteSavedMeetingRows(
+        rows: [TranscriptRow],
+        targetRow: TranscriptRow,
+        newName: String
+    ) -> [TranscriptRow] {
+        SpeakerMemory.rewriteSavedSpeakerRows(rows: rows, target: targetRow, name: newName)
+    }
+
+    /// 저장된 회의 상세 화면에서 화자 이름 변경 (디스크의 session.json 및 md 파일 갱신, 라이브 상태 및 성문 등록 미수행)
+    @discardableResult
+    func renameSavedSpeaker(meetingURL: URL, row: TranscriptRow, name: String) -> Result<SavedMeeting, Error> {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            if let loaded = meetingStore.load(meetingURL) {
+                return .success(loaded)
+            }
+            return .failure(MeetingStoreError.meetingNotFound)
+        }
+        guard var saved = meetingStore.load(meetingURL) else {
+            return .failure(MeetingStoreError.meetingNotFound)
+        }
+
+        if row.channel == .me {
+            saved.myName = trimmed
+        } else if let slot = row.speakerSlot {
+            saved.speakerNames[slot] = trimmed
+        }
+
+        saved.rows = SpeakerMemory.rewriteSavedSpeakerRows(rows: saved.rows, target: row, name: trimmed)
+
+        do {
+            _ = try meetingStore.save(
+                rows: saved.rows,
+                myName: saved.myName,
+                speakerNames: saved.speakerNames,
+                startedAt: saved.startedAt,
+                durationSeconds: saved.durationSeconds,
+                title: saved.title,
+                summary: saved.summary,
+                attendees: saved.attendees,
+                existingURL: meetingURL
+            )
+            return .success(saved)
+        } catch {
+            AppLog.write("app", "Failed to save renamed speaker: \(error.localizedDescription)")
+            return .failure(error)
+        }
+    }
+
+    public struct PendingDiarizationResult: Equatable, Sendable {
+        public let sessionID: UUID
+        public let meetingURL: URL
+        public let rows: [TranscriptRow]
+        public let names: [Int: String]
+        public let diarization: OfflineDiarization?
+
+        public init(
+            sessionID: UUID,
+            meetingURL: URL,
+            rows: [TranscriptRow],
+            names: [Int: String],
+            diarization: OfflineDiarization? = nil
+        ) {
+            self.sessionID = sessionID
+            self.meetingURL = meetingURL
+            self.rows = rows
+            self.names = names
+            self.diarization = diarization
+        }
+    }
+
+    var pendingDiarizationResults: [URL: PendingDiarizationResult] = [:]
+
+    static func retryPayload(
+        latest: SavedMeeting?,
+        pending: PendingDiarizationResult
+    ) -> (rows: [TranscriptRow], names: [Int: String])? {
+        guard let latest else { return nil }
+        return mergePreservingManual(
+            latest: latest.rows,
+            latestNames: latest.speakerNames,
+            computed: pending.rows,
+            computedNames: pending.names
+        )
+    }
+
+    @MainActor
+    func retryPendingDiarizationSave(for url: URL) {
+        guard let pending = pendingDiarizationResults[url] else { return }
+        let latest = meetingStore.load(url)
+        guard let (mergedRows, mergedNames) = Self.retryPayload(latest: latest, pending: pending) else {
+            AppLog.write("voice", "Retry updating saved meeting at \(url.lastPathComponent) failed: meeting folder not found")
+            noticeMessage = "Speaker recognition results could not be saved: meeting not found on disk"
+            return
+        }
+
+        do {
+            try meetingStore.updateRows(at: url, rows: mergedRows, speakerNames: mergedNames)
+            AppLog.write("voice", "Retried and successfully updated saved meeting at \(url.lastPathComponent)")
+            pendingDiarizationResults[url] = nil
+
+            if Self.shouldUpdateLiveState(current: self.sessionID, snapshot: pending.sessionID) {
+                self.rows = mergedRows
+                self.speakerNames = mergedNames
+                if let diarization = pending.diarization {
+                    self.lastDiarization = diarization
+                }
+                self.queuedManualEnrollments.removeAll()
+                self.noticeMessage = "Speaker recognition finished"
+            }
+        } catch {
+            AppLog.write("voice", "Retry updating saved meeting failed: \(error.localizedDescription)")
+            noticeMessage = "Speaker recognition results could not be saved: \(error.localizedDescription)"
+        }
+    }
+
+    @MainActor
+    func retryPendingDiarizationSave() {
+        let urls = Array(pendingDiarizationResults.keys)
+        for url in urls {
+            retryPendingDiarizationSave(for: url)
+        }
+    }
+
+    private func schedulePendingDiarizationRetry(for url: URL) {
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            guard let self, self.pendingDiarizationResults[url] != nil else { return }
+            self.retryPendingDiarizationSave(for: url)
+        }
+    }
+
+    /// WAV 임시 폴더 삭제 및 세션 정리 헬퍼 (하드 리밋 타임아웃 레이스 보호)
+    nonisolated static func runGuardedCleanup(
+        hardLimitSeconds: Double,
+        work: @Sendable @escaping () async -> Void,
+        deleteFiles: @Sendable @escaping () async -> Void,
+        markRetained: (@Sendable () async -> Void)? = nil,
+        onHardLimitExceeded: (@Sendable () -> Void)? = nil
+    ) async -> Bool {
+        let race = TimeoutRace<Void>()
+        _ = Task.detached(priority: .utility) {
+            await work()
+            await deleteFiles()
+            race.resolve(.finished(()))
+        }
+        let watchdogTask = Task.detached(priority: .utility) {
+            let nanos = UInt64(max(0.001, hardLimitSeconds) * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: nanos)
+            race.resolve(.timedOut)
+        }
+
+        let outcome = await race.wait()
+        watchdogTask.cancel()
+
+        switch outcome {
+        case .finished:
+            return true
+        case .timedOut:
+            if let markRetained {
+                await markRetained()
+            }
+            AppLog.write("voice", "Session audio retained because speaker recognition did not finish; it will be purged at next launch")
+            onHardLimitExceeded?()
+            return false
+        }
+    }
+
+    /// 세션 스냅샷 ID와 현재 세션 ID가 일치하는지 확인하여 라이브 UI 갱신 여부 판단
+    nonisolated static func shouldUpdateLiveState(current: UUID, snapshot: UUID) -> Bool {
+        current == snapshot
+    }
+
+    /// 온디스크 최신 상태의 수동 편집 화자명을 정제된 행에 적용
+    static func applyManualOverrides(
+        refined: [TranscriptRow],
+        latest: [TranscriptRow],
+        latestNames: [Int: String]
+    ) -> (rows: [TranscriptRow], names: [Int: String]) {
+        var manualRowOverridesByID: [UUID: TranscriptRow] = [:]
+        var manualSlots: Set<Int> = []
+        var manualClusters: Set<String> = []
+        var manualSlotNames: [Int: String] = [:]
+        var manualClusterNames: [String: String] = [:]
+        var manualRows: [TranscriptRow] = []
+
+        for row in latest where row.nameSource == .manual {
+            manualRowOverridesByID[row.id] = row
+            manualRows.append(row)
+            if let slot = row.speakerSlot {
+                manualSlots.insert(slot)
+                if let name = row.speakerName {
+                    manualSlotNames[slot] = name
+                }
+            }
+            if let cluster = row.clusterID {
+                manualClusters.insert(cluster)
+                if let name = row.speakerName {
+                    manualClusterNames[cluster] = name
+                }
+            }
+        }
+
+        for compRow in refined {
+            if let manualRow = manualRowOverridesByID[compRow.id] {
+                if let slot = compRow.speakerSlot {
+                    manualSlots.insert(slot)
+                    if let name = manualRow.speakerName {
+                        manualSlotNames[slot] = name
+                    }
+                }
+                if let cluster = compRow.clusterID {
+                    manualClusters.insert(cluster)
+                    if let name = manualRow.speakerName {
+                        manualClusterNames[cluster] = name
+                    }
+                }
+            }
+        }
+
+        var manualNames: [Int: String] = [:]
+        for slot in manualSlots {
+            if let name = latestNames[slot] ?? manualSlotNames[slot] {
+                manualNames[slot] = name
+            }
+        }
+
+        var resultRows: [TranscriptRow] = []
+        for var row in refined {
+            if let manualRow = manualRowOverridesByID[row.id] {
+                row.speakerName = manualRow.speakerName
+                row.nameSource = manualRow.nameSource
+                row.candidateNames = manualRow.candidateNames
+            } else if row.channel == .them {
+                var applied = false
+                if let slot = row.speakerSlot, manualSlots.contains(slot),
+                   let name = manualSlotNames[slot] ?? latestNames[slot] {
+                    row.speakerName = name
+                    row.nameSource = .manual
+                    row.candidateNames = nil
+                    applied = true
+                } else if let cluster = row.clusterID, manualClusters.contains(cluster),
+                          let name = manualClusterNames[cluster] {
+                    row.speakerName = name
+                    row.nameSource = .manual
+                    row.candidateNames = nil
+                    applied = true
+                }
+
+                if !applied {
+                    let rowDuration = row.endSeconds - row.startSeconds
+                    if rowDuration > 0 {
+                        var bestOverlap: Double = 0
+                        var bestManualRow: TranscriptRow? = nil
+                        for m in manualRows where m.channel == row.channel {
+                            let overlap = max(0.0, min(m.endSeconds, row.endSeconds) - max(m.startSeconds, row.startSeconds))
+                            if overlap >= 0.5 * rowDuration && overlap > bestOverlap {
+                                bestOverlap = overlap
+                                bestManualRow = m
+                            }
+                        }
+                        if let bestManualRow, let name = bestManualRow.speakerName {
+                            row.speakerName = name
+                            row.nameSource = .manual
+                            row.candidateNames = nil
+                        }
+                    }
+                }
+            }
+            resultRows.append(row)
+        }
+
+        return (resultRows, manualNames)
+    }
+
+    /// 온디스크 최신 상태와 다이어라이제이션 계산 결과를 병합하여 수동 편집된 화자명을 보존
+    static func mergePreservingManual(
+        latest: [TranscriptRow],
+        latestNames: [Int: String],
+        computed: [TranscriptRow],
+        computedNames: [Int: String]
+    ) -> (rows: [TranscriptRow], names: [Int: String]) {
+        let (overriddenRows, manualNames) = applyManualOverrides(
+            refined: computed,
+            latest: latest,
+            latestNames: latestNames
+        )
+        var mergedNames = computedNames
+        for (slot, name) in manualNames {
+            mergedNames[slot] = name
+        }
+        return (overriddenRows, mergedNames)
+    }
+
+    enum DiarizationSaveDecision: Equatable {
+        case success(rows: [TranscriptRow], names: [Int: String], shouldUpdateLive: Bool)
+        case failure(meetingURL: URL, rows: [TranscriptRow], names: [Int: String], errorDescription: String)
+    }
+
+    static func decideDiarizationCompletion(
+        snapshot: TwoPassSnapshot,
+        currentSessionID: UUID,
+        latestMeeting: SavedMeeting?,
+        computedRows: [TranscriptRow],
+        computedNames: [Int: String]
+    ) -> DiarizationSaveDecision {
+        guard let meetingURL = snapshot.meetingURL else {
+            let shouldUpdate = shouldUpdateLiveState(current: currentSessionID, snapshot: snapshot.sessionID)
+            return .success(rows: computedRows, names: computedNames, shouldUpdateLive: shouldUpdate)
+        }
+        guard let latest = latestMeeting else {
+            return .failure(
+                meetingURL: meetingURL,
+                rows: computedRows,
+                names: computedNames,
+                errorDescription: "meeting not found on disk"
+            )
+        }
+        let (mergedRows, mergedNames) = mergePreservingManual(
+            latest: latest.rows,
+            latestNames: latest.speakerNames,
+            computed: computedRows,
+            computedNames: computedNames
+        )
+        let shouldUpdate = shouldUpdateLiveState(current: currentSessionID, snapshot: snapshot.sessionID)
+        return .success(rows: mergedRows, names: mergedNames, shouldUpdateLive: shouldUpdate)
+    }
+
+    /// 다이어라이제이션 결과를 스냅샷 데이터에 순수하게 적용 (클러스터 배정, 화자 명명, 성문 등록)
+    static func applyDiarizationResult(
+        snapshot: TwoPassSnapshot,
+        diarization: OfflineDiarization,
+        memory: SpeakerMemory,
+        zoomName: (TranscriptRow) -> String?,
+        fallbackName: String?
+    ) -> (rows: [TranscriptRow], speakerNames: [Int: String], report: EnrollmentReport, log: [String]) {
+        let clustered = TranscriptRefiner.assignClusters(rows: snapshot.rows, diarization: diarization)
+        let (namedRows, _, memoryLogs) = memory.assignNames(
+            rows: clustered,
+            diarization: diarization,
+            zoomName: zoomName,
+            fallbackName: fallbackName,
+            existingSlotNames: snapshot.speakerNames
+        )
+
+        var confirmed = memory.confirmedNames(rows: namedRows, diarization: diarization)
+        for (slot, name) in snapshot.queuedManualEnrollments {
+            if let cluster = namedRows.first(where: { $0.speakerSlot == slot })?.clusterID {
+                if confirmed[cluster] == nil {
+                    confirmed[cluster] = name
+                }
+            }
+        }
+
+        var enrollReport = EnrollmentReport()
+        if !confirmed.isEmpty {
+            enrollReport = memory.enroll(
+                rows: namedRows,
+                diarization: diarization,
+                confirmedNames: confirmed,
+                emails: [:],
+                source: .zoom
+            )
+        }
+
+        var updatedSpeakerNames = snapshot.speakerNames
+        for (slot, name) in snapshot.queuedManualEnrollments {
+            updatedSpeakerNames[slot] = name
+        }
+
+        let allLogs = memoryLogs + enrollReport.log
+        return (namedRows, updatedSpeakerNames, enrollReport, allLogs)
+    }
+
+    /// AppState가 deinit된 경우에도 디스크 저장 완료를 보장하는 순수 디스크 전용 저장 헬퍼
+    static func applyDiarizationToDiskOnly(
+        snapshot: TwoPassSnapshot,
+        diarization: OfflineDiarization,
+        meetingStore: MeetingStore,
+        voiceprints: VoiceprintStore,
+        zoomName: (TranscriptRow) -> String?,
+        fallbackName: String?
+    ) {
+        let memory = SpeakerMemory(store: voiceprints)
+        let (namedRows, updatedSpeakerNames, enrollReport, logs) = applyDiarizationResult(
+            snapshot: snapshot,
+            diarization: diarization,
+            memory: memory,
+            zoomName: zoomName,
+            fallbackName: fallbackName
+        )
+        for l in logs {
+            AppLog.write("voice", l)
+        }
+        for err in enrollReport.errors {
+            AppLog.write("voice", "Enrollment error: \(err)")
+        }
+        if let meetingURL = snapshot.meetingURL {
+            guard let latestMeeting = meetingStore.load(meetingURL) else {
+                AppLog.write("voice", "Failed to reload saved meeting at \(meetingURL.lastPathComponent) after AppState deallocation")
+                return
+            }
+            let (mergedRows, mergedNames) = mergePreservingManual(
+                latest: latestMeeting.rows,
+                latestNames: latestMeeting.speakerNames,
+                computed: namedRows,
+                computedNames: updatedSpeakerNames
+            )
+            do {
+                try meetingStore.updateRows(at: meetingURL, rows: mergedRows, speakerNames: mergedNames)
+                AppLog.write("voice", "Updated saved meeting at \(meetingURL.lastPathComponent) after AppState deallocation")
+            } catch {
+                AppLog.write("voice", "Failed to update saved meeting at \(meetingURL.lastPathComponent) after AppState deallocation: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    @MainActor
+    private func applyDiarizationCompletion(
+        snapshot: TwoPassSnapshot,
+        diarization: OfflineDiarization,
+        zoomName: (TranscriptRow) -> String?,
+        fallbackName: String?
+    ) {
+        let memory = SpeakerMemory(store: self.voiceprints)
+        let (namedRows, updatedSpeakerNames, enrollReport, logs) = Self.applyDiarizationResult(
+            snapshot: snapshot,
+            diarization: diarization,
+            memory: memory,
+            zoomName: zoomName,
+            fallbackName: fallbackName
+        )
+
+        for l in logs {
+            AppLog.write("voice", l)
+        }
+        for err in enrollReport.errors {
+            AppLog.write("voice", "Enrollment error: \(err)")
+        }
+        if let error = self.voiceprints.lastError {
+            AppLog.write("voice", "Voiceprint store error: \(error)")
+        }
+
+        if let meetingURL = snapshot.meetingURL {
+            guard let latestMeeting = self.meetingStore.load(meetingURL) else {
+                let errorMsg = "Meeting folder not found on disk"
+                AppLog.write("voice", "Failed to reload saved meeting at \(meetingURL.lastPathComponent): \(errorMsg)")
+                self.pendingDiarizationResults[meetingURL] = PendingDiarizationResult(
+                    sessionID: snapshot.sessionID,
+                    meetingURL: meetingURL,
+                    rows: namedRows,
+                    names: updatedSpeakerNames,
+                    diarization: diarization
+                )
+                self.noticeMessage = "Speaker recognition results could not be saved: \(errorMsg)"
+                self.schedulePendingDiarizationRetry(for: meetingURL)
+                return
+            }
+
+            let (mergedRows, mergedNames) = Self.mergePreservingManual(
+                latest: latestMeeting.rows,
+                latestNames: latestMeeting.speakerNames,
+                computed: namedRows,
+                computedNames: updatedSpeakerNames
+            )
+
+            do {
+                try self.meetingStore.updateRows(at: meetingURL, rows: mergedRows, speakerNames: mergedNames)
+                AppLog.write("voice", "Updated saved meeting at \(meetingURL.lastPathComponent) with diarization results")
+                self.pendingDiarizationResults[meetingURL] = nil
+
+                if Self.shouldUpdateLiveState(current: self.sessionID, snapshot: snapshot.sessionID) {
+                    self.rows = mergedRows
+                    self.speakerNames = mergedNames
+                    self.lastDiarization = diarization
+                    self.queuedManualEnrollments.removeAll()
+                    self.noticeMessage = "Speaker recognition finished"
+                } else {
+                    AppLog.write("voice", "diarization for previous meeting applied to its saved folder only")
+                }
+            } catch {
+                AppLog.write("voice", "Failed to update saved meeting at \(meetingURL.lastPathComponent): \(error.localizedDescription)")
+                self.pendingDiarizationResults[meetingURL] = PendingDiarizationResult(
+                    sessionID: snapshot.sessionID,
+                    meetingURL: meetingURL,
+                    rows: mergedRows,
+                    names: mergedNames,
+                    diarization: diarization
+                )
+                self.noticeMessage = "Speaker recognition results could not be saved: \(error.localizedDescription)"
+                self.schedulePendingDiarizationRetry(for: meetingURL)
+            }
+        } else {
+            if Self.shouldUpdateLiveState(current: self.sessionID, snapshot: snapshot.sessionID) {
+                self.rows = namedRows
+                self.speakerNames = updatedSpeakerNames
+                self.lastDiarization = diarization
+                self.queuedManualEnrollments.removeAll()
+                self.noticeMessage = "Speaker recognition finished"
+            }
+        }
+    }
+
     // MARK: - 에코 필터 토글
 
     func setEchoFilter(_ enabled: Bool) {
@@ -938,6 +1693,8 @@ final class AppState {
 
     func start(mode: StartMode = .online) {
         guard !isActive else { return }
+        SessionAudioRecorder.purgeStale()
+        sessionID = UUID()
         currentStartMode = mode
         briefing.beginSession(item: calendar.ongoingUpcomingItem())
         phase = .preparing("Preparing…")
@@ -958,6 +1715,9 @@ final class AppState {
         micMutedByZoom = false
         zoomTagMessage = nil
         captureStartedAt = nil
+        queuedManualEnrollments.removeAll()
+        manualSlots.removeAll()
+        lastDiarization = nil
         // 진행 중인 캘린더 일정의 참석자 → 화자 이름 원클릭 후보, 제목 → 회의 이름.
         // 제목과 참석자가 다른 일정에서 섞이지 않도록 한 번의 호출로 같은 일정에서 가져온다.
         let context = calendar.ongoingMeetingContext()
@@ -1069,6 +1829,10 @@ final class AppState {
             await recorder.start()
             audioRecorder = recorder
 
+            let promoterRef = livePromoter
+            await promoterRef.reset()
+            self.livePromoterGeneration = await promoterRef.currentGeneration
+
             consumerTask = Task.detached(priority: .userInitiated) {
                 for await (channel, samples) in stream {
                     await newEngine.ingest(samples, channel: channel)
@@ -1086,6 +1850,17 @@ final class AppState {
                 diarizerConsumerTask = Task.detached(priority: .utility) {
                     for await samples in diarizerStream {
                         await diarizerRef?.ingest(samples)
+                        await promoterRef.append(samples: samples)
+                        let newSegments = await diarizerRef?.finalizedSegments() ?? []
+                        if !newSegments.isEmpty {
+                            var bySlot: [Int: [(start: Double, end: Double)]] = [:]
+                            for seg in newSegments {
+                                bySlot[seg.slot, default: []].append((start: seg.start, end: seg.end))
+                            }
+                            for (slot, segments) in bySlot {
+                                await promoterRef.noteSegments(slot: slot, segments: segments)
+                            }
+                        }
                     }
                 }
             }
@@ -1152,6 +1927,16 @@ final class AppState {
         }
     }
 
+    /// 본인(Me) 음성 등록 가능 여부 판정 (순수 함수)
+    nonisolated static func shouldEnrollMe(
+        didRefine: Bool,
+        alreadyEnrolled: Bool,
+        speechSeconds: Double,
+        minSeconds: Double
+    ) -> Bool {
+        return didRefine && !alreadyEnrolled && speechSeconds >= minSeconds
+    }
+
     func stop() {
         guard isRunning else { return }
         AppLog.write("app", "세션 중지 rows=\(rows.count)")
@@ -1180,43 +1965,357 @@ final class AppState {
             }
         }
 
+        let sessionStart = self.captureStartedAt ?? self.sessionStartedAt ?? Date()
+        let snapshot = TwoPassSnapshot(
+            sessionID: self.sessionID,
+            meetingURL: self.currentMeetingURL,
+            startedAt: sessionStart,
+            rows: self.rows,
+            speakerNames: self.speakerNames,
+            manualSlots: self.manualSlots,
+            queuedManualEnrollments: self.queuedManualEnrollments,
+            attendees: self.meetingAttendees,
+            myName: self.myName,
+            fallbackName: self.zoomTagger.fallbackOtherName()
+        )
+        let sessionStartCopy = sessionStart
+        let zoomTaggerRef = self.zoomTagger
+        let zoomNameLookup: @Sendable (TranscriptRow) -> String? = { [weak zoomTaggerRef] row in
+            MainActor.assumeIsolated {
+                zoomTaggerRef?.dominantName(
+                    fromSeconds: row.startSeconds,
+                    toSeconds: row.endSeconds,
+                    sessionStart: sessionStartCopy
+                )
+            }
+        }
+        let fallbackName = self.zoomTagger.fallbackOtherName()
+
         let engineRef = engine
         let diarizerRef = speakerDiarizer
         let geminiRef = gemini
         let recorderRef = audioRecorder
         audioRecorder = nil
-        Task {
-            await engineRef?.flushAll()
-            await diarizerRef?.finish()
-            teardownAudio()
+
+        let job = TwoPassJob(
+            snapshot: snapshot,
+            recorderRef: recorderRef,
+            engineRef: engineRef,
+            diarizerRef: diarizerRef,
+            geminiRef: geminiRef,
+            offlineDiarizer: self.offlineDiarizer,
+            voiceprints: self.voiceprints,
+            meetingStore: self.meetingStore,
+            promoter: self.livePromoter,
+            thresholds: self.voiceprints.thresholds,
+            zoomNameLookup: zoomNameLookup,
+            fallbackName: fallbackName,
+            myName: self.myName
+        )
+
+        Task { [weak self, job] in
+            var currentJob = job
+            await currentJob.engineRef?.flushAll()
+            await currentJob.diarizerRef?.finish()
+            await MainActor.run { [weak self] in
+                self?.teardownAudio()
+            }
             // 마지막 문장들의 번역이 도착할 시간을 준 뒤 저장
             try? await Task.sleep(nanoseconds: 3_000_000_000)
-            await geminiRef.stop()
-            persistCurrentSession()   // 1차 저장 (라이브 전사 — 즉시 열람 가능)
+            await currentJob.geminiRef.stop()
 
-            // 2-pass: 세션 전체 오디오를 전체 문맥으로 재디코딩해 저장본 교체.
-            // 라이브 화면·채팅은 이미 위 저장본으로 동작하므로 영향 없음.
-            if let recorderRef, let engineRef, rows.count >= 5 {
-                let files = await recorderRef.finish()
-                if !files.isEmpty {
-                    noticeMessage = "Refining transcript (full-context second pass)…"
-                    if let refinedRows = await TranscriptRefiner.refine(
-                        files: files, liveRows: rows, engine: engineRef) {
-                        rows = refinedRows
-                        persistCurrentSession()
-                        noticeMessage = "Transcript refined and saved."
-                    } else {
-                        noticeMessage = nil
-                    }
-                }
-                await recorderRef.deleteFiles()
-            } else {
-                await recorderRef?.deleteFiles()
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.persistCurrentSession()   // 1차 저장 (라이브 전사 - 즉시 열람 가능)
+                currentJob.snapshot.meetingURL = self.currentMeetingURL
+                currentJob.snapshot.rows = self.rows
             }
 
-            // 자동 요약: 정제된 전사를 입력으로 사용 (품질 ↑)
-            if rows.count >= 15, currentSummary == nil {
-                generateSummaryForCurrentSession()
+            // 2-pass: 세션 전체 오디오를 전체 문맥으로 재디코딩해 저장본 교체.
+            // 라이브 화면과 채팅은 이미 위 저장본으로 동작하므로 영향 없음.
+            if let recorderRef = currentJob.recorderRef, let engineRef = currentJob.engineRef, currentJob.snapshot.rows.count >= 5 {
+                let files = await recorderRef.finish()
+                if !files.isEmpty {
+                    await MainActor.run { [weak self] in
+                        self?.noticeMessage = "Refining transcript (full-context second pass)…"
+                    }
+
+                    let themURL = files[.them]
+                    let offlineDiarizerRef = currentJob.offlineDiarizer
+                    let race = TimeoutRace<Result<OfflineDiarization?, Error>>()
+
+                    // (1) 오프라인 다이어라이제이션 태스크 시작 (Task.detached priority .utility) FIRST
+                    let diarizationTask = Task.detached(priority: .utility) { () -> OfflineDiarization? in
+                        guard let themURL else {
+                            race.resolve(.finished(.success(nil)))
+                            return nil
+                        }
+                        do {
+                            let result = try await offlineDiarizerRef.diarize(wavURL: themURL)
+                            race.resolve(.finished(.success(result)))
+                            return result
+                        } catch {
+                            race.resolve(.finished(.failure(error)))
+                            throw error
+                        }
+                    }
+
+                    let watchdogTask = Task.detached(priority: .utility) {
+                        let nanos = UInt64(120 * 1_000_000_000)
+                        try? await Task.sleep(nanoseconds: nanos)
+                        race.resolve(.timedOut)
+                    }
+
+                    // (2) 2-pass 텍스트 재디코딩을 diarization: nil로 수행
+                    let refinedBase = await TranscriptRefiner.refine(
+                        files: files,
+                        liveRows: currentJob.snapshot.rows,
+                        engine: engineRef,
+                        diarization: nil
+                    )
+
+                    // (3) refinedBase가 있으면 수동 편집 반영 후 즉시 rows 갱신 및 2차 저장
+                    if let refinedBase {
+                        var finalRefined = refinedBase
+                        if let meetingURL = currentJob.snapshot.meetingURL, let latest = currentJob.meetingStore.load(meetingURL) {
+                            let (overriddenRows, manualNames) = Self.applyManualOverrides(
+                                refined: refinedBase,
+                                latest: latest.rows,
+                                latestNames: latest.speakerNames
+                            )
+                            finalRefined = overriddenRows
+                            for (slot, name) in manualNames {
+                                currentJob.snapshot.speakerNames[slot] = name
+                            }
+                        }
+
+                        currentJob.snapshot.rows = finalRefined
+
+                        await MainActor.run { [weak self] in
+                            guard let self else { return }
+                            for (slot, name) in currentJob.snapshot.speakerNames {
+                                self.speakerNames[slot] = name
+                            }
+                            self.rows = finalRefined
+                            self.persistCurrentSession()
+                            self.noticeMessage = "Transcript refined and saved."
+                        }
+
+                        if let meetingURL = currentJob.snapshot.meetingURL {
+                            try? currentJob.meetingStore.updateRows(
+                                at: meetingURL,
+                                rows: finalRefined,
+                                speakerNames: currentJob.snapshot.speakerNames
+                            )
+                        }
+                    }
+
+                    // 요약 생성: 2차 저장 직후 시작 (다이어라이제이션 완료를 기다리지 않음)
+                    await MainActor.run { [weak self] in
+                        guard let self else { return }
+                        if self.rows.count >= 15, self.currentSummary == nil {
+                            self.generateSummaryForCurrentSession()
+                        }
+                    }
+
+                    // Me-enrollment: refinedBase != nil, files[.me] != nil, no existing isMe profile 일 때 독립적으로 detached 태스크 시작
+                    var meEnrollmentTask: Task<Void, Never>? = nil
+                    let meAlreadyEnrolled = currentJob.voiceprints.people.contains { $0.isMe }
+                    if let meURL = files[.me] {
+                        if refinedBase == nil {
+                            AppLog.write("voice", "Me enrollment skipped: refine failed")
+                        } else if !meAlreadyEnrolled {
+                            let minEnrollSecs = currentJob.thresholds.minEnrollSeconds
+                            let myName = currentJob.myName
+                            let voiceprintsRef = currentJob.voiceprints
+                            meEnrollmentTask = Task.detached(priority: .utility) {
+                                do {
+                                    let (clipSamples, clipSecs) = try await offlineDiarizerRef.meEnrollmentClip(wavURL: meURL, maxSeconds: 60.0)
+                                    guard Self.shouldEnrollMe(
+                                        didRefine: true,
+                                        alreadyEnrolled: false,
+                                        speechSeconds: clipSecs,
+                                        minSeconds: minEnrollSecs
+                                    ) else {
+                                        AppLog.write("voice", "Me enrollment skipped: speech duration (\(String(format: "%.1f", clipSecs))s) < minEnrollSeconds (\(minEnrollSecs)s)")
+                                        return
+                                    }
+                                    let emb = try await offlineDiarizerRef.embedding(samples: clipSamples)
+                                    let sample = EnrollmentSample(embedding: emb, quality: 1.0, seconds: clipSecs)
+
+                                    await MainActor.run {
+                                        do {
+                                            let enrolled = try voiceprintsRef.enroll(
+                                                name: myName,
+                                                email: nil,
+                                                samples: [sample],
+                                                source: .live,
+                                                isMe: true
+                                            )
+                                            AppLog.write("voice", "Enrolled me voiceprint for '\(enrolled.name)' from \(String(format: "%.1f", clipSecs))s mic audio")
+                                        } catch {
+                                            AppLog.write("voice", "Failed to enroll me voiceprint: \(error.localizedDescription)")
+                                        }
+                                    }
+                                } catch {
+                                    AppLog.write("voice", "Failed to prepare me enrollment clip: \(error.localizedDescription)")
+                                }
+                            }
+                        }
+                    }
+
+                    // (4) 최대 120초 동안 다이어라이제이션 레이스 결과 대기
+                    let raceOutcome = await race.wait()
+                    watchdogTask.cancel()
+
+                    let hardLimit: Double = {
+                        if let custom = UserDefaults.standard.object(forKey: "voiceCleanupHardLimitSeconds") as? Double, custom > 0 {
+                            return custom
+                        }
+                        return 1800.0
+                    }()
+                    let finalSnapshot = currentJob.snapshot
+                    let meetingStoreRef = currentJob.meetingStore
+                    let voiceprintsRef = currentJob.voiceprints
+                    let zoomNameRef = currentJob.zoomNameLookup
+                    let fallbackNameRef = currentJob.fallbackName
+
+                    switch raceOutcome {
+                    case .finished(let outcome):
+                        switch outcome {
+                        case .success(let diarizationResult):
+                            if let diarizationResult {
+                                await MainActor.run { [weak self] in
+                                    guard let self else {
+                                        Self.applyDiarizationToDiskOnly(
+                                            snapshot: finalSnapshot,
+                                            diarization: diarizationResult,
+                                            meetingStore: meetingStoreRef,
+                                            voiceprints: voiceprintsRef,
+                                            zoomName: zoomNameRef,
+                                            fallbackName: fallbackNameRef
+                                        )
+                                        return
+                                    }
+                                    self.applyDiarizationCompletion(
+                                        snapshot: finalSnapshot,
+                                        diarization: diarizationResult,
+                                        zoomName: zoomNameRef,
+                                        fallbackName: fallbackNameRef
+                                    )
+                                }
+                            }
+                        case .failure(let err):
+                            AppLog.write("voice", "Offline diarization failed: \(err.localizedDescription)")
+                            await MainActor.run { [weak self] in
+                                self?.noticeMessage = "Speaker recognition skipped: \(err.localizedDescription)"
+                            }
+                        }
+
+                        // WAV 파일 정리는 diarizationTask 및 meEnrollmentTask가 모두 완료되거나 하드 리밋(30분) 초과 시 수행
+                        let snapshotRef = finalSnapshot
+                        Task.detached(priority: .utility) { [weak self] in
+                            await Self.runGuardedCleanup(
+                                hardLimitSeconds: hardLimit,
+                                work: {
+                                    _ = try? await diarizationTask.value
+                                    _ = await meEnrollmentTask?.value
+                                },
+                                deleteFiles: {
+                                    await recorderRef.deleteFiles()
+                                },
+                                markRetained: {
+                                    await recorderRef.markRetainedUntilRestart()
+                                },
+                                onHardLimitExceeded: {
+                                    Task { @MainActor [weak self] in
+                                        guard let self else { return }
+                                        if Self.shouldUpdateLiveState(current: self.sessionID, snapshot: snapshotRef.sessionID) {
+                                            self.noticeMessage = "Session audio retained because speaker recognition did not finish; it will be purged at next launch"
+                                        }
+                                    }
+                                }
+                            )
+                        }
+
+                    case .timedOut:
+                        AppLog.write("voice", "Offline diarization timed out after 120s")
+                        await MainActor.run { [weak self] in
+                            self?.noticeMessage = "Speaker recognition is still running; names will be applied to the saved meeting when it finishes."
+                        }
+
+                        // Timeout 후에도 diarizationTask가 완료되면 동일한 completion path를 실행 (하드 리밋으로 보호)
+                        let snapshotRef = finalSnapshot
+                        Task.detached(priority: .utility) { [weak self] in
+                            await Self.runGuardedCleanup(
+                                hardLimitSeconds: hardLimit,
+                                work: {
+                                    let lateResult: OfflineDiarization?
+                                    do {
+                                        lateResult = try await diarizationTask.value
+                                    } catch {
+                                        AppLog.write("voice", "Late offline diarization failed: \(error.localizedDescription)")
+                                        lateResult = nil
+                                    }
+
+                                    if let lateResult {
+                                        await MainActor.run { [weak self] in
+                                            guard let self else {
+                                                Self.applyDiarizationToDiskOnly(
+                                                    snapshot: snapshotRef,
+                                                    diarization: lateResult,
+                                                    meetingStore: meetingStoreRef,
+                                                    voiceprints: voiceprintsRef,
+                                                    zoomName: zoomNameRef,
+                                                    fallbackName: fallbackNameRef
+                                                )
+                                                return
+                                            }
+                                            self.applyDiarizationCompletion(
+                                                snapshot: snapshotRef,
+                                                diarization: lateResult,
+                                                zoomName: zoomNameRef,
+                                                fallbackName: fallbackNameRef
+                                            )
+                                        }
+                                    }
+
+                                    _ = await meEnrollmentTask?.value
+                                },
+                                deleteFiles: {
+                                    await recorderRef.deleteFiles()
+                                },
+                                markRetained: {
+                                    await recorderRef.markRetainedUntilRestart()
+                                },
+                                onHardLimitExceeded: {
+                                    Task { @MainActor [weak self] in
+                                        guard let self else { return }
+                                        if Self.shouldUpdateLiveState(current: self.sessionID, snapshot: snapshotRef.sessionID) {
+                                            self.noticeMessage = "Session audio retained because speaker recognition did not finish; it will be purged at next launch"
+                                        }
+                                    }
+                                }
+                            )
+                        }
+                    }
+                } else {
+                    await recorderRef.deleteFiles()
+                    await MainActor.run { [weak self] in
+                        guard let self else { return }
+                        if self.rows.count >= 15, self.currentSummary == nil {
+                            self.generateSummaryForCurrentSession()
+                        }
+                    }
+                }
+            } else {
+                await recorderRef?.deleteFiles()
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    if self.rows.count >= 15, self.currentSummary == nil {
+                        self.generateSummaryForCurrentSession()
+                    }
+                }
             }
         }
     }
@@ -1301,19 +2400,24 @@ final class AppState {
     private func persistCurrentSession() {
         guard !rows.isEmpty, let startedAt = sessionStartedAt else { return }
         let duration = rows.map(\.endSeconds).max() ?? 0
-        currentMeetingURL = meetingStore.save(
-            rows: rows,
-            myName: myName,
-            speakerNames: speakerNames,
-            startedAt: startedAt,
-            durationSeconds: duration,
-            title: meetingTitle,
-            summary: currentSummary,
-            attendees: meetingAttendees.isEmpty ? nil : meetingAttendees,
-            existingURL: currentMeetingURL
-        )
-        if let currentMeetingURL {
-            briefing.copyBriefIfAvailable(toMeetingFolder: currentMeetingURL)
+        do {
+            currentMeetingURL = try meetingStore.save(
+                rows: rows,
+                myName: myName,
+                speakerNames: speakerNames,
+                startedAt: startedAt,
+                durationSeconds: duration,
+                title: meetingTitle,
+                summary: currentSummary,
+                attendees: meetingAttendees.isEmpty ? nil : meetingAttendees,
+                existingURL: currentMeetingURL
+            )
+            if let currentMeetingURL {
+                briefing.copyBriefIfAvailable(toMeetingFolder: currentMeetingURL)
+            }
+        } catch {
+            AppLog.write("app", "Failed to save meeting: \(error.localizedDescription)")
+            noticeMessage = "Failed to save meeting: \(error.localizedDescription)"
         }
     }
 
@@ -1844,3 +2948,20 @@ final class AppState {
         scheduleResave()
     }
 }
+
+extension TranscriptRow: Equatable {
+    public static func == (lhs: TranscriptRow, rhs: TranscriptRow) -> Bool {
+        lhs.id == rhs.id &&
+        lhs.channel == rhs.channel &&
+        lhs.speakerSlot == rhs.speakerSlot &&
+        lhs.speakerName == rhs.speakerName &&
+        lhs.english == rhs.english &&
+        lhs.korean == rhs.korean &&
+        lhs.startSeconds == rhs.startSeconds &&
+        lhs.endSeconds == rhs.endSeconds &&
+        lhs.nameSource == rhs.nameSource &&
+        lhs.candidateNames == rhs.candidateNames &&
+        lhs.clusterID == rhs.clusterID
+    }
+}
+

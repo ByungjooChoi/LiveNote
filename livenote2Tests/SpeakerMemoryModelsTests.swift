@@ -121,7 +121,68 @@ final class SpeakerMemoryModelsTests: XCTestCase {
         XCTAssertEqual(person.centroids[0].n, 5)
         XCTAssertEqual(person.centroids[0].quality, 0.85)
         XCTAssertEqual(person.centroids[0].conflicts, 0)
+        XCTAssertEqual(person.centroids[0].weight, 5.0)
         XCTAssertEqual(person.totalSamples, 5)
+    }
+
+    // MARK: - VoiceprintThresholds Bounds Validation Tests
+
+    func testVoiceprintThresholdsValidationBounds() {
+        var thresholds = VoiceprintThresholds()
+        XCTAssertTrue(thresholds.validate().isEmpty)
+
+        // matchThreshold in 0...2
+        thresholds = VoiceprintThresholds(matchThreshold: -0.1)
+        XCTAssertFalse(thresholds.validate().isEmpty)
+        thresholds = VoiceprintThresholds(matchThreshold: 2.1)
+        XCTAssertFalse(thresholds.validate().isEmpty)
+
+        // mergeThreshold in 0...2 and <= matchThreshold
+        thresholds = VoiceprintThresholds(matchThreshold: 0.5, mergeThreshold: 0.6)
+        XCTAssertFalse(thresholds.validate().isEmpty)
+        thresholds = VoiceprintThresholds(mergeThreshold: -0.1)
+        XCTAssertFalse(thresholds.validate().isEmpty)
+
+        // margin in 0...2
+        thresholds = VoiceprintThresholds(margin: -0.01)
+        XCTAssertFalse(thresholds.validate().isEmpty)
+        thresholds = VoiceprintThresholds(margin: 2.1)
+        XCTAssertFalse(thresholds.validate().isEmpty)
+
+        // minQuality in 0...1
+        thresholds = VoiceprintThresholds(minQuality: -0.1)
+        XCTAssertFalse(thresholds.validate().isEmpty)
+        thresholds = VoiceprintThresholds(minQuality: 1.1)
+        XCTAssertFalse(thresholds.validate().isEmpty)
+
+        // minEnrollSeconds > 0
+        thresholds = VoiceprintThresholds(minEnrollSeconds: 0)
+        XCTAssertFalse(thresholds.validate().isEmpty)
+        thresholds = VoiceprintThresholds(minEnrollSeconds: -5)
+        XCTAssertFalse(thresholds.validate().isEmpty)
+
+        // maxCentroids >= 1
+        thresholds = VoiceprintThresholds(maxCentroids: 0)
+        XCTAssertFalse(thresholds.validate().isEmpty)
+
+        // conflictLimit >= 1
+        thresholds = VoiceprintThresholds(conflictLimit: 0)
+        XCTAssertFalse(thresholds.validate().isEmpty)
+    }
+
+    func testVoiceprintThresholdsLoadFallsBackOnInvalidData() throws {
+        let suiteName = "test.voiceprint.invalid.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        // Invalid thresholds: mergeThreshold > matchThreshold
+        let invalid = VoiceprintThresholds(matchThreshold: 0.4, mergeThreshold: 0.8)
+        let data = try JSONEncoder().encode(invalid)
+        defaults.set(data, forKey: VoiceprintThresholds.defaultsKey)
+
+        let loaded = VoiceprintThresholds.load(defaults: defaults)
+        XCTAssertEqual(loaded.matchThreshold, 0.65, accuracy: 0.001)
+        XCTAssertEqual(loaded.mergeThreshold, 0.35, accuracy: 0.001)
     }
 
     // MARK: - OfflineDiarization Math Tests
@@ -208,7 +269,44 @@ final class SpeakerMemoryModelsTests: XCTestCase {
         XCTAssertNil(diarization.centroid(for: "non_existent"))
     }
 
+    func testOfflineDiarizationCentroidNormalizesInputAndSkipsZeroVector() {
+        // Segments with same direction [1, 0] but different norms (1.0 vs 10.0)
+        let seg1 = SpeakerSegment(clusterID: "c1", start: 0, end: 2, embedding: [1.0, 0.0], quality: 0.8)
+        let seg2 = SpeakerSegment(clusterID: "c1", start: 2, end: 5, embedding: [10.0, 0.0], quality: 0.8)
+        let segZero = SpeakerSegment(clusterID: "c1", start: 5, end: 6, embedding: [0.0, 0.0], quality: 0.8)
+
+        let diarization = OfflineDiarization(
+            segments: [seg1, seg2, segZero],
+            processingSeconds: 0.1,
+            audioSeconds: 6.0
+        )
+
+        let centroid = diarization.centroid(for: "c1")
+        XCTAssertNotNil(centroid)
+        guard let c = centroid else { return }
+
+        // Both seg1 and seg2 normalize to [1.0, 0.0]. segZero is skipped.
+        // Resulting centroid must be exactly [1.0, 0.0] with norm 1.0.
+        XCTAssertEqual(c.embedding[0], 1.0, accuracy: 0.0001)
+        XCTAssertEqual(c.embedding[1], 0.0, accuracy: 0.0001)
+        XCTAssertEqual(c.seconds, 5.0, accuracy: 0.001)
+    }
+
     // MARK: - VoiceprintThresholds Tests
+
+    func testVoiceprintThresholdsLoadFallsBackOnInvalidMargin() throws {
+        let suiteName = "test.voiceprint.margin.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        // Store margin = 3.0 in defaults
+        let invalid = VoiceprintThresholds(margin: 3.0)
+        let data = try JSONEncoder().encode(invalid)
+        defaults.set(data, forKey: VoiceprintThresholds.defaultsKey)
+
+        let loaded = VoiceprintThresholds.load(defaults: defaults)
+        XCTAssertEqual(loaded.margin, 0.08, accuracy: 0.001)
+    }
 
     func testVoiceprintThresholdsLoadFallsBackOnGarbage() throws {
         let suiteName = "test.voiceprint.thresholds.\(UUID().uuidString)"
@@ -295,5 +393,39 @@ final class SpeakerMemoryModelsTests: XCTestCase {
         XCTAssertEqual(stats[2].name, "Charlie")
         XCTAssertEqual(stats[2].seconds, 5.0)
         XCTAssertEqual(stats[2].source, .slot)
+    }
+
+    // MARK: - DD5: VoiceprintThresholds maxCentroids Tests
+
+    func testVoiceprintThresholdsMaxCentroidsValidation() {
+        var thresholds = VoiceprintThresholds()
+        thresholds.maxCentroids = 5
+        XCTAssertTrue(thresholds.validate().isEmpty)
+
+        thresholds.maxCentroids = 1
+        XCTAssertTrue(thresholds.validate().isEmpty)
+
+        thresholds.maxCentroids = 0
+        XCTAssertFalse(thresholds.validate().isEmpty)
+
+        thresholds.maxCentroids = 6
+        XCTAssertFalse(thresholds.validate().isEmpty)
+
+        thresholds.maxCentroids = 100
+        XCTAssertFalse(thresholds.validate().isEmpty)
+    }
+
+    func testVoiceprintThresholdsLoadFallsBackToDefaultWhenStored100() throws {
+        let suiteName = "testVoiceprintThresholdsLoadFallsBackToDefaultWhenStored100-\(UUID().uuidString)"
+        let testDefaults = UserDefaults(suiteName: suiteName)!
+        defer { testDefaults.removePersistentDomain(forName: suiteName) }
+
+        var invalid = VoiceprintThresholds()
+        invalid.maxCentroids = 100
+        let encoded = try JSONEncoder().encode(invalid)
+        testDefaults.set(encoded, forKey: VoiceprintThresholds.defaultsKey)
+
+        let loaded = VoiceprintThresholds.load(defaults: testDefaults)
+        XCTAssertEqual(loaded.maxCentroids, 5, "Stored maxCentroids 100 must fail validation and fall back to default (5)")
     }
 }

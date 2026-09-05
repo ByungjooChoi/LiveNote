@@ -20,6 +20,16 @@ actor SessionAudioRecorder {
             .appendingPathComponent("livenote2-session-\(UUID().uuidString)", isDirectory: true)
     }
 
+    /// 세션 임시 폴더 URL
+    nonisolated var sessionFolder: URL { folder }
+    var folderURL: URL { folder }
+
+    /// 세션 폴더에 retained-until-restart 마커 파일 작성
+    func markRetainedUntilRestart() {
+        let marker = folder.appendingPathComponent("retained-until-restart")
+        FileManager.default.createFile(atPath: marker.path, contents: nil)
+    }
+
     /// 채널별 WAV 파일 생성 (헤더는 finish에서 확정)
     func start() {
         do {

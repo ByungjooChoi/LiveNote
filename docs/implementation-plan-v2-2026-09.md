@@ -222,3 +222,54 @@ Phase 0 (기반·G 일부) ─┬─> Phase 1 (Recipes)
 - 브리핑 세션 귀속: `start()`가 `calendar.ongoingUpcomingItem()` 휴리스틱으로 이벤트를 고른다(Phase 0의 제목·참석자 캡처와 동일 방식). Coming up의 Start now와 캘린더 자동 시작이 정확한 `eventKey`를 넘기도록 바꾸면 겹친 일정·수동 시작의 오귀속이 사라진다.
 - `scheduleMorningBatch` 재호출 시 wake observer가 첫 provider를 유지한다(현재 init에서 1회만 호출하므로 영향 없음). provider를 저장 프로퍼티로 바꾸고 startup task에 취소 확인을 넣을 것.
 - 아침 배치의 LLM 호출 상한(일일 N건, 초과분은 10분 전 트리거·수동 새로고침으로): 공유 캘린더 사용자 대비.
+
+## Phase 3 리뷰 필요 (codex 미승인)
+
+상태: 구현은 완료되어 트리는 테스트 358개 통과·Release 빌드 성공이지만, codex critic이 10라운드(2026-09-05) 후에도 APPROVE하지 않았다. 전역 정책에 따라 `wip(phase3)` 커밋만 하고 버전 상향·패키징·설치·완료 표시는 하지 않았다. 아래 항목을 처리한 뒤 codex 재리뷰가 필요하다. 라운드 1~9에서 수정된 항목은 `.omc/team/phase3-report-worker-1.md`, `phase3-report-worker-2.md`와 `.omc/team/phase3-fix1.md` ~ `phase3-fix9.md`에 기록되어 있다.
+
+codex 라운드 10 미해결 항목 (원문):
+
+검토 전 예측했던 위험(정리 레이스, 음성 등록 범위, 저장 오류 은닉, 충돌 카운터)은 모두 실제로 남아 있습니다.
+
+1. **[BLOCKER] 활성 다이어라이제이션 중인 WAV를 다음 세션 시작 시 삭제할 수 있습니다.**  
+   - 위치: `AppState.swift` - `start()`의 `SessionAudioRecorder.purgeStale()` 및 `stop()`의 `runGuardedCleanup(... markRetainedUntilRestart:)` 하드리밋 분기
+   - 이유: 30분 하드리밋 후에도 기존 `diarizationTask`/me-enrollment 작업은 계속 실행됩니다. 그런데 사용자가 앱을 종료하지 않고 새 회의를 시작하면 `purgeStale()`가 이전 세션 폴더를 제거할 수 있습니다. 즉, 아직 읽는 중인 WAV가 사라져 다이어라이제이션/Me 등록이 실패합니다.
+   - 위반: “WAV는 re-decode와 diarization 완료 후에만 삭제”라는 수용 기준을 깨뜨립니다.
+   - 수정: 진행 중인 세션 폴더에는 in-process lease/active marker를 두고 `purgeStale()`가 현재 프로세스의 활성 작업 폴더를 절대 지우지 않게 하십시오. 이전 프로세스에서 남은 폴더만 purge해야 합니다.
+   - 테스트: 타임아웃된 작업을 gate로 막은 상태에서 새 세션을 시작해도 이전 WAV가 유지되는 통합 테스트가 필요합니다.
+
+2. **[MAJOR] Me 등록은 “최대 60초의 발화”가 아니라 회의 시작 후 첫 60초만 검사합니다.**  
+   - 위치: `OfflineDiarizer.swift` - `meEnrollmentClip(wavURL:maxSeconds:)`의 `loadWAV(url:maxSeconds:)`; `AppState.swift` - Me-enrollment 호출부
+   - 이유: `loadWAV(... maxSeconds: 60)`가 파일 앞부분만 읽고 그 뒤 침묵을 제거합니다. 사용자가 회의 초반 60초 동안 말하지 않고 이후 20초 이상 발화하면 등록되지 않습니다.
+   - 위반: “최대 60초의 mic speech로 Me를 등록” 요구를 충족하지 못합니다.
+   - 수정: 전체 mic WAV를 백그라운드에서 순차 스캔해 유성 구간을 최대 60초까지 모으십시오. 오디오는 메모리에서만 처리하고, 완료 뒤 기존 정리 경로로 삭제하면 됩니다.
+   - 테스트: 첫 60초는 침묵이고 이후 20초 이상 발화한 WAV가 Me 등록 대상으로 선택되는 케이스를 추가하십시오.
+
+3. **[MAJOR] 2-pass 정제 저장 실패가 삼켜지고, UI는 성공했다고 거짓 표시할 수 있습니다.**  
+   - 위치: `AppState.swift` - `stop()`의 `(3) refinedBase... 즉시 rows 갱신 및 2차 저장` hunk, `try? currentJob.meetingStore.updateRows(...)`
+   - 이유: `updateRows` 실패가 `try?`로 무시됩니다. 그 직전 `persistCurrentSession()`이 실패해도 내부에서 오류 메시지를 설정한 뒤, 호출부가 곧바로 `"Transcript refined and saved."`로 덮어씁니다.
+   - 영향: 사용자는 정제본이 저장됐다고 믿지만 디스크에는 이전 전사본만 남을 수 있습니다.
+   - 수정: 정제 저장을 throwing 결과로 처리하고, 성공한 뒤에만 성공 메시지를 표시하십시오. 실패 시 기존 `pendingDiarizationResults`와 동등한 재시도 payload 또는 명시적 오류 상태를 남기십시오.
+   - 테스트: `MeetingStore` 쓰기 실패 주입 후 성공 메시지가 표시되지 않고 재시도 가능한 상태가 남는지 검증하십시오.
+
+4. **[MAJOR] 충돌 카운터가 일반 등록/병합에서 조용히 초기화되어 “3회 충돌 시 centroid 삭제” 규칙을 우회합니다.**  
+   - 위치: `VoiceprintStore.swift` - `enroll`의 centroid merge에서 `conflicts: 0`; `merge`의 `conflicts: min(existing.conflicts, sCentroid.conflicts)`
+   - 이유: centroid가 두 번 충돌한 뒤 정상 등록 한 번만 발생해도 카운터가 0으로 돌아갑니다. 수동 프로필 병합도 더 낮은 카운터를 선택해 누적 증거를 잃습니다.
+   - 영향: 잘못된 voiceprint가 반복적으로 다른 사람으로 확인돼도 삭제되지 않아 자동 오인식이 장기간 유지될 수 있습니다.
+   - 수정: 동일 centroid를 병합할 때 기존 충돌 수를 보존하십시오. 명시적으로 “검증 성공 시 충돌 초기화” 정책을 도입할 의도가 아니라면 `existingCentroid.conflicts`를 유지해야 합니다.
+   - 테스트: `충돌 2회 → 동일 centroid 정상 등록 → 충돌 1회`에서 centroid가 제거되는지 검증하십시오.
+
+**누락된 검증**
+
+- 타임아웃 후 새 세션 시작과 WAV 보존의 상호작용 테스트가 없습니다.
+- Me 발화가 회의 후반에만 존재하는 경우가 없습니다.
+- 2-pass 저장 실패 및 성공 메시지 정합성 테스트가 없습니다.
+- 충돌 카운터가 등록/병합을 거쳐도 규칙대로 누적되는 테스트가 없습니다.
+
+**다중 관점**
+
+- 보안/프라이버시: 활성 WAV의 조기 삭제는 음성 데이터 자체의 유출은 아니지만, 생체성 음성 인식 결과를 불완전하게 만들고 실패를 숨깁니다.
+- 실행자: 현재 정리와 purge의 소유권 경계가 정의되지 않아 안전하게 구현할 수 없습니다.
+- 운영: 디스크 오류와 장시간 diarization이 현실적으로 발생하는 조건에서 UI 상태와 저장 상태가 불일치합니다.
+
+**VERDICT: REQUEST_CHANGES**
