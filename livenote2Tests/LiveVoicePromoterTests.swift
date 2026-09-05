@@ -573,6 +573,106 @@ final class LiveVoicePromoterTests: XCTestCase {
 
         XCTAssertEqual(callbackCount.get(), 1, "Result must still be delivered once after gate opens")
     }
+
+    // MARK: - R12-1 Me-Enrollment Isolation Test (G1a & G1b)
+
+    func testLivePromotionIndependentOfMeEnrollmentEmbedding_G1a() async throws {
+        let enterGate = AsyncTestGate()
+        let blockGate = AsyncTestGate()
+
+        let fixedEngine = PromoterFixedOfflineEngine(fixedEmbedding: [Float](repeating: 0.77, count: 256))
+        let promoterExtractor = OfflineDiarizer(engine: fixedEngine)
+        let blockedEngine = BlockingEmbeddingOfflineEngine(enterGate: enterGate, blockGate: blockGate)
+        let blockedExtractor = OfflineDiarizer(engine: blockedEngine)
+
+        let promoter = LiveVoicePromoter(diarizer: promoterExtractor)
+
+        // G1b assertion: promoter's extractor instance is not the blocked instance (identity check with ===)
+        let promoterDiarizer = await promoter.diarizerInstance
+        XCTAssertTrue(promoterDiarizer === promoterExtractor)
+        XCTAssertFalse(promoterDiarizer === blockedExtractor)
+        XCTAssertTrue(promoterExtractor !== blockedExtractor)
+
+        let callbackFired = AtomicFlag()
+        await promoter.setOnEmbedding { slot, embedding, seconds in
+            if slot == 0 && embedding.count == 256 && seconds >= 30.0 {
+                callbackFired.set(true)
+            }
+        }
+
+        // Start blocked task simulating a previous session's me-enrollment in flight
+        let blockedTask = Task {
+            try await blockedExtractor.embedding(samples: [Float](repeating: 0.1, count: 16_000))
+        }
+
+        // Wait until me-enrollment task enters synchronous embedding
+        await enterGate.wait()
+
+        // Feed the promoter 30 s of finalized speech for slot 0
+        let samples = [Float](repeating: 0.2, count: 40 * 16_000)
+        await promoter.append(samples: samples)
+        await promoter.noteSegments(slot: 0, segments: [(start: 0.0, end: 30.0)])
+
+        // Assert the onEmbedding callback fires within 2 s while the blocking gate is still closed
+        var fired = false
+        for _ in 0..<40 {
+            if callbackFired.get() {
+                fired = true
+                break
+            }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertTrue(fired, "onEmbedding callback must fire within 2 s while me-enrollment gate is still closed")
+
+        // Open the gate and await the blocked task at the end
+        await blockGate.open()
+        let blockedEmbedding = try await blockedTask.value
+        XCTAssertEqual(blockedEmbedding.count, 256)
+    }
+}
+
+private final class BlockingEmbeddingOfflineEngine: OfflineDiarizationEngine, @unchecked Sendable {
+    let enterGate: AsyncTestGate
+    let blockGate: AsyncTestGate
+    let fixedEmbedding: [Float]
+
+    init(
+        enterGate: AsyncTestGate,
+        blockGate: AsyncTestGate,
+        fixedEmbedding: [Float] = [Float](repeating: 0.1, count: 256)
+    ) {
+        self.enterGate = enterGate
+        self.blockGate = blockGate
+        self.fixedEmbedding = fixedEmbedding
+    }
+
+    func prepare() async throws {}
+    func diarize(samples: [Float]) throws -> [SpeakerSegment] { [] }
+
+    func embedding(for samples: [Float]) throws -> [Float] {
+        Task {
+            await enterGate.open()
+        }
+        let sema = DispatchSemaphore(value: 0)
+        Task {
+            await blockGate.wait()
+            sema.signal()
+        }
+        sema.wait()
+        return fixedEmbedding
+    }
+}
+
+private final class PromoterFixedOfflineEngine: OfflineDiarizationEngine, @unchecked Sendable {
+    let fixedEmbedding: [Float]
+
+    init(fixedEmbedding: [Float] = [Float](repeating: 0.77, count: 256)) {
+        self.fixedEmbedding = fixedEmbedding
+    }
+
+    func prepare() async throws {}
+    func diarize(samples: [Float]) throws -> [SpeakerSegment] { [] }
+    func embedding(for samples: [Float]) throws -> [Float] { fixedEmbedding }
 }
 
 // Async gate helper for testing in-flight task concurrency

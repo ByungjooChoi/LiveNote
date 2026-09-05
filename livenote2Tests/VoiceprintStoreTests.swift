@@ -808,4 +808,120 @@ final class VoiceprintStoreTests: XCTestCase {
         XCTAssertEqual(mergedPerson.centroids.count, 1)
         XCTAssertEqual(mergedPerson.centroids[0].conflicts, 2, "Merged centroid conflicts must be max(2, 1) = 2")
     }
+
+    func testEnrollMeIfAbsentIdempotent_H1a() throws {
+        let store = VoiceprintStore(rootURL: tempDir, defaults: testDefaults)
+        store.thresholds = VoiceprintThresholds(
+            matchThreshold: 0.65,
+            margin: 0.08,
+            mergeThreshold: 0.35,
+            minEnrollSeconds: 5.0,
+            minQuality: 0.5,
+            maxCentroids: 5,
+            conflictLimit: 3
+        )
+
+        let sample1 = [
+            EnrollmentSample(embedding: makeUnitVector(activeIndex: 0), quality: 1.0, seconds: 10.0)
+        ]
+        let sample2 = [
+            EnrollmentSample(embedding: makeUnitVector(activeIndex: 1), quality: 1.0, seconds: 10.0)
+        ]
+
+        let first = try store.enrollMeIfAbsent(name: "Me", samples: sample1, source: .live)
+        XCTAssertNotNil(first)
+        XCTAssertEqual(first?.isMe, true)
+        XCTAssertEqual(first?.name, "Me")
+
+        let second = try store.enrollMeIfAbsent(name: "MeAgain", samples: sample2, source: .live)
+        XCTAssertNil(second)
+
+        XCTAssertEqual(store.people.filter(\.isMe).count, 1)
+
+        let diskData = try Data(contentsOf: tempDir.appendingPathComponent("voiceprints.json"))
+        let diskDB = try JSONDecoder().decode(VoiceprintDatabase.self, from: diskData)
+        XCTAssertEqual(diskDB.people.filter(\.isMe).count, 1)
+        XCTAssertEqual(diskDB.people.first(where: { $0.isMe })?.name, "Me")
+    }
+
+    func testEnrollMeIfAbsentRaceTwoGatedTasks_H1b() async throws {
+        let store = VoiceprintStore(rootURL: tempDir, defaults: testDefaults)
+        store.thresholds = VoiceprintThresholds(
+            matchThreshold: 0.65,
+            margin: 0.08,
+            mergeThreshold: 0.35,
+            minEnrollSeconds: 5.0,
+            minQuality: 0.5,
+            maxCentroids: 5,
+            conflictLimit: 3
+        )
+
+        let sample1 = [
+            EnrollmentSample(embedding: makeUnitVector(activeIndex: 0), quality: 1.0, seconds: 10.0)
+        ]
+        let sample2 = [
+            EnrollmentSample(embedding: makeUnitVector(activeIndex: 1), quality: 1.0, seconds: 10.0)
+        ]
+
+        let gate1 = AsyncTestGate()
+        let gate2 = AsyncTestGate()
+
+        let preCheck1 = store.people.contains { $0.isMe } == false
+        XCTAssertTrue(preCheck1)
+
+        let preCheck2 = store.people.contains { $0.isMe } == false
+        XCTAssertTrue(preCheck2)
+
+        let task1 = Task { @MainActor in
+            _ = preCheck1
+            await gate1.wait()
+            return try store.enrollMeIfAbsent(name: "MeTask1", samples: sample1, source: .live)
+        }
+
+        let task2 = Task { @MainActor in
+            _ = preCheck2
+            await gate2.wait()
+            return try store.enrollMeIfAbsent(name: "MeTask2", samples: sample2, source: .live)
+        }
+
+        await gate1.open()
+        let res1 = try await task1.value
+
+        await gate2.open()
+        let res2 = try await task2.value
+
+        XCTAssertNotNil(res1)
+        XCTAssertEqual(res1?.isMe, true)
+        XCTAssertEqual(res1?.name, "MeTask1")
+
+        XCTAssertNil(res2)
+
+        XCTAssertEqual(store.people.filter(\.isMe).count, 1)
+        XCTAssertEqual(store.people.first(where: { $0.isMe })?.name, "MeTask1")
+
+        let diskData = try Data(contentsOf: tempDir.appendingPathComponent("voiceprints.json"))
+        let diskDB = try JSONDecoder().decode(VoiceprintDatabase.self, from: diskData)
+        XCTAssertEqual(diskDB.people.filter(\.isMe).count, 1)
+        XCTAssertEqual(diskDB.people.first(where: { $0.isMe })?.name, "MeTask1")
+    }
+}
+
+private actor AsyncTestGate {
+    private var isOpen = false
+    private var continuations: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { cont in
+            continuations.append(cont)
+        }
+    }
+
+    func open() {
+        isOpen = true
+        for cont in continuations {
+            cont.resume()
+        }
+        continuations.removeAll()
+    }
 }

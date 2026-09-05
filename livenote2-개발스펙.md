@@ -452,7 +452,8 @@ Weekly Update의 system 프롬프트는 SA(Solutions Architect) 주간보고 규
 - 스트리밍 me 등록 스캔: 마이크 전체 WAV를 `WAVStreamReader`로 스트리밍 스캔하여 최대 60초 분량의 음성(RMS 게이트 통과)을 수집하여 등록(회의 후반부 발화도 정상 반영).
 - 정제 전사 저장 실패 및 pending 재시도: 2차 정제 전사 저장 실패 시 조용히 삼키지 않고 `pendingDiarizationResults[url]`에 등록하여 5초 후 자동 재시도 및 수동 재시도 지원.
 - 성문 충돌 카운터 보존: 기존 중심에 흡수 병합(`enroll`) 시 충돌 카운터를 0으로 리셋하지 않고 보존(`existingCentroid.conflicts`). 인물 병합(`merge`) 시에도 병합 중심의 충돌 카운터는 `max(existing.conflicts, sCentroid.conflicts)`로 보존.
-- 성문 임베딩 분리 인스턴스: me 등록 및 라이브 화자 승격(`LiveVoicePromoter`) 성문 임베딩 추출은 다이어라이제이션 전용 인스턴스와 분리된 전용 `OfflineDiarizer` 인스턴스(`embeddingExtractor`)에서 실행되어 실행 중인 다이어라이제이션 뒤에 대기하지 않음 (하드 리밋 초과 시 알림 문구: "Session audio kept until speaker recognition finishes; it is deleted afterwards, or at next launch if it never finishes").
+- 성문 임베딩 분리 3개 인스턴스 규칙: 다이어라이제이션과 임베딩 추출은 동기 엔진 호출 동안 액터를 점유하므로 3개 인스턴스로 분리 사용. 세션 다이어라이저(`AppState.offlineDiarizer`), 라이브 승격(`AppState.liveEmbeddingExtractor`), 그리고 me 등록 태스크 내부에서 생성 및 해제되는 임시 인스턴스(`OfflineDiarizer(engine: currentJob.makeEmbeddingEngine())`)로 분리되어 서로 대기하지 않음 (하드 리밋 초과 시 알림 문구: "Session audio kept until speaker recognition finishes; it is deleted afterwards, or at next launch if it never finishes").
+- 본인 성문 멱등 등록(`enrollMeIfAbsent`): 저장소 변경 시점에 isMe 프로필 부재 여부를 원자적으로 재확인하므로 overlapping 2-pass 완료 시에도 중복 Me 프로필이 생성되지 않음.
 
 ---
 

@@ -267,6 +267,25 @@ final class VoiceprintStore: VoiceprintStoring {
         match(embedding, excludingMe: false)
     }
 
+    /// 본인(isMe) 성문 등록: 이미 isMe 프로필이 존재하면 아무 변경 없이 nil 반환, 부재 시 신규 등록 후 Person 반환
+    @discardableResult
+    func enrollMeIfAbsent(
+        name: String,
+        samples: [EnrollmentSample],
+        source: VoiceSource
+    ) throws -> Person? {
+        if people.contains(where: { $0.isMe }) {
+            return nil
+        }
+        return try enroll(
+            name: name,
+            email: nil,
+            samples: samples,
+            source: source,
+            isMe: true
+        )
+    }
+
     /// 이름(+email)으로 기존 person을 찾거나 새로 만들고 중심을 갱신
     @discardableResult
     func enroll(

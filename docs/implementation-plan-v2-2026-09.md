@@ -207,7 +207,7 @@ Phase 0 (기반·G 일부) ─┬─> Phase 1 (Recipes)
 | 0 | v1.4.0 | attendees·ContextBuilder 기반, 알림 분할 버튼, 자동 제목, 대면 모드, 카운트다운 | 2일 | 팝업 3경로, 제목 폴더 반영 |
 | 1 | v1.5.0 | Recipes(내장 5 + Weekly Update 규칙) | 1.5일 | 금요일 주간보고 초안 |
 | 2 | v1.6.0 | Tasks 추출·화면, 사전 브리핑 (완료 2026-09-05) | 3일 | Craig 1:1 브리핑 |
-| 3 | v1.7.0 | Speaker Memory(오프라인 등록·매칭, 라이브 승격) | 4일 | Teams/발표자 보기 자동 명명 |
+| 3 | v1.7.0 | Speaker Memory(오프라인 등록·매칭, 라이브 승격) (완료 2026-09-05) | 4일 | Teams/발표자 보기 자동 명명 |
 | 4 | v1.8.0 | 전사 편집·용어 학습, People 뷰, 리마인더, 내보내기 | 2.5일 | 오인식 정정 루프 |
 
 총 13일 규모. Phase 1은 Phase 0 직후 가장 먼저 체감되는 항목이므로, Phase 0에서 ContextBuilder만 먼저 끝내면 Phase 1을 병행 착수할 수 있다.
@@ -223,53 +223,29 @@ Phase 0 (기반·G 일부) ─┬─> Phase 1 (Recipes)
 - `scheduleMorningBatch` 재호출 시 wake observer가 첫 provider를 유지한다(현재 init에서 1회만 호출하므로 영향 없음). provider를 저장 프로퍼티로 바꾸고 startup task에 취소 확인을 넣을 것.
 - 아침 배치의 LLM 호출 상한(일일 N건, 초과분은 10분 전 트리거·수동 새로고침으로): 공유 캘린더 사용자 대비.
 
-## Phase 3 리뷰 필요 (codex 미승인)
+## Phase 3 완료 (v1.7.0, 2026-09-05)
 
-상태: 구현은 완료되어 트리는 테스트 358개 통과·Release 빌드 성공이지만, codex critic이 10라운드(2026-09-05) 후에도 APPROVE하지 않았다. 전역 정책에 따라 `wip(phase3)` 커밋만 하고 버전 상향·패키징·설치·완료 표시는 하지 않았다. 아래 항목을 처리한 뒤 codex 재리뷰가 필요하다. 라운드 1~9에서 수정된 항목은 `.omc/team/phase3-report-worker-1.md`, `phase3-report-worker-2.md`와 `.omc/team/phase3-fix1.md` ~ `phase3-fix9.md`에 기록되어 있다.
+codex critic 리뷰 14라운드에서 승인 완료 (2026-09-05, 라운드 11부터 원장 프로토콜 적용).
+테스트 374개 전체 통과 및 Release 빌드 검증 완료.
+Phase 3 (Speaker Memory, v1.7.0) 구현 및 안정화 완료.
 
-codex 라운드 10 미해결 항목 (원문):
+### 구현 요약
+- FluidAudio DiarizerManager 기반 오프라인 다이어라이제이션 (them WAV 처리, clusterID 매핑, voice 카테고리 소요 시간 로깅)
+- VoiceprintStore: 다중 센트로이드(최대 5개) 코사인 유사도 매칭(matchThreshold + margin d1/d2), 3회 충돌 시 센트로이드 자동 제거, copy-on-write 파일 저장(voiceprints.json) 및 .corrupt 백업
+- 화자 명명 우선순위 적용: Zoom 태그 > 성문 매칭 > 슬롯명 > 폴백 순서이며, 사용자가 수동 편집한 manual 라벨은 절대 덮어쓰지 않고 후보 화자명(candidateNames) 보존
+- 마이크 WAV 스트리밍 유성 구간 스캔을 통한 Me 성문 자동 등록 (침묵 제외 최대 60초 유성 발화 수집, them 채널 매칭 시 Me 제외)
+- 전용 임베딩 추출기를 통한 라이브 슬롯 승격 (LS-EEND 30초 유성 발화 누적 시 백그라운드 매칭 및 슬롯명 자동 승격)
+- 비동기 2-pass 수명주기: 세션 스냅샷 분리, 120초 대기 경주(TimeoutRace), 디스크 수동 편집본과 다이어라이제이션 결과 병합, 세션 WAV 폴더 리스(ActiveFolderRegistry) 및 30분 보존 마커, 저장 실패 시 재시도(pendingDiarizationResults)
 
-검토 전 예측했던 위험(정리 레이스, 음성 등록 범위, 저장 오류 은닉, 충돌 카운터)은 모두 실제로 남아 있습니다.
+### Phase 3 후속 항목 (codex follow-ups, 비차단)
+- (r13) TwoPassJob.makeEmbeddingEngine 실제 배선을 구동하는 통합 테스트 보강 (현재 결함 증거 없음).
+- (r12) SessionAudioRecorder.deleteFiles() 실패 시 단순 로깅 외 재시도 또는 다음 purge 예약 추가로 민감한 임시 WAV 잔류 방지 (현재 다음 앱/세션 시작 시 purge로 완화).
+- (r12) 실제 하드웨어에서 3개의 FluidOfflineEngine 인스턴스에 대한 메모리 및 모델 초기화 비용 측정 (수동 QA).
+- (r11) WAVStreamReader가 선언된 데이터 청크보다 짧은 파일을 정상 EOF로 처리하는 동작을, 외부 WAV 입력 허용 시 명시적 오류로 전환 (현재 자체 생성 세션 WAV에서는 허용).
 
-1. **[BLOCKER] 활성 다이어라이제이션 중인 WAV를 다음 세션 시작 시 삭제할 수 있습니다.**  
-   - 위치: `AppState.swift` - `start()`의 `SessionAudioRecorder.purgeStale()` 및 `stop()`의 `runGuardedCleanup(... markRetainedUntilRestart:)` 하드리밋 분기
-   - 이유: 30분 하드리밋 후에도 기존 `diarizationTask`/me-enrollment 작업은 계속 실행됩니다. 그런데 사용자가 앱을 종료하지 않고 새 회의를 시작하면 `purgeStale()`가 이전 세션 폴더를 제거할 수 있습니다. 즉, 아직 읽는 중인 WAV가 사라져 다이어라이제이션/Me 등록이 실패합니다.
-   - 위반: “WAV는 re-decode와 diarization 완료 후에만 삭제”라는 수용 기준을 깨뜨립니다.
-   - 수정: 진행 중인 세션 폴더에는 in-process lease/active marker를 두고 `purgeStale()`가 현재 프로세스의 활성 작업 폴더를 절대 지우지 않게 하십시오. 이전 프로세스에서 남은 폴더만 purge해야 합니다.
-   - 테스트: 타임아웃된 작업을 gate로 막은 상태에서 새 세션을 시작해도 이전 WAV가 유지되는 통합 테스트가 필요합니다.
-
-2. **[MAJOR] Me 등록은 “최대 60초의 발화”가 아니라 회의 시작 후 첫 60초만 검사합니다.**  
-   - 위치: `OfflineDiarizer.swift` - `meEnrollmentClip(wavURL:maxSeconds:)`의 `loadWAV(url:maxSeconds:)`; `AppState.swift` - Me-enrollment 호출부
-   - 이유: `loadWAV(... maxSeconds: 60)`가 파일 앞부분만 읽고 그 뒤 침묵을 제거합니다. 사용자가 회의 초반 60초 동안 말하지 않고 이후 20초 이상 발화하면 등록되지 않습니다.
-   - 위반: “최대 60초의 mic speech로 Me를 등록” 요구를 충족하지 못합니다.
-   - 수정: 전체 mic WAV를 백그라운드에서 순차 스캔해 유성 구간을 최대 60초까지 모으십시오. 오디오는 메모리에서만 처리하고, 완료 뒤 기존 정리 경로로 삭제하면 됩니다.
-   - 테스트: 첫 60초는 침묵이고 이후 20초 이상 발화한 WAV가 Me 등록 대상으로 선택되는 케이스를 추가하십시오.
-
-3. **[MAJOR] 2-pass 정제 저장 실패가 삼켜지고, UI는 성공했다고 거짓 표시할 수 있습니다.**  
-   - 위치: `AppState.swift` - `stop()`의 `(3) refinedBase... 즉시 rows 갱신 및 2차 저장` hunk, `try? currentJob.meetingStore.updateRows(...)`
-   - 이유: `updateRows` 실패가 `try?`로 무시됩니다. 그 직전 `persistCurrentSession()`이 실패해도 내부에서 오류 메시지를 설정한 뒤, 호출부가 곧바로 `"Transcript refined and saved."`로 덮어씁니다.
-   - 영향: 사용자는 정제본이 저장됐다고 믿지만 디스크에는 이전 전사본만 남을 수 있습니다.
-   - 수정: 정제 저장을 throwing 결과로 처리하고, 성공한 뒤에만 성공 메시지를 표시하십시오. 실패 시 기존 `pendingDiarizationResults`와 동등한 재시도 payload 또는 명시적 오류 상태를 남기십시오.
-   - 테스트: `MeetingStore` 쓰기 실패 주입 후 성공 메시지가 표시되지 않고 재시도 가능한 상태가 남는지 검증하십시오.
-
-4. **[MAJOR] 충돌 카운터가 일반 등록/병합에서 조용히 초기화되어 “3회 충돌 시 centroid 삭제” 규칙을 우회합니다.**  
-   - 위치: `VoiceprintStore.swift` - `enroll`의 centroid merge에서 `conflicts: 0`; `merge`의 `conflicts: min(existing.conflicts, sCentroid.conflicts)`
-   - 이유: centroid가 두 번 충돌한 뒤 정상 등록 한 번만 발생해도 카운터가 0으로 돌아갑니다. 수동 프로필 병합도 더 낮은 카운터를 선택해 누적 증거를 잃습니다.
-   - 영향: 잘못된 voiceprint가 반복적으로 다른 사람으로 확인돼도 삭제되지 않아 자동 오인식이 장기간 유지될 수 있습니다.
-   - 수정: 동일 centroid를 병합할 때 기존 충돌 수를 보존하십시오. 명시적으로 “검증 성공 시 충돌 초기화” 정책을 도입할 의도가 아니라면 `existingCentroid.conflicts`를 유지해야 합니다.
-   - 테스트: `충돌 2회 → 동일 centroid 정상 등록 → 충돌 1회`에서 centroid가 제거되는지 검증하십시오.
-
-**누락된 검증**
-
-- 타임아웃 후 새 세션 시작과 WAV 보존의 상호작용 테스트가 없습니다.
-- Me 발화가 회의 후반에만 존재하는 경우가 없습니다.
-- 2-pass 저장 실패 및 성공 메시지 정합성 테스트가 없습니다.
-- 충돌 카운터가 등록/병합을 거쳐도 규칙대로 누적되는 테스트가 없습니다.
-
-**다중 관점**
-
-- 보안/프라이버시: 활성 WAV의 조기 삭제는 음성 데이터 자체의 유출은 아니지만, 생체성 음성 인식 결과를 불완전하게 만들고 실패를 숨깁니다.
-- 실행자: 현재 정리와 purge의 소유권 경계가 정의되지 않아 안전하게 구현할 수 없습니다.
-- 운영: 디스크 오류와 장시간 diarization이 현실적으로 발생하는 조건에서 UI 상태와 저장 상태가 불일치합니다.
-
-**VERDICT: REQUEST_CHANGES**
+### 수동 QA 항목
+- Zoom 회의 A에서 화자 성문 등록 후, 태그가 없는 회의 B에서 성문으로 자동 명명되는지 확인 (`voice` 로그 d1/d2 마진 확인)
+- 45분 길이 WAV에 대한 오프라인 다이어라이제이션 소요 시간 및 메모리 부하 확인
+- 에코 케이스 검증: them 채널 구간이 내 성문(isMe)과 매칭되어 오분류되지 않는지 확인
+- Teams 통화에서 30초 발화 후 라이브 승격(Live promotion)이 정상 동작하는지 확인
+- 3개의 FluidOfflineEngine 인스턴스(오프라인 다이어라이저, 라이브 임베딩 추출기, Me 등록 임시 추출기)의 메모리 점유 및 초기화 비용 확인

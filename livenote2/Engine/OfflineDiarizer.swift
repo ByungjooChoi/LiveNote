@@ -106,7 +106,7 @@ final class FluidOfflineEngine: OfflineDiarizationEngine, @unchecked Sendable {
 }
 
 /// 2-pass 오프라인 화자 분리 및 성문 임베딩 추출 액터
-/// diarize holds the actor for the whole synchronous engine call; callers that must not wait behind it use a separate OfflineDiarizer instance (own engine, own DiarizerManager).
+/// `diarize` and `embedding` hold the actor for the whole synchronous engine call. Three consumers therefore use three instances: the session diarizer (`AppState.offlineDiarizer`), the live promoter (`AppState.liveEmbeddingExtractor`), and a temporary instance created inside the me-enrollment task.
 actor OfflineDiarizer {
 
     private let engine: OfflineDiarizationEngine

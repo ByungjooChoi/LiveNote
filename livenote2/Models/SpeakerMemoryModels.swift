@@ -343,6 +343,8 @@ enum VoiceprintError: LocalizedError, Equatable {
     func match(_ embedding: [Float], excludingMe: Bool) -> VoiceMatch
     /// 이름(+email)으로 기존 person을 찾거나 새로 만들고 중심을 갱신. 최소 발화·품질 미달이면 throw. 반환: 갱신된 Person.
     @discardableResult func enroll(name: String, email: String?, samples: [EnrollmentSample], source: VoiceSource, isMe: Bool) throws -> Person
+    /// 본인(isMe) 성문 등록: 이미 isMe 프로필이 존재하면 아무 변경 없이 nil 반환, 부재 시 신규 등록 후 Person 반환
+    @discardableResult func enrollMeIfAbsent(name: String, samples: [EnrollmentSample], source: VoiceSource) throws -> Person?
     /// 성문 이름 != 확정 이름 충돌: 해당 person의 최근접 중심 conflicts += 1, conflictLimit 도달 시 그 중심 삭제. 반환: 삭제 여부.
     @discardableResult func recordConflict(personID: String, embedding: [Float]) throws -> Bool
     func merge(_ sourceID: String, into targetID: String) throws
@@ -356,5 +358,14 @@ extension VoiceprintStoring {
     /// 기본 match(_:)는 isMe 화자를 포함하여 매칭 (excludingMe: false)
     func match(_ embedding: [Float]) -> VoiceMatch {
         match(embedding, excludingMe: false)
+    }
+
+    /// 본인(isMe) 성문 등록 (부재 시에만)
+    @discardableResult
+    func enrollMeIfAbsent(name: String, samples: [EnrollmentSample], source: VoiceSource) throws -> Person? {
+        if people.contains(where: { $0.isMe }) {
+            return nil
+        }
+        return try enroll(name: name, email: nil, samples: samples, source: source, isMe: true)
     }
 }

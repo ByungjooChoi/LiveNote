@@ -1518,7 +1518,7 @@ final class SpeakerMemoryTests: XCTestCase {
             diarizerRef: nil,
             geminiRef: GeminiLiveTranslator(),
             offlineDiarizer: OfflineDiarizer(),
-            embeddingExtractor: OfflineDiarizer(),
+            makeEmbeddingEngine: { FluidOfflineEngine() },
             voiceprints: fakeVP,
             meetingStore: store,
             promoter: promoter,

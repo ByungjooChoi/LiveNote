@@ -57,7 +57,7 @@ struct TwoPassJob: Sendable {
     let diarizerRef: SpeakerDiarizer?
     let geminiRef: GeminiLiveTranslator
     let offlineDiarizer: OfflineDiarizer
-    let embeddingExtractor: OfflineDiarizer
+    let makeEmbeddingEngine: @Sendable () -> OfflineDiarizationEngine
     let voiceprints: VoiceprintStore
     let meetingStore: MeetingStore
     let promoter: LiveVoicePromoter
@@ -207,8 +207,8 @@ final class AppState {
     let voiceprints = VoiceprintStore()
     /// 2-pass 오프라인 다이어라이저
     @ObservationIgnored let offlineDiarizer: OfflineDiarizer
-    /// 성문 임베딩 전용 오프라인 다이어라이저
-    @ObservationIgnored let embeddingExtractor: OfflineDiarizer
+    /// 라이브 화자 승격용 성문 임베딩 오프라인 다이어라이저
+    @ObservationIgnored let liveEmbeddingExtractor: OfflineDiarizer
     /// 라이브 화자 승격 프로모터
     @ObservationIgnored let livePromoter: LiveVoicePromoter
     /// 라이브 화자 승격 세대 번호 (세션 교체 시 이전 콜백 무시용)
@@ -669,9 +669,9 @@ final class AppState {
     init() {
         let offlineDiarizer = OfflineDiarizer(engine: FluidOfflineEngine())
         self.offlineDiarizer = offlineDiarizer
-        let embeddingExtractor = OfflineDiarizer(engine: FluidOfflineEngine())
-        self.embeddingExtractor = embeddingExtractor
-        let promoter = LiveVoicePromoter(diarizer: embeddingExtractor)
+        let liveEmbeddingExtractor = OfflineDiarizer(engine: FluidOfflineEngine())
+        self.liveEmbeddingExtractor = liveEmbeddingExtractor
+        let promoter = LiveVoicePromoter(diarizer: liveEmbeddingExtractor)
         self.livePromoter = promoter
 
         let localChatRef = localChat
@@ -2037,7 +2037,7 @@ final class AppState {
             diarizerRef: diarizerRef,
             geminiRef: geminiRef,
             offlineDiarizer: self.offlineDiarizer,
-            embeddingExtractor: self.embeddingExtractor,
+            makeEmbeddingEngine: { FluidOfflineEngine() },
             voiceprints: self.voiceprints,
             meetingStore: self.meetingStore,
             promoter: self.livePromoter,
@@ -2215,7 +2215,7 @@ final class AppState {
                             let minEnrollSecs = currentJob.thresholds.minEnrollSeconds
                             let myName = currentJob.myName
                             let voiceprintsRef = currentJob.voiceprints
-                            let extractorRef = currentJob.embeddingExtractor
+                            let makeEngine = currentJob.makeEmbeddingEngine
                             meEnrollmentTask = Task.detached(priority: .utility) {
                                 do {
                                     let (clipSamples, clipSecs) = try OfflineDiarizer.meEnrollmentClip(wavURL: meURL, maxSeconds: 60.0)
@@ -2228,19 +2228,23 @@ final class AppState {
                                         AppLog.write("voice", "Me enrollment skipped: speech duration (\(String(format: "%.1f", clipSecs))s) < minEnrollSeconds (\(minEnrollSecs)s)")
                                         return
                                     }
-                                    let emb = try await extractorRef.embedding(samples: clipSamples)
+                                    AppLog.write("voice", "Me enrollment uses a temporary embedding engine")
+                                    // Task-local extractor is released when this detached task ends.
+                                    let meExtractor = OfflineDiarizer(engine: makeEngine())
+                                    let emb = try await meExtractor.embedding(samples: clipSamples)
                                     let sample = EnrollmentSample(embedding: emb, quality: 1.0, seconds: clipSecs)
 
                                     await MainActor.run {
                                         do {
-                                            let enrolled = try voiceprintsRef.enroll(
+                                            if let enrolled = try voiceprintsRef.enrollMeIfAbsent(
                                                 name: myName,
-                                                email: nil,
                                                 samples: [sample],
-                                                source: .live,
-                                                isMe: true
-                                            )
-                                            AppLog.write("voice", "Enrolled me voiceprint for '\(enrolled.name)' from \(String(format: "%.1f", clipSecs))s mic audio")
+                                                source: .live
+                                            ) {
+                                                AppLog.write("voice", "Enrolled me voiceprint for '\(enrolled.name)' from \(String(format: "%.1f", clipSecs))s mic audio")
+                                            } else {
+                                                AppLog.write("voice", "Me enrollment skipped: an isMe profile was created meanwhile")
+                                            }
                                         } catch {
                                             AppLog.write("voice", "Failed to enroll me voiceprint: \(error.localizedDescription)")
                                         }

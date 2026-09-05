@@ -23,6 +23,8 @@ actor LiveVoicePromoter {
     private let diarizer: OfflineDiarizer?
     private let embeddingProvider: (@Sendable ([Float]) async throws -> [Float])?
 
+    var diarizerInstance: OfflineDiarizer? { diarizer }
+
     private(set) var generation: Int = 0
 
     var currentGeneration: Int { generation }

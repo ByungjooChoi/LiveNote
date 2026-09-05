@@ -23,6 +23,23 @@ private final class AtomicBox<T>: @unchecked Sendable {
     }
 }
 
+private final class Counter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    func increment() {
+        lock.lock()
+        value += 1
+        lock.unlock()
+    }
+
+    var current: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
 @MainActor
 final class BriefingControllerTests: XCTestCase {
 
@@ -909,11 +926,11 @@ final class BriefingControllerTests: XCTestCase {
         comps.second = 0
         let fixedNow = testCalendar.date(from: comps)!
 
-        var generateCount = 0
+        let generateCount = Counter()
         let fakeBackend = BriefGenerator.Backend(
             apiKey: { "k" },
             cloud: { _, _, _ in
-                generateCount += 1
+                generateCount.increment()
                 return "# Last time\n- P\n# Open items\n- O\n# Suggested agenda\n- A\n- B\n- C"
             },
             local: { _, _ in "" }
@@ -958,7 +975,7 @@ final class BriefingControllerTests: XCTestCase {
         // 2. Later items -> batch runs once and records
         await controller.runMorningBatchIfNeeded(items: [item1], reason: "test")
         XCTAssertNotNil(userDefaults.object(forKey: "briefsLastBatchRun"))
-        XCTAssertEqual(generateCount, 1)
+        XCTAssertEqual(generateCount.current, 1)
 
         let item2 = CalendarMonitor.UpcomingMeetingItem(
             id: "event2",
@@ -970,7 +987,7 @@ final class BriefingControllerTests: XCTestCase {
 
         // 3. A second update the same day does not run again
         await controller.runMorningBatchIfNeeded(items: [item2], reason: "second-update")
-        XCTAssertEqual(generateCount, 1) // Did not increase
+        XCTAssertEqual(generateCount.current, 1) // Did not increase
     }
 
     func testCalendarItemsUpdatedPreloadsAndRunsMorningBatch() async throws {
