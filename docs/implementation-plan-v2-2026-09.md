@@ -94,7 +94,7 @@ Phase 0 (기반·G 일부) ─┬─> Phase 1 (Recipes)
 
 ---
 
-## Phase 2: Tasks + 사전 브리핑 (v1.6.0)
+## Phase 2: Tasks + 사전 브리핑 (v1.6.0, 완료: 2026-09-05)
 
 ### 2.1 Tasks 추출 (D)
 - `Engine/SummaryService.swift` userPrompt 끝에 tasks 블록 요구 문구 추가(회의 날짜를 프롬프트에 주입해 상대 기한을 절대 날짜로). `cleaned()`에서 `<!-- tasks … -->` 블록을 분리해 `(summary, tasksJSON)` 반환하도록 시그니처 확장(`cleanedWithTasks`). Gemini/Qwen 두 경로 모두 통과.
@@ -206,7 +206,7 @@ Phase 0 (기반·G 일부) ─┬─> Phase 1 (Recipes)
 |---|---|---|---|---|
 | 0 | v1.4.0 | attendees·ContextBuilder 기반, 알림 분할 버튼, 자동 제목, 대면 모드, 카운트다운 | 2일 | 팝업 3경로, 제목 폴더 반영 |
 | 1 | v1.5.0 | Recipes(내장 5 + Weekly Update 규칙) | 1.5일 | 금요일 주간보고 초안 |
-| 2 | v1.6.0 | Tasks 추출·화면, 사전 브리핑 | 3일 | Craig 1:1 브리핑 |
+| 2 | v1.6.0 | Tasks 추출·화면, 사전 브리핑 (완료 2026-09-05) | 3일 | Craig 1:1 브리핑 |
 | 3 | v1.7.0 | Speaker Memory(오프라인 등록·매칭, 라이브 승격) | 4일 | Teams/발표자 보기 자동 명명 |
 | 4 | v1.8.0 | 전사 편집·용어 학습, People 뷰, 리마인더, 내보내기 | 2.5일 | 오인식 정정 루프 |
 
@@ -216,3 +216,9 @@ Phase 0 (기반·G 일부) ─┬─> Phase 1 (Recipes)
 - 라이브 경로 교체(Nemotron 스트리밍 / SlidingWindowAsrManager + word boost): 14초 창 휴리스틱 폐기 작업. 별도 트랙으로, Phase 4의 용어 학습이 끝나면 jargon을 디코더에 공급하는 형태로 연결.
 - 스마트 검색(FTS5 + agentic): 2차 프로젝트. People 뷰(P4)와 attendees(P0)가 그때의 메타데이터 필드가 된다.
 - Scratchpad·템플릿(E): 제외 결정.
+
+## Phase 2 후속 항목 (codex 리뷰 7라운드 후 보류, 2026-09-05)
+- TaskStore 2파일 커밋(회의 `tasks.json` → `tasks/index.json`)의 크래시 내구성: 두 쓰기 사이에 강제 종료되면 세대 불일치가 남는다. 저널/커밋 마커와 시작 시 복구가 필요하면 Phase 4 저장소 정리 때 함께 다룬다. 현재는 `.prev` 백업과 `commitFailed` 오류 표면화까지만 구현.
+- 브리핑 세션 귀속: `start()`가 `calendar.ongoingUpcomingItem()` 휴리스틱으로 이벤트를 고른다(Phase 0의 제목·참석자 캡처와 동일 방식). Coming up의 Start now와 캘린더 자동 시작이 정확한 `eventKey`를 넘기도록 바꾸면 겹친 일정·수동 시작의 오귀속이 사라진다.
+- `scheduleMorningBatch` 재호출 시 wake observer가 첫 provider를 유지한다(현재 init에서 1회만 호출하므로 영향 없음). provider를 저장 프로퍼티로 바꾸고 startup task에 취소 확인을 넣을 것.
+- 아침 배치의 LLM 호출 상한(일일 N건, 초과분은 10분 전 트리거·수동 새로고침으로): 공유 캘린더 사용자 대비.

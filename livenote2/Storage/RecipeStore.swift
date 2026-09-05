@@ -156,6 +156,7 @@ final class RecipeStore {
         "open-commitments",
         "customer-call-brief",
         "korean-digest",
+        "extract-tasks",
     ]
 
     /// 내장 우선, 그다음 제목 오름차순(대소문자 무시).

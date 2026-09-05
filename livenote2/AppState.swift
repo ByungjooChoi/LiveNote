@@ -135,6 +135,10 @@ final class AppState {
     let chatStore = ChatStore()
     /// 레시피 저장소 (Phase 1 Recipes)
     let recipeStore = RecipeStore()
+    /// 태스크 관리 컨트롤러 (Phase 2 Tasks)
+    let tasks = TasksController()
+    /// 사전 브리핑 관리자 (Phase 2 Briefing)
+    let briefing: BriefingController
     var isRecipeRunning = false
     var lastRecipeError: String?
 
@@ -271,6 +275,26 @@ final class AppState {
                 let reason = geminiKeychainError ?? "No Gemini API key"
                 AppLog.write("recipe", "\(reason) → 로컬 엔진 폴백")
             }
+            if recipe.id == "extract-tasks" {
+                let importResult = tasks.importRecipeJSON(result.text, usedMeetings: result.usedMeetings, myName: myName)
+                if case .invalidJSON = importResult {
+                    lastRecipeError = importResult.message
+                }
+                chatMessages.append(ChatMessage(role: .assistant, text: importResult.message))
+                persistCurrentChat()
+                let elapsed = String(format: "%.1f", Date().timeIntervalSince(started))
+                let (imported, failed) = {
+                    if case .done(let imp, let fail, _) = importResult { return (imp, fail) }
+                    return (0, 0)
+                }()
+                AppLog.write(
+                    "recipe",
+                    "레시피 실행 완료 id=\(recipe.id) meetings=\(meetings.count) imported=\(imported) failed=\(failed) model=\(resolvedModel.rawValue) local=\(result.usedLocalEngine) lang=\(language.count)자 \(elapsed)s"
+                )
+                pendingScreen = .chat
+                return true
+            }
+
             let assistantText = Self.recipeAssistantText(
                 resultText: result.text,
                 usedLocalEngine: result.usedLocalEngine,
@@ -498,6 +522,7 @@ final class AppState {
     enum PendingScreen: Equatable {
         case settings
         case chat
+        case tasks
     }
     var pendingScreen: PendingScreen?
 
@@ -565,6 +590,22 @@ final class AppState {
     // MARK: - 초기화 (설정 복원)
 
     init() {
+        let localChatRef = localChat
+        let tasksRef = tasks
+        let meetingStoreRef = meetingStore
+        let geminiKeyRef = geminiKey
+        briefing = BriefingController(
+            meetingStore: meetingStoreRef,
+            backend: .live(
+                apiKey: { geminiKeyRef.load() },
+                localEngine: localChatRef
+            ),
+            openTasksProvider: { names in
+                try tasksRef.store.openTasks(matchingNames: names)
+            },
+            language: { LanguagePrefs.summaryLanguage }
+        )
+
         LanguagePrefs.migrateSummaryLanguageDefault()
         refreshGeminiKeyStatus()
         let defaults = UserDefaults.standard
@@ -594,6 +635,7 @@ final class AppState {
         }
         internalJargon = defaults.string(forKey: "internalJargon") ?? ""
         localModelID = defaults.string(forKey: "localModelID") ?? SummaryService.defaultModelID
+
         MeetingStore.migrateLegacyRootIfNeeded()   // livenote2 → LiveNote 데이터 폴더 이행 (1회)
         ModelSeeder.seedIfNeeded()
         SessionAudioRecorder.purgeStale()   // 비정상 종료가 남긴 임시 오디오 청소
@@ -686,6 +728,33 @@ final class AppState {
             // "처리됨"으로 본다. 그 패널이 곧 기록을 시작하므로 재시도는 중복 시작만 부른다.
             return true
         }
+
+        // 캘린더 회의 10분 전 임박 감지 → 사전 브리핑 자동 준비
+        calendar.onMeetingApproaching = { [weak self] item in
+            guard let self else { return }
+            Task {
+                await self.briefing.ensureBrief(for: item)
+            }
+        }
+
+        // 캘린더 알림 팝업 제안 안건 첫 줄 제공
+        calendar.suggestedAgendaProvider = { [weak self] item in
+            self?.briefing.brief(for: item.eventKey)?.suggestedAgendaFirstLine
+        }
+
+        briefing.onUserNotice = { [weak self] text in
+            self?.noticeMessage = text
+        }
+
+        calendar.onTodayUpcomingChanged = { [weak self] items in
+            self?.briefing.calendarItemsUpdated(items)
+        }
+
+        // 아침 일괄 브리핑 스케줄러 기동
+        briefing.scheduleMorningBatch(itemsProvider: { [weak self] in
+            self?.calendar.todayUpcoming ?? []
+        })
+        briefing.calendarItemsUpdated(calendar.todayUpcoming)
     }
 
     // MARK: - 화자 이름
@@ -870,6 +939,7 @@ final class AppState {
     func start(mode: StartMode = .online) {
         guard !isActive else { return }
         currentStartMode = mode
+        briefing.beginSession(item: calendar.ongoingUpcomingItem())
         phase = .preparing("Preparing…")
         rows.removeAll()
         volatileText = [.me: "", .them: ""]
@@ -1085,6 +1155,7 @@ final class AppState {
     func stop() {
         guard isRunning else { return }
         AppLog.write("app", "세션 중지 rows=\(rows.count)")
+        briefing.endSession()
         zoomTagger.stop()
         micMutedByZoom = false
         mic?.stop()
@@ -1241,6 +1312,9 @@ final class AppState {
             attendees: meetingAttendees.isEmpty ? nil : meetingAttendees,
             existingURL: currentMeetingURL
         )
+        if let currentMeetingURL {
+            briefing.copyBriefIfAvailable(toMeetingFolder: currentMeetingURL)
+        }
     }
 
     /// 중지 후 상태에서 이름 변경/늦은 번역이 생기면 1.5초 뒤 조용히 재저장.
@@ -1341,8 +1415,9 @@ final class AppState {
     /// 방금 끝난 세션의 요약 생성.
     func generateSummaryForCurrentSession() {
         guard summaryPhase != .generating, !rows.isEmpty else { return }
+        let meetingDate = sessionStartedAt ?? Date()
         let meeting = SavedMeeting(
-            startedAt: sessionStartedAt ?? Date(),
+            startedAt: meetingDate,
             durationSeconds: rows.map(\.endSeconds).max() ?? 0,
             myName: myName,
             speakerNames: speakerNames,
@@ -1357,29 +1432,53 @@ final class AppState {
         let targetStartedAt = sessionStartedAt
         // 자동 제목 필요 여부도 대상 세션 기준으로 미리 붙잡는다 (await 이후 meetingTitle은 새 세션 것).
         let targetNeedsAutoTitle = (meetingTitle == nil)
+        let capturedAttendees = meetingAttendees
+        let capturedSpeakerNames = Array(speakerNames.values)
+        let capturedTitle = meetingTitle
+        let capturedMyName = myName
         summaryPhase = .generating
         Task { [weak self] in
             guard let self else { return }
             do {
-                let summary = try await self.runSummary(transcript: transcript)
+                let output = try await self.runSummary(transcript: transcript, meetingDate: meetingDate)
                 guard self.sessionStartedAt == targetStartedAt else {
                     // 이미 다른 세션이 시작됐다: 현재 화면 상태(meetingTitle/currentMeetingURL/
                     // currentSummary)는 건드리지 않고 대상 회의 폴더에만 요약과 자동 제목을 반영한다.
                     if let targetURL {
-                        self.meetingStore.updateSummary(at: targetURL, summary: summary)
+                        self.meetingStore.updateSummary(at: targetURL, summary: output.summary)
+                        self.tasks.record(
+                            summaryOutput: output,
+                            meetingURL: targetURL,
+                            meetingTitle: self.meetingStore.load(targetURL)?.title ?? capturedTitle,
+                            meetingDate: targetStartedAt,
+                            attendees: capturedAttendees,
+                            speakerNames: capturedSpeakerNames,
+                            myName: capturedMyName
+                        )
                         AppLog.write("summary", "세션 교체됨: 이전 회의 폴더에만 요약 반영")
                         if targetNeedsAutoTitle,
-                           let title = MeetingStore.titleFromSummary(summary),
+                           let title = MeetingStore.titleFromSummary(output.summary),
                            self.meetingStore.rename(at: targetURL, title: title) != nil {
                             AppLog.write("app", "세션 교체됨: 이전 회의에 자동 제목 반영 \(title.count)자")
                         }
                     }
                     return
                 }
-                self.currentSummary = summary
+                self.currentSummary = output.summary
                 self.summaryPhase = .idle
                 self.persistCurrentSession()
-                self.applyAutoTitleIfNeeded(from: summary)
+                self.applyAutoTitleIfNeeded(from: output.summary)
+                if let savedURL = self.currentMeetingURL {
+                    self.tasks.record(
+                        summaryOutput: output,
+                        meetingURL: savedURL,
+                        meetingTitle: self.meetingTitle ?? capturedTitle,
+                        meetingDate: targetStartedAt,
+                        attendees: capturedAttendees,
+                        speakerNames: capturedSpeakerNames,
+                        myName: capturedMyName
+                    )
+                }
             } catch {
                 guard self.sessionStartedAt == targetStartedAt else { return }
                 self.summaryPhase = .failed(error.localizedDescription)
@@ -1405,7 +1504,7 @@ final class AppState {
 
     /// 요약 실행 라우팅: 클라우드 백엔드 + API 키 보유 시 Gemini 3.7 Flash
     /// (빠르고 품질 우위, 모델 로드 불필요), 실패하거나 로컬 백엔드면 Qwen 로컬.
-    private func runSummary(transcript: String) async throws -> String {
+    private func runSummary(transcript: String, meetingDate: Date) async throws -> SummaryOutput {
         let route = Self.summaryRoute(
             backend: backend,
             key: loadGeminiKey(),
@@ -1414,7 +1513,11 @@ final class AppState {
         switch route {
         case .cloud(let key):
             do {
-                return try await GeminiSummarizer.generateSummary(transcript: transcript, apiKey: key)
+                return try await GeminiSummarizer.generateSummary(
+                    transcript: transcript,
+                    apiKey: key,
+                    meetingDate: meetingDate
+                )
             } catch {
                 AppLog.write("summary", "클라우드 실패 → 로컬 Qwen 폴백: \(error.localizedDescription.prefix(150))")
             }
@@ -1425,7 +1528,7 @@ final class AppState {
             }
         }
         AppLog.write("summary", "로컬 Qwen 요약 시작 transcript=\(transcript.count)자")
-        return try await SummaryService().generateSummary(transcript: transcript)
+        return try await SummaryService().generateSummary(transcript: transcript, meetingDate: meetingDate)
     }
 
     /// 저장된 회의의 요약 생성 (session.json + summary.md 갱신).
@@ -1438,8 +1541,17 @@ final class AppState {
         Task { [weak self] in
             guard let self else { return }
             do {
-                let summary = try await self.runSummary(transcript: transcript)
-                self.meetingStore.updateSummary(at: url, summary: summary)
+                let output = try await self.runSummary(transcript: transcript, meetingDate: meeting.startedAt)
+                self.meetingStore.updateSummary(at: url, summary: output.summary)
+                self.tasks.record(
+                    summaryOutput: output,
+                    meetingURL: url,
+                    meetingTitle: meeting.title,
+                    meetingDate: meeting.startedAt,
+                    attendees: meeting.attendees ?? [],
+                    speakerNames: Array(meeting.speakerNames.values),
+                    myName: meeting.myName
+                )
                 self.summaryPhase = .idle
             } catch {
                 self.summaryPhase = .failed(error.localizedDescription)

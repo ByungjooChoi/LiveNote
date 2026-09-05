@@ -5,8 +5,13 @@ import MLXLLM
 import MLXLMCommon
 import Tokenizers
 
-/// 회의 요약 생성 — Qwen3.5-4B (4bit, MLX, 로컬).
-/// 2026년 3월 출시된 Qwen3.5 소형 라인 — 4B급 현존 최신 세대 (Apache 2.0, 262K 컨텍스트).
+struct SummaryOutput: Equatable, Sendable {
+    var summary: String
+    var tasksJSON: String?
+}
+
+/// 회의 요약 생성 (Qwen3.5-4B 4bit, MLX, 로컬).
+/// 2026년 3월 출시된 Qwen3.5 소형 라인 (4B급 현존 최신 세대, Apache 2.0, 262K 컨텍스트).
 ///
 /// 설계: 모델(~2.3GB)을 상주시키지 않고 요약 요청 때만 로드하고,
 /// 생성이 끝나면 참조를 놓아 메모리를 반환합니다. 회의 중 상주 메모리를
@@ -18,23 +23,23 @@ actor SummaryService {
 
     static let defaultModelID = "mlx-community/Qwen3.5-4B-4bit"
 
-    /// 로컬 LLM 모델 ID — Settings에서 선택 (4B 기본 / 9B 품질 우선).
+    /// 로컬 LLM 모델 ID (Settings에서 선택: 4B 기본 / 9B 품질 우선).
     /// 요약과 로컬 채팅이 공유.
     static var modelID: String {
         UserDefaults.standard.string(forKey: "localModelID") ?? defaultModelID
     }
 
-    /// 전사본(영어, 화자 라벨 포함)을 받아 한국어 회의 요약을 생성.
-    func generateSummary(transcript: String) async throws -> String {
+    /// 전사본(영어, 화자 라벨 포함)을 받아 회의 요약 및 태스크 JSON을 생성.
+    func generateSummary(transcript: String, meetingDate: Date = Date()) async throws -> SummaryOutput {
         // mlx-swift-lm 3.x: 다운로더/토크나이저가 별도 패키지로 분리됨.
         // MLXHuggingFace 매크로가 HF 다운로더 + 토크나이저를 묶어 제공하는 정식 경로.
         let configuration = ModelConfiguration(id: Self.modelID)
         let container = try await #huggingFaceLoadModelContainer(configuration: configuration)
         let session = ChatSession(container, instructions: Self.systemPrompt)
 
-        let response = try await session.respond(to: Self.userPrompt(transcript: transcript))
-        return Self.cleaned(response)
-        // container/session은 여기서 스코프를 벗어나며 해제 → 모델 메모리 반환
+        let response = try await session.respond(to: Self.userPrompt(transcript: transcript, meetingDate: meetingDate))
+        return Self.cleanedWithTasks(response)
+        // container/session은 여기서 스코프를 벗어나며 해제 -> 모델 메모리 반환
     }
 
     // MARK: - 프롬프트
@@ -61,9 +66,19 @@ actor SummaryService {
     // enable_thinking=false 템플릿 kwarg도 mlx-swift-lm에서 전달되지 않는 이슈(#154)가 있어
     // 사고 억제는 시스템 프롬프트 지시 + cleaned()의 "## 개요" 앵커 절단으로 처리한다.
     static func userPrompt(transcript: String) -> String {
+        userPrompt(transcript: transcript, meetingDate: Date())
+    }
+
+    static func userPrompt(transcript: String, meetingDate: Date) -> String {
         // 컨텍스트 안전 상한: 뒤쪽(최신) 우선으로 자름
         let capped = String(transcript.suffix(60_000))
         let outputLang = LanguagePrefs.summaryLanguage == "Korean" ? "한국어" : "영어(English)"
+
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "en_US_POSIX")
+        df.dateFormat = "yyyy-MM-dd, EEEE"
+        let dateStr = df.string(from: meetingDate)
+
         return """
         다음 회의 전사본으로 "회의록(meeting minutes)"을 \(outputLang)로 작성해 주세요.
 
@@ -80,22 +95,51 @@ actor SummaryService {
         - 마지막 섹션은 "# Next Steps": \(LanguagePrefs.summaryLanguage == "Korean" ? "\"- **할 일** (담당자)\"" : "\"- **Task** (owner)\"") 형식.
         - 인사말·잡담·진행 멘트 제외. 응답 첫 줄은 반드시 "# "로 시작.
 
+        After the minutes, append one machine-readable block and nothing after it:
+        <!-- tasks
+        [{"title":"...","owner":"Craig","due":"2026-09-05","quote":"one original sentence"}]
+        -->
+        Rules: only explicit commitments or requests, at most 8 items, "owner" is the person who will do it (use "me" for the note taker), "due" is an absolute yyyy-MM-dd date computed from the meeting date \(dateStr) or null, "quote" is one verbatim sentence. If there are none, output an empty array.
+
         --- 전사본 시작 ---
         \(capped)
         --- 전사본 끝 ---
         """
     }
 
-    // 주의: cleaned()/systemPrompt/userPrompt는 GeminiSummarizer(클라우드 요약)와 공유됨.
+    // 주의: cleanedWithTasks()/cleaned()/systemPrompt/userPrompt는 GeminiSummarizer(클라우드 요약)와 공유됨.
 
-    /// Qwen 계열 thinking 누출 등 출력 정리.
-    /// ① <think>...</think> 태그 블록 제거.
-    /// ② 태그 없이 평문으로 새는 사고 과정 제거: Qwen3.5가 /no_think를 무시하고
-    ///    "Thinking Process:" 평문을 앞에 붙이는 사례를 실측(2026-08-06 세션).
-    ///    출력 형식의 첫 헤더인 "## 개요"로 시작하는 줄을 앵커로 그 앞을 전부 절단.
-    ///    사고 과정 안에서 형식을 인용할 때는 들여쓰기·불릿이 붙어 줄 시작이 아니므로 안전.
-    static func cleaned(_ text: String) -> String {
-        var result = text
+    /// Qwen 계열 thinking 누출 등 출력 정리 및 Tasks JSON 블록 분리.
+    static func cleanedWithTasks(_ text: String) -> SummaryOutput {
+        var tasksJSON: String? = nil
+        var summarySource = text
+
+        // <!-- tasks ... --> 블록 분리
+        if let startRange = summarySource.range(of: "<!-- tasks") {
+            let searchRange = startRange.upperBound..<summarySource.endIndex
+            if let endRange = summarySource.range(of: "-->", range: searchRange) {
+                let trailing = summarySource[endRange.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+                if trailing.isEmpty {
+                    // 블록 뒤에 공백만 있는 경우에만 정상 JSON 채택
+                    let blockContent = String(summarySource[startRange.upperBound..<endRange.lowerBound])
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    tasksJSON = blockContent
+                    summarySource.removeSubrange(startRange.lowerBound..<endRange.upperBound)
+                } else {
+                    // 블록 뒤에 추가 본문이 있는 경우: 본문은 보존(블록 제거), tasksJSON은 malformed 센티넬 처리
+                    let blockContent = String(summarySource[startRange.lowerBound...])
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    tasksJSON = blockContent
+                    summarySource.removeSubrange(startRange.lowerBound..<endRange.upperBound)
+                }
+            } else {
+                let blockContent = String(summarySource[startRange.lowerBound...])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                tasksJSON = blockContent
+            }
+        }
+
+        var result = summarySource
         // <think>...</think> 블록 제거
         while let start = result.range(of: "<think>"),
               let end = result.range(of: "</think>", range: start.upperBound..<result.endIndex) {
@@ -107,7 +151,13 @@ actor SummaryService {
            anchor > 0 {
             result = lines[anchor...].joined(separator: "\n")
         }
-        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+        let summary = result.trimmingCharacters(in: .whitespacesAndNewlines)
+        return SummaryOutput(summary: summary, tasksJSON: tasksJSON)
+    }
+
+    /// 요약 본문만 반환 (하위 호환).
+    static func cleaned(_ text: String) -> String {
+        cleanedWithTasks(text).summary
     }
 }
 
@@ -120,7 +170,11 @@ enum GeminiSummarizer {
 
     static let model = "gemini-3.7-flash"
 
-    static func generateSummary(transcript: String, apiKey: String) async throws -> String {
+    static func generateSummary(
+        transcript: String,
+        apiKey: String,
+        meetingDate: Date = Date()
+    ) async throws -> SummaryOutput {
         guard let url = URL(string:
             "https://generativelanguage.googleapis.com/v1beta/models/\(model):generateContent"
         ) else {
@@ -136,7 +190,7 @@ enum GeminiSummarizer {
             "systemInstruction": ["parts": [["text": SummaryService.systemPrompt]]],
             "contents": [[
                 "role": "user",
-                "parts": [["text": SummaryService.userPrompt(transcript: transcript)]],
+                "parts": [["text": SummaryService.userPrompt(transcript: transcript, meetingDate: meetingDate)]],
             ]],
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -150,9 +204,9 @@ enum GeminiSummarizer {
             throw Self.error("Gemini 응답 파싱 실패")
         }
         let text = parts.compactMap { $0["text"] as? String }.joined()
-        let cleanedText = SummaryService.cleaned(text)
-        guard !cleanedText.isEmpty else { throw Self.error("Gemini가 빈 요약을 반환") }
-        return cleanedText
+        let output = SummaryService.cleanedWithTasks(text)
+        guard !output.summary.isEmpty else { throw Self.error("Gemini가 빈 요약을 반환") }
+        return output
     }
 
     private static func error(_ message: String) -> NSError {

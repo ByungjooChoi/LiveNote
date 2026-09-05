@@ -84,6 +84,21 @@ final class MeetingStore {
 
     // MARK: - 목록
 
+    /// 최근 회의의 화자 이름 매핑 (최대 limit건, session.json 지연 로딩).
+    func speakerNamesByMeeting(since date: Date, limit: Int = 50) -> [URL: [String]] {
+        var result: [URL: [String]] = [:]
+        let recent = meetings.filter { $0.startedAt >= date }.prefix(limit)
+        for summary in recent {
+            if let saved = load(summary.url) {
+                let names = Array(saved.speakerNames.values).filter { !$0.isEmpty }
+                if !names.isEmpty {
+                    result[summary.url] = names
+                }
+            }
+        }
+        return result
+    }
+
     func refresh() {
         var found: [MeetingSummary] = []
         let folders = (try? FileManager.default.contentsOfDirectory(

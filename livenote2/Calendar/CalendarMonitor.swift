@@ -12,16 +12,18 @@ struct MeetingAlert: Equatable {
     let end: Date
     /// 초대에 들어 있던 원본 https 링크 (브라우저 폴백용)
     let webLink: URL
-    /// zoommtg:// 딥링크 (파싱 성공 시 — Zoom 앱을 브라우저 없이 바로 실행)
+    /// zoommtg:// 딥링크 (파싱 성공 시 - Zoom 앱을 브라우저 없이 바로 실행)
     let deepLink: URL?
 }
 
-/// 애플 캘린더 연동 — 회의 시작 1분 전 참가 팝업 (Granola 스타일).
+typealias UpcomingMeetingItem = CalendarMonitor.UpcomingMeetingItem
+
+/// 애플 캘린더 연동 - 회의 시작 1분 전 참가 팝업 (Granola 스타일).
 ///
 /// EventKit으로 Calendar.app에 연결된 모든 캘린더(구글 계정 포함)를 10초 주기로 확인해
 /// Zoom 링크가 있는 일정을 찾고, 시작 60초 전부터 우상단에 플로팅 패널을 띄웁니다.
 /// [참가]: zoommtg:// 딥링크로 Zoom 앱을 직접 열고(미설치 시 웹 링크),
-/// 기록이 꺼져 있으면 전사도 함께 시작합니다 (onJoinRequested — AppState가 배선).
+/// 기록이 꺼져 있으면 전사도 함께 시작합니다 (onJoinRequested - AppState가 배선).
 ///
 /// 제외: 종일 일정, 취소된 일정, 내가 거절한 초대, Zoom 링크가 없는 일정.
 /// 시작 후 10분까지는 팝업을 유지합니다 (지각 참가 대비).
@@ -29,7 +31,7 @@ struct MeetingAlert: Equatable {
 @Observable
 final class CalendarMonitor {
 
-    /// 회의 임박 알림 사용 여부 (UserDefaults 영속, 기본 켜짐 — 최초 켤 때 캘린더 권한 요청)
+    /// 회의 임박 알림 사용 여부 (UserDefaults 영속, 기본 켜짐 - 최초 켤 때 캘린더 권한 요청)
     private(set) var isEnabled = false
     /// 캘린더 시각 자동 시작 감시 사용 여부. 알림이 꺼져 있어도 이 값이 켜져 있으면
     /// 폴링 루프는 돌아야 한다 (팝업 없이 시작 시각 통지만 필요한 조합).
@@ -37,22 +39,30 @@ final class CalendarMonitor {
     /// 권한 거부 등 안내 배너 (nil이면 정상)
     var issueMessage: String?
 
-    /// [참가] 클릭 시 호출 — AppState가 "기록 시작"을 배선합니다.
+    /// [참가] 클릭 시 호출 - AppState가 "기록 시작"을 배선합니다.
     @ObservationIgnored var onJoinRequested: (() -> Void)?
     /// "Start LiveNote only" 선택 시 호출: 링크는 열지 않고 기록만 시작.
     @ObservationIgnored var onRecordRequested: (() -> Void)?
     /// "Change notification settings" 선택 시 호출: AppState가 Settings 화면을 요청.
     @ObservationIgnored var onOpenSettingsRequested: (() -> Void)?
     /// 캘린더 회의 시작 시각 도달 시 호출 (해당 일정 전달).
-    /// 반환값은 "실제로 처리했는지"다. AppState가 autoStartAtCalendarTime 꺼짐·이미 기록 중 등으로
+    /// 반환값은 "실제로 처리했는지"다. AppState가 autoStartAtCalendarTime 꺼짐/이미 기록 중 등으로
     /// 무시하면 false를 돌려주고, 그때는 통지 키를 남기지 않아 다음 tick에 다시 시도한다.
     @ObservationIgnored var onMeetingTimeReached: ((UpcomingMeetingItem) -> Bool)?
+    /// 회의 임박(시작 10분 전 이내) 시 호출: 브리핑 사전 생성 트리거.
+    @ObservationIgnored var onMeetingApproaching: ((UpcomingMeetingItem) -> Void)?
+    /// 오늘 일정 목록 변경 시 호출 (브리핑 사전 캐싱 연동용).
+    @ObservationIgnored var onTodayUpcomingChanged: (([UpcomingMeetingItem]) -> Void)?
+    /// 사전 브리핑 제안 안건 첫 줄 제공자 (알림 팝업 부제용).
+    @ObservationIgnored var suggestedAgendaProvider: ((UpcomingMeetingItem) -> String?)?
 
     @ObservationIgnored private let store = EKEventStore()
     @ObservationIgnored private var monitorTask: Task<Void, Never>?
     @ObservationIgnored private var alertedKeys: Set<String> = []
     /// 시작 시각 도달을 이미 통지한 일정 (회의당 1회). 값은 회의 종료 시각이고, 지난 일정은 tick에서 버린다.
     @ObservationIgnored private var startNotifiedKeys: [String: Date] = [:]
+    /// 임박 알림을 이미 통지한 일정 (회의당 1회). 값은 회의 종료 시각.
+    @ObservationIgnored private var approachingNotifiedKeys: [String: Date] = [:]
     @ObservationIgnored private var currentAlert: MeetingAlert?
     @ObservationIgnored private let panel = MeetingAlertPanelController()
 
@@ -119,10 +129,10 @@ final class CalendarMonitor {
                 issueMessage = nil
                 startMonitoring()
             } else {
-                issueMessage = "Calendar access denied — meeting alerts are off. Allow full access for LiveNote in System Settings > Privacy & Security > Calendars."
+                issueMessage = "Calendar access denied: meeting alerts are off. Allow full access for LiveNote in System Settings > Privacy & Security > Calendars."
             }
         default:
-            issueMessage = "No calendar access — meeting alerts are disabled. Allow full access for LiveNote in System Settings > Privacy & Security > Calendars."
+            issueMessage = "No calendar access: meeting alerts are disabled. Allow full access for LiveNote in System Settings > Privacy & Security > Calendars."
         }
     }
 
@@ -148,9 +158,13 @@ final class CalendarMonitor {
 
         // 종료된 회의의 통지 키 정리 (앱을 오래 켜둬도 집합이 계속 커지지 않게)
         startNotifiedKeys = Self.prunedNotifiedKeys(startNotifiedKeys, now: now)
+        approachingNotifiedKeys = Self.prunedNotifiedKeys(approachingNotifiedKeys, now: now)
 
         // 회의 시작 시각 도달 통지 (AppState의 autoStartAtCalendarTime이 실제 시작 여부 결정)
         notifyMeetingTimeReached(now: now)
+
+        // 회의 임박(10분 전 이내) 통지 - 브리핑 생성 트리거
+        notifyMeetingApproaching(now: now)
 
         // 여기부터는 알림 팝업 전용 구간: 알림이 꺼져 있으면 통지만 하고 끝낸다.
         guard isEnabled else { return }
@@ -165,9 +179,21 @@ final class CalendarMonitor {
         guard let candidate = nextEligibleMeeting(at: now) else { return }
         alertedKeys.insert(candidate.key)
         currentAlert = candidate
+
+        let upcomingCandidate = todayUpcoming.first { $0.id == candidate.key }
+            ?? UpcomingMeetingItem(
+                id: candidate.key,
+                title: candidate.title,
+                start: candidate.start,
+                end: candidate.end,
+                webLink: candidate.webLink,
+                deepLink: candidate.deepLink
+            )
+        let suggestedAgenda = suggestedAgendaProvider?(upcomingCandidate)
+
         panel.show(
             meeting: candidate,
-            suggestedAgenda: nil,
+            suggestedAgenda: suggestedAgenda,
             onJoin: { [weak self] in
                 Task { @MainActor in self?.join() }
             },
@@ -206,6 +232,18 @@ final class CalendarMonitor {
             guard handler(item) else { continue }
             startNotifiedKeys[item.id] = item.end
             return
+        }
+    }
+
+    /// 회의 시작 10분 전(0 < start - now <= 600s)에 도달한 일정을 통지한다 (브리핑 준비용).
+    func notifyMeetingApproaching(now: Date = Date()) {
+        guard let handler = onMeetingApproaching else { return }
+        for item in todayUpcoming {
+            let remaining = item.start.timeIntervalSince(now)
+            guard remaining > 0, remaining <= 600 else { continue }
+            guard approachingNotifiedKeys[item.id] == nil else { continue }
+            approachingNotifiedKeys[item.id] = item.end
+            handler(item)
         }
     }
 
@@ -290,8 +328,12 @@ final class CalendarMonitor {
         let title: String
         let start: Date
         let end: Date
-        let webLink: URL?
-        let deepLink: URL?
+        var webLink: URL? = nil
+        var deepLink: URL? = nil
+        var attendees: [Attendee] = []
+        var notes: String? = nil
+
+        var eventKey: String { id }
 
         /// 지금 시작 버튼 활성 조건: 시작 10분 전 ~ 종료 전
         func isNow(_ now: Date = Date()) -> Bool {
@@ -299,17 +341,13 @@ final class CalendarMonitor {
         }
     }
 
-    /// 오늘 남은 일정 (60초마다 갱신, 최대 6개)
+    /// 오늘 남은 일정 (60초마다 갱신)
     private(set) var todayUpcoming: [UpcomingMeetingItem] = []
     @ObservationIgnored private var lastUpcomingRefresh = Date.distantPast
 
-    private func refreshTodayUpcoming(now: Date) {
-        guard now.timeIntervalSince(lastUpcomingRefresh) >= 60 else { return }
-        lastUpcomingRefresh = now
-        let endOfDay = Foundation.Calendar.current.startOfDay(for: now).addingTimeInterval(24 * 3600)
-        let predicate = store.predicateForEvents(
-            withStart: now.addingTimeInterval(-15 * 60), end: endOfDay, calendars: nil)
-        let events = store.events(matching: predicate)
+    /// EventKit 이벤트 목록에서 오늘 남은 유효한 일정을 필터링 및 변환한다.
+    static func upcomingItems(from events: [EKEvent], now: Date) -> [UpcomingMeetingItem] {
+        let validEvents = events
             .filter { event in
                 guard let start = event.startDate, let end = event.endDate,
                       !event.isAllDay, event.status != .canceled, end > now else { return false }
@@ -323,22 +361,96 @@ final class CalendarMonitor {
 
         var seen = Set<String>()
         var items: [UpcomingMeetingItem] = []
-        for event in events {
+        for event in validEvents {
             guard let start = event.startDate, let end = event.endDate else { continue }
             let key = "\(event.eventIdentifier ?? event.title ?? "?")@\(Int(start.timeIntervalSince1970))"
             guard seen.insert(key).inserted else { continue }
             let web = Self.firstZoomLink(in: [event.url?.absoluteString, event.location, event.notes])
+            let rawAttendees = (event.attendees ?? [])
+                .filter { $0.participantType == .person && !$0.isCurrentUser }
+                .map { (name: $0.name, email: Self.email(fromParticipantURL: $0.url)) }
+            let normAttendees = Self.normalizedAttendees(from: rawAttendees)
+            let trimmedNotes = event.notes.map { String($0.prefix(1_000)) }
+
             items.append(UpcomingMeetingItem(
                 id: key,
                 title: event.title ?? "Meeting",
                 start: start,
                 end: end,
                 webLink: web,
-                deepLink: web.flatMap(Self.zoomDeepLink(for:))
+                deepLink: web.flatMap(Self.zoomDeepLink(for:)),
+                attendees: normAttendees,
+                notes: trimmedNotes
             ))
-            if items.count >= 6 { break }
         }
+        return items
+    }
+
+    private func refreshTodayUpcoming(now: Date) {
+        guard now.timeIntervalSince(lastUpcomingRefresh) >= 60 else { return }
+        lastUpcomingRefresh = now
+        let endOfDay = Foundation.Calendar.current.startOfDay(for: now).addingTimeInterval(24 * 3600)
+        let predicate = store.predicateForEvents(
+            withStart: now.addingTimeInterval(-15 * 60), end: endOfDay, calendars: nil)
+        let rawEvents = store.events(matching: predicate)
+        let items = Self.upcomingItems(from: rawEvents, now: now)
+
+        let oldIds = todayUpcoming.map(\.id)
+        let newIds = items.map(\.id)
         todayUpcoming = items
+        if oldIds != newIds {
+            onTodayUpcomingChanged?(items)
+        }
+    }
+
+    /// 테스트용: 오늘 일정 강제 설정 및 변경 통지.
+    func setTodayUpcomingForTesting(_ items: [UpcomingMeetingItem]) {
+        let oldIds = todayUpcoming.map(\.id)
+        let newIds = items.map(\.id)
+        todayUpcoming = items
+        if oldIds != newIds {
+            onTodayUpcomingChanged?(items)
+        }
+    }
+
+    /// 지금 진행 중(시작 10분 전~종료)인 일정 하나를 골라 반환한다 (사전 브리핑 Live 세션 연동용).
+    func ongoingUpcomingItem(now: Date = Date()) -> UpcomingMeetingItem? {
+        guard EKEventStore.authorizationStatus(for: .event) == .fullAccess else { return nil }
+        let predicate = store.predicateForEvents(
+            withStart: now.addingTimeInterval(-90 * 60),
+            end: now.addingTimeInterval(30 * 60),
+            calendars: nil
+        )
+        let ongoing = store.events(matching: predicate).filter { event in
+            guard let start = event.startDate, let end = event.endDate, !event.isAllDay,
+                  event.status != .canceled else { return false }
+            return now >= start.addingTimeInterval(-10 * 60) && now <= end
+        }
+        let withLink = ongoing.first {
+            Self.firstZoomLink(in: [$0.url?.absoluteString, $0.location, $0.notes]) != nil
+        }
+        guard let event = withLink ?? ongoing.first,
+              let start = event.startDate,
+              let end = event.endDate else { return nil }
+
+        let key = "\(event.eventIdentifier ?? event.title ?? "?")@\(Int(start.timeIntervalSince1970))"
+        let web = Self.firstZoomLink(in: [event.url?.absoluteString, event.location, event.notes])
+        let rawAttendees = (event.attendees ?? [])
+            .filter { $0.participantType == .person && !$0.isCurrentUser }
+            .map { (name: $0.name, email: Self.email(fromParticipantURL: $0.url)) }
+        let normAttendees = Self.normalizedAttendees(from: rawAttendees)
+        let trimmedNotes = event.notes.map { String($0.prefix(1_000)) }
+
+        return UpcomingMeetingItem(
+            id: key,
+            title: event.title ?? "Meeting",
+            start: start,
+            end: end,
+            webLink: web,
+            deepLink: web.flatMap(Self.zoomDeepLink(for:)),
+            attendees: normAttendees,
+            notes: trimmedNotes
+        )
     }
 
     /// 지금 진행 중(시작 10분 전~종료)인 일정 하나를 골라 제목과 참석자를 함께 반환한다.
@@ -419,7 +531,7 @@ final class CalendarMonitor {
     // MARK: - Zoom 링크 파싱
 
     /// 여러 텍스트 필드(url/location/notes)에서 첫 Zoom 링크를 찾음.
-    /// 온라인 회의 링크 탐지 — Zoom 우선, 이어서 Teams / Google Meet / Webex (2026-09-01 확장).
+    /// 온라인 회의 링크 탐지: Zoom 우선, 이어서 Teams / Google Meet / Webex (2026-09-01 확장).
     /// 패턴 순서 = 우선순위: 초대문에 여러 링크가 섞여 있으면 앞선 플랫폼을 택한다.
     static func firstZoomLink(in texts: [String?]) -> URL? {
         let patterns = [
@@ -447,7 +559,7 @@ final class CalendarMonitor {
     }
 
     /// https://{host}.zoom.us/j/{회의번호}?pwd=... → zoommtg://{host}/join?action=join&confno=...&pwd=...
-    /// 회의번호를 못 찾으면(개인 링크 /my/ 등) nil — 웹 링크로 폴백.
+    /// 회의번호를 못 찾으면(개인 링크 /my/ 등) nil: 웹 링크로 폴백.
     static func zoomDeepLink(for webLink: URL) -> URL? {
         guard let components = URLComponents(url: webLink, resolvingAgainstBaseURL: false),
               let host = components.host else { return nil }

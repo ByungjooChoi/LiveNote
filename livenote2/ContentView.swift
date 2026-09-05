@@ -31,6 +31,7 @@ struct ContentView: View {
     enum Screen: Equatable {
         case home
         case chat
+        case tasks
         case live
         case meeting(URL)
         case settings
@@ -83,6 +84,7 @@ struct ContentView: View {
         switch pending {
         case .settings: screen = .settings
         case .chat: screen = .chat
+        case .tasks: screen = .tasks
         }
         app.pendingScreen = nil
     }
@@ -94,6 +96,8 @@ struct ContentView: View {
             HomeView(screen: $screen)
         case .chat:
             ChatFullView()
+        case .tasks:
+            TasksView(screen: $screen)
         case .live:
             LiveMeetingView()
         case .meeting(let url):
@@ -127,6 +131,8 @@ struct SidebarRail: View {
                      selected: isHome)
             railItem("Chat", icon: "bubble.left.and.bubble.right.fill", target: .chat,
                      selected: screen == .chat)
+            railItem("Tasks", icon: "checklist", target: .tasks,
+                     selected: screen == .tasks)
             if app.isRunning || !app.rows.isEmpty {
                 railItem(app.isRunning ? "Live · Listening" : "Live",
                          icon: "waveform", target: .live,
@@ -301,28 +307,51 @@ struct HomeView: View {
                 }
             }
 
-            ForEach(app.calendar.todayUpcoming) { item in
-                HStack(spacing: 10) {
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(item.isNow() ? Theme.vermilion : Theme.accent.opacity(0.6))
-                        .frame(width: 4, height: 30)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(item.title)
-                            .font(.callout)
-                            .lineLimit(1)
-                        Text("\(Self.timeFormatter.string(from: item.start)) ~ \(Self.timeFormatter.string(from: item.end))")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    if item.isNow(), !app.isRunning {
-                        Button("Start now") {
-                            app.startUpcomingMeeting(link: item.deepLink ?? item.webLink)
-                            screen = .live
+            ForEach(app.calendar.todayUpcoming.prefix(6)) { item in
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 10) {
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(item.isNow() ? Theme.vermilion : Theme.accent.opacity(0.6))
+                            .frame(width: 4, height: 30)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(item.title)
+                                .font(.callout)
+                                .lineLimit(1)
+                            Text("\(Self.timeFormatter.string(from: item.start)) ~ \(Self.timeFormatter.string(from: item.end))")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .tint(Theme.vermilion)
-                        .controlSize(.small)
+                        let openTaskCount = app.tasks.openCount(forAttendeeNames: item.attendees.map(\.name))
+                        if openTaskCount > 0 {
+                            Text("\(openTaskCount) open")
+                                .font(.caption2.weight(.medium))
+                                .foregroundStyle(Theme.accent)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Theme.accent.opacity(0.12))
+                                .clipShape(Capsule())
+                        }
+                        BriefRowAccessory(
+                            status: app.briefing.status(for: item),
+                            onRefresh: {
+                                Task {
+                                    await app.briefing.ensureBrief(for: item, force: true)
+                                }
+                            }
+                        )
+                        Spacer()
+                        if item.isNow(), !app.isRunning {
+                            Button("Start now") {
+                                app.startUpcomingMeeting(link: item.deepLink ?? item.webLink)
+                                screen = .live
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(Theme.vermilion)
+                            .controlSize(.small)
+                        }
+                    }
+                    if case .ready(let brief) = app.briefing.status(for: item) {
+                        BriefDisclosure(brief: brief)
                     }
                 }
                 .padding(.horizontal, 14)
@@ -469,6 +498,8 @@ struct MeetingDetailView: View {
                                 .padding(18)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .themedCard()
+
+                            ActionItemsCard(meetingURL: url)
                         } else {
                             VStack(spacing: 10) {
                                 Text("No minutes yet")
@@ -822,6 +853,11 @@ struct LiveMeetingView: View {
             header
             Divider()
             banners
+            if let brief = app.briefing.currentBrief {
+                LiveBriefPanel(brief: brief, lastError: app.briefing.lastError)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+            }
             summarySection
             transcript
             Divider()
@@ -1692,6 +1728,8 @@ struct SettingsView: View {
                         get: { app.autoStartAtCalendarTime },
                         set: { app.setAutoStartAtCalendarTime($0) }
                     ))
+                    Divider().padding(.vertical, 4)
+                    BriefSettingsRows(controller: app.briefing)
                 }
 
                 settingsCard("Recipes") {

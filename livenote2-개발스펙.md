@@ -2,7 +2,7 @@
 
 작성일: 2026-08-06 · 대상: 이 문서만 보고 동일한 앱을 재구축해야 하는 제로베이스 AI/개발자
 현재 상태: **1단계 완성 + 출시 패키징 완료** (빌드·실전 사용 검증 완료, /Applications 설치본 운영 중)
-최신 갱신: v1.5.1 (2026-09-04, 버그 수정: Keychain 오류 표면화·업데이트 저장, 무키 로컬 폴백 고지, Summary language 1회 English 리셋, Accessibility 안내 버튼)
+최신 갱신: v1.6.0 (2026-09-05, Phase 2: Tasks 추출·화면 §5.14, 사전 브리핑 §5.15)
 
 ---
 
@@ -323,9 +323,31 @@
 | open-commitments | Open commitments | lastNDays:14 | thinking | Korean |
 | customer-call-brief | Customer call brief (EN) | currentMeeting | standard | English |
 | korean-digest | Korean digest | currentMeeting | standard | Korean |
-
 Weekly Update의 system 프롬프트는 SA(Solutions Architect) 주간보고 규칙을 명문화한다(1인칭 주어 생략, 판단·논리 흐름 서술, 산출물 나열 금지, 배정 경위 미기재, 계정별 단락, 한국어 출력에 고유명사만 영문 유지 등).
 
+### 5.14 Tasks (TaskStore + TaskExtractor + TasksController + TaskOwnerNormalizer, 2026-09-04 추가, v1.6.0)
+
+회의 요약에서 명시적인 약속(commitment)과 요청을 자동 추출하여 관리하는 기능.
+
+**저장 (`Storage/TaskStore.swift`)**:
+- `TaskItem` Codable: `id` (UUID 문자열), `meetingURL` (수동 태스크는 nil), `meetingTitle`, `meetingDate`, `title`, `owner` (정규화된 실명 또는 nil), `due` (yyyy-MM-dd 또는 nil), `quote` (원문 근거 문장), `status` (`.open`/`.done`), `createdAt`, `completedAt`.
+- 저장소 분리 원칙: 회의 폴더의 `<meetingURL>/tasks.json`은 회의 요약 생성 시점의 원본을 기록하고, 완료 상태 변경이나 수동 추가/삭제 등 일상적인 상태 변경은 전역 `~/Documents/LiveNote/tasks/index.json` 색인에만 반영한다.
+- 요약 갱신 시 상태 보존: `replaceTasks(_:for:)`는 회의 요약이 재생성될 때 같은 제목(대소문자 무시, trim)의 기존 태스크가 이미 `done` 상태이면 `id`, `done` 상태, `completedAt`, `createdAt`을 그대로 유지해 색인과 병합한다.
+- 수동 태스크: `addManual(title:owner:due:)`로 직접 추가 가능하며, 수동 태스크만 `delete(id:)`로 삭제할 수 있다 (회의 태스크 삭제 시도 시 `TaskStoreError.cannotDeleteMeetingTask` 오류 발생).
+
+**추출 및 정규화 (`Engine/SummaryService.swift`, `Engine/TaskExtractor.swift`, `TaskOwnerNormalizer`)**:
+- 요약 프롬프트 확장: `SummaryService.userPrompt` 끝에 `<!-- tasks ... -->` 기계 가독성 블록 요구 문구를 추가하고 회의 일시를 전달하여 상대 기한(예: "tomorrow", "by Friday")을 절대 날짜(yyyy-MM-dd)로 계산하도록 지시.
+- 블록 분리: `SummaryService.cleanedWithTasks`가 마크다운 요약 본문과 태스크 JSON 블록을 안전하게 분리.
+- 허용적 파싱: `TaskExtractor.parse`는 마크다운 코드 펜스(```json) 유무에 관계없이 JSON을 파싱하며, 빈 제목 제외, 최대 8개 캡, due 형식 검증을 거침.
+- 담당자 정규화: "me", "I", "나", "myself"는 `myName`으로 변환. 그 외에는 캘린더 참석자(이름 및 이메일 로컬 파트), 화자명, `myName`과의 토큰(공백, 점, @, _ 등 기준 3자 이상) 매칭을 거쳐 실명으로 보정.
+
+**UI (`Views/TasksView.swift`, `Views/ActionItemsCard.swift`)**:
+- 전역 화면 (`TasksView`): 사이드바 Tasks 메뉴에서 진입. Open, Done, Mine, All 필터링과 By meeting, By owner 그룹화 제공. 상단 수동 추가 입력줄과 각 태스크의 완료 체크박스, 출처 회의 바로가기 버튼 제공.
+- 회의 상세 화면 (`ActionItemsCard`): 각 회의 상세 요약 카드 바로 아래에 해당 회의의 액션 아이템 목록을 카드 형태로 표시하고 원클릭 완료 토글 지원.
+- 캘린더 일정 배지: Home 화면의 Coming up 일정 행에 해당 참석자와 매칭되는 미완료 태스크 개수 배지 표시.
+- 소급 추출 레시피: `extract-tasks` 내장 레시피를 실행하면 과거 회의 기록에서 태스크를 일괄 추출하여 `TaskStore`에 import.
+
+---
 **범위 (`Models/RecipeScope.swift`)**: `thisWeek` / `lastDays(Int)` / `currentMeeting(URL)` / `manual([URL])`. 순수 함수 `resolve(meetings:now:calendar:)`가 startedAt 내림차순으로 필터한다.
 - **주 시작은 항상 월요일 00:00(로컬)**이다. `Calendar.current.firstWeekday`(지역화 값, 예: 미국 로케일은 일요일)와 무관하게 `weekStart(for:calendar:)`가 `firstWeekday = 2`로 고정한 캘린더로 계산한다.
 - `lastDays(n)`은 `calendar.date(byAdding: .day, value: -n, to: now)`다. 달력 일 단위 연산이라 서머타임 경계도 자연스럽게 처리한다.
@@ -360,6 +382,35 @@ Weekly Update의 system 프롬프트는 SA(Solutions Architect) 주간보고 규
 
 **테스트**: `AppLog.directoryOverride`(테스트 전용 static 프로퍼티)를 세팅하면 `AppLog.write`가 `~/Documents/LiveNote/logs` 대신 지정한 임시 폴더에 쓴다. 레시피 관련 테스트를 포함해 로그를 남기는 테스트들이 이걸로 실제 문서 폴더를 건드리지 않는다. `RecipeRunnerTests`는 가짜 `Backend`로 클라우드·로컬 성공 경로까지 검증한다(총 123개 테스트).
 
+### 5.15 사전 브리핑 (BriefStore + BriefGenerator + BriefingController, 2026-09-05 추가, v1.6.0)
+
+다가오는 캘린더 회의에 앞서 관련 과거 회의 요약과 미완료 태스크를 종합해 사전 브리핑을 자동 생성하는 기능. Granola의 Pre-meeting briefs에 대응.
+
+**저장 (`Storage/BriefStore.swift`)**:
+- 파일 위치: `~/Documents/LiveNote/briefs/<safe eventKey>.md`
+- `Brief`: `eventKey`, `markdown`, `generatedAt`, `basedOn: [String]`, `suggestedAgendaFirstLine: String?`
+- 파일 포맷: 상단 메타데이터 주석(`<!-- generated: ISO8601 -->`, `<!-- based-on: t1 | t2 -->`) + 마크다운 본문.
+- `copyBrief(eventKey:toMeetingFolder:)`: 회의가 종료/저장될 때 해당 회의 폴더에 `brief.md` 사본을 복사해 보존.
+
+**후보 회의 선정 및 점수식 (`Engine/BriefGenerator.swift`)**:
+- 90일 이내 과거 회의 대상 (`startedAt >= now - 90d, < now`).
+- 점수식: 참석자 겹침(+3/명, 참석자/화자명 토큰 및 이메일 로컬파트 대조), 제목 Jaccard 유사도 >= 0.5(+2, 비알파벳 분리 및 불용어 제거), 30일 이내 최근성(+1). 점수 0 제외.
+- 점수 내림차순 -> 시작시각 내림차순 정렬, 상위 5개 회의 선택.
+- 참석자 8명 이상인 대규모 회의는 `skipLarge`가 켜져 있으면 생략(nil 반환).
+
+**컨텍스트 조립 및 생성**:
+- `ContextBuilder.build(meetings:store:budget:40_000, perMeetingTranscriptCap:4_000)` 활용.
+- 프롬프트: 캘린더 이벤트 notes 앞 1,000자 + 과거 회의 컨텍스트 + 미완료 태스크(Tasks 기능 연동).
+- 고정 3섹션 마크다운 출력: `# Last time`, `# Open items`, `# Suggested agenda` (200~350단어, Summary language 설정 추종).
+- 모델: Gemini 3.7 Flash (`gemini-3.7-flash`), API 키 부재 시 로컬 Qwen 폴백.
+
+**트리거 및 라이프사이클 (`Engine/BriefingController.swift`)**:
+- 1. 아침 07:00 일괄 배치 (`scheduleMorningBatch`: 타이머 + Mac 잠자기 복귀 시 `NSWorkspace.didWakeNotification` 감지).
+- 2. 회의 시작 10분 전 임박 감지 (`CalendarMonitor.onMeetingApproaching`).
+- 3. Coming up UI 수동 새로고침 아이콘 클릭.
+- 캐시 존재 시 재생성을 건너뛰며, `force: true` 시 무효화 후 재생성.
+- 회의 시작 시 `beginSession(item:)`으로 `currentBrief`를 활성화하고, 종료 시 `endSession()` 및 `copyBriefIfAvailable` 수행.
+
 ---
 
 ## 6. 파일별 스펙 (livenote2/livenote2/ 아래 주요 파일)
@@ -381,8 +432,10 @@ Weekly Update의 system 프롬프트는 SA(Solutions Architect) 주간보고 규
 | `Engine/ChatService.swift` | §5.9 채팅: `ChatPrompt`(공유 프롬프트·이력 합성), `LocalChatEngine` actor(Qwen 상주), `GeminiChat`(3.7 Flash 멀티턴 REST) |
 | `Engine/ContextBuilder.swift` | §5.10 (v1.4.0 추가) `@MainActor enum`. `build(meetings:store:budget:perMeetingTranscriptCap:)`로 아카이브 채팅·Recipes(§5.13)·향후 브리핑이 공용하는 컨텍스트 조립 |
 | `Engine/RecipeRunner.swift` | §5.13 (v1.5.0 추가) `@MainActor enum`. `run(recipe:meetings:model:language:store:localEngine:)`, `renderPrompt`, `defaultModel(for:userChoice:)` |
-| `Calendar/CalendarMonitor.swift` | @MainActor @Observable. §5.8 감시 루프·자격 판정·Zoom 링크 파싱(`firstZoomLink`/`zoomDeepLink` static)·참가 실행. EventKit을 만지는 유일한 파일. v1.4.0: `ongoingMeetingAttendees()`가 이메일 포함 `[Attendee]` 반환(§5.7), `onMeetingTimeReached`가 캘린더 시작 시각 트리거(§5.12) 발화 |
-| `Calendar/MeetingAlertPanel.swift` | `MeetingAlertPanelController`(NSPanel 생성·우상단 배치·닫기) + `MeetingAlertView`(SwiftUI: 제목·시간·카운트다운·분할 참가 버튼/Dismiss, §5.8) |
+| `Engine/BriefGenerator.swift` | §5.15 (v1.6.0 추가) 후보 회의 점수식 산정, 컨텍스트·태스크 조합 및 브리핑 생성 |
+| `Engine/BriefingController.swift` | §5.15 (v1.6.0 추가) @MainActor @Observable. 브리핑 캐시, 아침 배치 및 임박 생성 스케줄러 |
+| `Calendar/CalendarMonitor.swift` | @MainActor @Observable. §5.8 감시 루프·자격 판정·Zoom 링크 파싱(`firstZoomLink`/`zoomDeepLink` static)·참가 실행. EventKit을 만지는 유일한 파일. v1.4.0: `ongoingMeetingAttendees()`가 이메일 포함 `[Attendee]` 반환(§5.7), `onMeetingTimeReached`가 캘린더 시작 시각 트리거(§5.12) 발화, v1.6.0: 브리핑 임박 알림 트리거 및 안건 제공자 연동 |
+| `Calendar/MeetingAlertPanel.swift` | `MeetingAlertPanelController`(NSPanel 생성·우상단 배치·닫기) + `MeetingAlertView`(SwiftUI: 제목·시간·카운트다운·분할 참가 버튼/Dismiss, §5.8, 제안 안건 표시) |
 | `Calendar/CountdownPanel.swift` | §5.12 (v1.4.0 추가) `CountdownPanelController`(NSPanel) + `CountdownView`(사유·카운트다운·Cancel). 자동 시작 전 취소 유예 |
 | `Engine/SummaryService.swift` | actor. §5.5. 모델 ID 상수 한 줄로 교체 가능하게 유지할 것 |
 | `AppState.swift` | @MainActor @Observable 중심 허브. phase(idle/preparing/listening/error), rows, volatileText, 배너 4종(systemAudio/diarizer/translation/notice), micLevel, echoFilterEnabled·myName·autoStartOnMeetingApp(UserDefaults 영속), start(mode:)/stop() 오케스트레이션(§4 흐름, v1.4.0부터 online/inPerson 분기 §5.11), 에코 dedup(§5.2③), 저장·재저장(§5.6~7), 자동 시작/종료 옵저버(§5.12 카운트다운 경유), 요약 상태머신(summaryPhase), `pendingScreen`(팝업 메뉴 → Settings 화면 전환 신호), v1.5.0: `recipeStore`·`runRecipe(_:scope:model:language:)`·`recipeMeetings(for:)`(§5.13), `askChat`이 레시피로 시작한 대화의 첫 promptText 턴을 고정 포함. **파이프라인 내부 상태 14개 프로퍼티에 @ObservationIgnored 필수**(§7.4). 회의 앱 번들ID 목록은 **파일 스코프 상수**(§7.5) |
@@ -390,13 +443,22 @@ Weekly Update의 system 프롬프트는 SA(Solutions Architect) 주간보고 규
 | `Storage/MeetingStore.swift` | §5.7 + `resolveName(row:myName:speakerNames:)` 정적 헬퍼(이름 해석 단일 소스) + 마크다운 생성기 4종 + `transcriptForSummary` + v1.4.0: `attendees` 필드, `rename(at:title:)`, `titleFromSummary(_:)`(자동 제목) |
 | `Storage/RecipeStore.swift` | §5.13 (v1.5.0 추가) @MainActor @Observable. `recipes`, `upsert`, `delete`, `resetBuiltins`, `seedBuiltinsIfNeeded`, `uniqueID(for:)` |
 | `Storage/RecipeOutputStore.swift` | §5.13 (v1.5.0 추가) `recipes-output/<yyyy-MM-dd> <title>.md` 저장, 파일명 충돌 시 " (2)" 접미사 |
+| `Storage/BriefStore.swift` | §5.15 (v1.6.0 추가) `briefs/<safe eventKey>.md` 브리핑 마크다운 및 메타데이터 저장소 |
 | `Models/RecipeScope.swift` | §5.13 (v1.5.0 추가) 범위 enum + `resolve(meetings:now:calendar:)`(순수 함수) |
 | `Views/StartMenu.swift` | §5.11 (v1.4.0 추가) Home Start 분할 버튼: 본체=online 시작, ▾ 메뉴="Start in-person" |
 | `Views/ModeBadge.swift` | §5.11 (v1.4.0 추가) 헤더용 캡슐 배지 (대면 모드 "In person" 표시에 사용) |
 | `Views/RecipesRow.swift` | §5.13 (v1.5.0 추가) Chat 홈 히어로 아래 레시피 칩 행 |
 | `Views/RecipeRunSheet.swift` | §5.13 (v1.5.0 추가) 레시피 실행 대화상자: 범위·회의 선택·모델·언어·[Run] |
 | `Views/RecipeEditorView.swift` | §5.13 (v1.5.0 추가) 레시피 생성·편집 폼 |
-| `Resources/Recipes/*.json` | §5.13 (v1.5.0 추가) 내장 레시피 5종 원본. 동기화 그룹이 번들 루트로 평탄화해 복사하므로(§7.19) pbxproj 수정 없이 파일만 추가하면 되지만 id(=파일명)는 다른 번들 리소스와 겹치면 안 됨 |
+| `Views/BriefPanel.swift` | §5.15 (v1.6.0 추가) Home Coming up 및 Live 세션 브리핑 뷰 컴포넌트 |
+| `Views/BriefSettingsRows.swift` | §5.15 (v1.6.0 추가) Settings > Meetings 브리핑 설정 토글 및 배치 시각 선택 |
+| `Storage/TaskStore.swift` | §5.14 (v1.6.0 추가) `TaskItem` Codable, 회의 폴더 `tasks.json` 원본 보존 및 `tasks/index.json` 전역 색인 관리, replaceTasks 병합, `TaskOwnerNormalizer` |
+| `Engine/TaskExtractor.swift` | §5.14 (v1.6.0 추가) 요약 tasks 블록 허용적 JSON 파싱(펜스 처리, 8개 캡, due 검증) 및 `TaskItem` 변환 |
+| `Engine/TasksController.swift` | §5.14 (v1.6.0 추가) @MainActor @Observable. Tasks 상태 관리, 필터링, 그룹화, 요약 기록, 레시피 임포트 |
+| `Views/TasksView.swift` | §5.14 (v1.6.0 추가) 전역 Tasks 관리 화면(필터, 회의/담당자 그룹화, 수동 추가, 회의 이동) |
+| `Views/ActionItemsCard.swift` | §5.14 (v1.6.0 추가) 회의 상세 화면 요약 하단 Action Items 카드 컴포넌트 |
+| `Resources/Recipes/extract-tasks.json` | §5.14 (v1.6.0 추가) 과거 회의 태스크 일괄 추출 내장 레시피 |
+| `Resources/Recipes/*.json` | §5.13 (v1.5.0 추가) 내장 레시피 원본. 동기화 그룹이 번들 루트로 평탄화해 복사하므로(§7.19) pbxproj 수정 없이 파일만 추가하면 되지만 id(=파일명)는 다른 번들 리소스와 겹치면 안 됨 |
 
 ---
 

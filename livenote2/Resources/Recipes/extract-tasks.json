@@ -1,0 +1,11 @@
+{
+  "builtin": true,
+  "icon": "checklist",
+  "id": "extract-tasks",
+  "modelHint": "standard",
+  "outputLanguage": "English",
+  "prompt": "Extract all explicit tasks and commitments from the following meetings:\n\n{{meetings}}\n\nOutput ONLY a JSON array of objects with the following schema:\n[{\"title\":\"...\",\"owner\":\"...\",\"due\":\"yyyy-MM-dd or null\",\"quote\":\"verbatim quote\",\"meetingTitle\":\"title of the meeting\",\"meetingDate\":\"yyyy-MM-dd\"}]\nIf there are no tasks, output an empty JSON array [].",
+  "scopeDefault": "currentMeeting",
+  "system": "You are an assistant that extracts actionable tasks and commitments from meeting transcripts. Output ONLY a valid JSON array of objects with keys \"title\", \"owner\", \"due\", \"quote\", \"meetingTitle\", \"meetingDate\". Do not include any thinking or explanation outside the JSON.",
+  "title": "Extract tasks"
+}

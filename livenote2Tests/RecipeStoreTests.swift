@@ -49,6 +49,7 @@ final class RecipeStoreTests: XCTestCase {
             "open-commitments": (.lastDays(14), .thinking, "Korean", "checklist"),
             "customer-call-brief": (.currentMeeting, .standard, "English", "person.2"),
             "korean-digest": (.currentMeeting, .standard, "Korean", "text.alignleft"),
+            "extract-tasks": (.currentMeeting, .standard, "English", "checklist"),
         ]
         for (id, want) in expected {
             let recipe = try XCTUnwrap(RecipeStore.loadBuiltin(id: id))
