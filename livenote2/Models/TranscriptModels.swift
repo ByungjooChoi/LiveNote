@@ -20,10 +20,76 @@ struct TranscriptRow: Identifiable, Sendable, Codable {
     var korean: String?          // 번역 도착 전 nil
     let startSeconds: Double     // 세션 시작 기준 초
     let endSeconds: Double
+    /// 화자 이름의 출처 (zoom / voice / slot / manual)
+    var nameSource: NameSource? = nil
+    /// 마진 미달 시 제안할 후보 화자 이름 목록
+    var candidateNames: [String]? = nil
+    /// 오프라인 다이어라이제이션 클러스터 ID
+    var clusterID: String? = nil
 
     var timeLabel: String {
         let total = Int(startSeconds)
         return String(format: "%02d:%02d", total / 60, total % 60)
+    }
+
+    init(
+        id: UUID = UUID(),
+        channel: AudioChannel,
+        speakerSlot: Int? = nil,
+        speakerName: String? = nil,
+        english: String,
+        korean: String? = nil,
+        startSeconds: Double,
+        endSeconds: Double,
+        nameSource: NameSource? = nil,
+        candidateNames: [String]? = nil,
+        clusterID: String? = nil
+    ) {
+        self.id = id
+        self.channel = channel
+        self.speakerSlot = speakerSlot
+        self.speakerName = speakerName
+        self.english = english
+        self.korean = korean
+        self.startSeconds = startSeconds
+        self.endSeconds = endSeconds
+        self.nameSource = nameSource
+        self.candidateNames = candidateNames
+        self.clusterID = clusterID
+    }
+}
+
+/// 화자 통계 (상세 화면 화자 요약 줄용)
+struct SpeakerStat: Equatable, Sendable {
+    var name: String
+    var seconds: Double
+    var source: NameSource?
+}
+
+/// 화자 요약 통계 계산
+enum SpeakerSummary {
+    /// 발화 시간 내림차순 정렬된 화자별 통계 (시간 동일 시 이름 오름차순)
+    static func speakerStats(rows: [TranscriptRow], resolve: (TranscriptRow) -> String) -> [SpeakerStat] {
+        var totalDuration: [String: Double] = [:]
+        var sources: [String: NameSource] = [:]
+
+        for row in rows {
+            let name = resolve(row)
+            let duration = max(0, row.endSeconds - row.startSeconds)
+            totalDuration[name, default: 0] += duration
+            if sources[name] == nil, let src = row.nameSource {
+                sources[name] = src
+            }
+        }
+
+        return totalDuration.map { name, seconds in
+            SpeakerStat(name: name, seconds: seconds, source: sources[name])
+        }.sorted { a, b in
+            if a.seconds != b.seconds {
+                return a.seconds > b.seconds
+            }
+            return a.name < b.name
+        }
     }
 }
 
