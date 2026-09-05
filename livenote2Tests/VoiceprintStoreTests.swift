@@ -729,4 +729,83 @@ final class VoiceprintStoreTests: XCTestCase {
         XCTAssertEqual(merged.id, "p1")
         XCTAssertLessThanOrEqual(merged.centroids.count, 5, "Merged person centroids must be clamped to at most 5")
     }
+
+    // MARK: - R10-4 Conflict Counter Preservation Tests (T11 & T12)
+
+    func testEnrollMergePreservesConflicts() throws {
+        // T11: conflictLimit 3; enroll Alice once; recordConflict twice against that centroid (count 2);
+        // enroll Alice again with an embedding within mergeThreshold (same direction) ->
+        // centroid count still 1 and conflicts == 2; recordConflict once more -> centroid removed (didDelete == true).
+        let store = VoiceprintStore(rootURL: tempDir, defaults: testDefaults)
+        store.thresholds = VoiceprintThresholds(
+            matchThreshold: 0.65,
+            margin: 0.08,
+            mergeThreshold: 0.35,
+            minEnrollSeconds: 5.0,
+            minQuality: 0.5,
+            maxCentroids: 5,
+            conflictLimit: 3
+        )
+
+        let embedding1 = makeUnitVector(activeIndex: 0)
+        let sample1 = [EnrollmentSample(embedding: embedding1, quality: 0.9, seconds: 10.0)]
+        let person = try store.enroll(name: "Alice", email: nil, samples: sample1, source: .live, isMe: false)
+
+        XCTAssertEqual(person.centroids.count, 1)
+        XCTAssertEqual(person.centroids[0].conflicts, 0)
+
+        // Record conflict twice
+        let didDelete1 = try store.recordConflict(personID: person.id, embedding: embedding1)
+        XCTAssertFalse(didDelete1)
+        let didDelete2 = try store.recordConflict(personID: person.id, embedding: embedding1)
+        XCTAssertFalse(didDelete2)
+
+        let reloadedPerson1 = try XCTUnwrap(store.person(named: "Alice"))
+        XCTAssertEqual(reloadedPerson1.centroids.count, 1)
+        XCTAssertEqual(reloadedPerson1.centroids[0].conflicts, 2)
+
+        // Enroll Alice again with embedding in same direction (within mergeThreshold)
+        let sample2 = [EnrollmentSample(embedding: embedding1, quality: 0.9, seconds: 10.0)]
+        let reEnrolled = try store.enroll(name: "Alice", email: nil, samples: sample2, source: .live, isMe: false)
+
+        XCTAssertEqual(reEnrolled.centroids.count, 1)
+        XCTAssertEqual(reEnrolled.centroids[0].conflicts, 2, "Conflicts count must be preserved across enroll merge")
+
+        // Record conflict once more -> reaches conflictLimit 3 and centroid is removed
+        let didDelete3 = try store.recordConflict(personID: person.id, embedding: embedding1)
+        XCTAssertTrue(didDelete3, "Centroid must be removed on 3rd conflict")
+
+        let reloadedPerson2 = try XCTUnwrap(store.person(named: "Alice"))
+        XCTAssertEqual(reloadedPerson2.centroids.count, 0)
+    }
+
+    func testPersonMergePreservesMaxConflicts() throws {
+        // T12: two persons whose nearest centroids merge (same direction), conflicts 2 and 1 -> merged centroid conflicts == 2.
+        let store = VoiceprintStore(rootURL: tempDir, defaults: testDefaults)
+        store.thresholds = VoiceprintThresholds(
+            matchThreshold: 0.65,
+            margin: 0.08,
+            mergeThreshold: 0.35,
+            minEnrollSeconds: 5.0,
+            minQuality: 0.5,
+            maxCentroids: 5,
+            conflictLimit: 3
+        )
+
+        let vec = makeUnitVector(activeIndex: 1)
+        let c1 = VoiceCentroid(v: vec, n: 1, quality: 0.9, updated: Date(), conflicts: 2, weight: 1.0)
+        let p1 = Person(id: "p1", name: "Alice", centroids: [c1], meetings: 1, sources: [.live])
+
+        let c2 = VoiceCentroid(v: vec, n: 1, quality: 0.9, updated: Date(), conflicts: 1, weight: 1.0)
+        let p2 = Person(id: "p2", name: "AliceAlias", centroids: [c2], meetings: 1, sources: [.live])
+
+        try store.fileWriter(try JSONEncoder().encode(VoiceprintDatabase(version: 1, people: [p1, p2])), tempDir.appendingPathComponent("voiceprints.json"))
+        try store.reload()
+
+        try store.merge("p2", into: "p1")
+
+        let mergedPerson = try XCTUnwrap(store.person(named: "Alice"))
+        XCTAssertEqual(mergedPerson.centroids.count, 1)
+        XCTAssertEqual(mergedPerson.centroids[0].conflicts, 2, "Merged centroid conflicts must be max(2, 1) = 2")
+    }
 }

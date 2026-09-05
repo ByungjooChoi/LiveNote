@@ -444,6 +444,16 @@ Weekly Update의 system 프롬프트는 SA(Solutions Architect) 주간보고 규
 - `SpeakersSettingsCard`: Settings > Speakers 성문 관리 카드 (인물 목록, 회의 수 및 최근 확인일, 인라인 이름 변경, 2명 선택 병합, 개별/전체 삭제, 로컬 프라이버시 안내 문구).
 - `SpeakersSummaryLine`: 회의 상세 상단에 화자별 총 발화 시간 요약 라인 렌더링.
 
+**6. 비동기 수명주기 및 2-pass 파이프라인 (Async Lifecycle)**:
+- `stop()` 호출 시 불변 `TwoPassJob`(스냅샷 + 참조)을 생성하고 `Task { [weak self, job] }`에서 파이프라인 실행. await 지점마다 AppState 해제 가능성을 대비해 디스크 저장은 `job.meetingStore` 경유.
+- 파이프라인 순서: 1차 저장(라이브 행) -> `recorder.finish()` -> 다이어라이제이션 태스크 시작 -> 2-pass 텍스트 재디코딩(`TranscriptRefiner.refine`) -> 최신 디스크 회의의 수동 편집 덮어쓰기 -> 2차 저장(정제 행, 실패 시 throw 및 pending 재시도 등록) -> 요약 생성 -> 본인(me) 성문 등록(다이어라이제이션과 독립) -> 다이어라이제이션 최대 120초 대기 -> 결과 반영(최신 디스크 수동 편집과 병합 후 디스크 갱신, 세션ID 일치 시에만 라이브 상태 반영).
+- 임시 WAV 폴더 소유권 및 active lease: `tmp/livenote2-session-<UUID>/`는 해당 세션의 `SessionAudioRecorder`가 소유하며 프로세스 전역 `ActiveFolderRegistry`에 등록. 다이어라이제이션과 me 등록 태스크가 모두 종료된 후 `deleteFiles()`에 의해 단 1회 삭제 및 등록 해제. 30분 하드 리밋 초과 시 폴더에 `retained-until-restart` 마커를 남기고 등록을 유지하며, 백그라운드 태스크가 실제 완료될 때까지 삭제하지 않음.
+- `purgeStale()` 동작: 앱 시작 및 세션 시작 시 실행되며 현재 프로세스의 활성 레코더가 점유(`ActiveFolderRegistry`)하지 않은 폴더만 삭제. 이전 프로세스의 비정상 종료/마커 폴더만 청소.
+- 스트리밍 me 등록 스캔: 마이크 전체 WAV를 `WAVStreamReader`로 스트리밍 스캔하여 최대 60초 분량의 음성(RMS 게이트 통과)을 수집하여 등록(회의 후반부 발화도 정상 반영).
+- 정제 전사 저장 실패 및 pending 재시도: 2차 정제 전사 저장 실패 시 조용히 삼키지 않고 `pendingDiarizationResults[url]`에 등록하여 5초 후 자동 재시도 및 수동 재시도 지원.
+- 성문 충돌 카운터 보존: 기존 중심에 흡수 병합(`enroll`) 시 충돌 카운터를 0으로 리셋하지 않고 보존(`existingCentroid.conflicts`). 인물 병합(`merge`) 시에도 병합 중심의 충돌 카운터는 `max(existing.conflicts, sCentroid.conflicts)`로 보존.
+- 성문 임베딩 분리 인스턴스: me 등록 및 라이브 화자 승격(`LiveVoicePromoter`) 성문 임베딩 추출은 다이어라이제이션 전용 인스턴스와 분리된 전용 `OfflineDiarizer` 인스턴스(`embeddingExtractor`)에서 실행되어 실행 중인 다이어라이제이션 뒤에 대기하지 않음 (하드 리밋 초과 시 알림 문구: "Session audio kept until speaker recognition finishes; it is deleted afterwards, or at next launch if it never finishes").
+
 ---
 
 ## 6. 파일별 스펙 (livenote2/livenote2/ 아래 주요 파일)
@@ -543,6 +553,7 @@ Weekly Update의 system 프롬프트는 SA(Solutions Architect) 주간보고 규
 19. **번들 내장 레시피 id는 유일해야 한다.** `Resources/Recipes/*.json`은 PBXFileSystemSynchronizedRootGroup 동기화 그룹이 번들 루트로 평탄화해서 복사한다(하위 폴더 구조가 사라짐). `RecipeStore.loadBuiltin`은 `bundle.url(forResource:withExtension:)`로 파일명(=id)만으로 찾으므로, 새 내장 레시피를 추가할 때 다른 번들 리소스와 파일명이 겹치면 엉뚱한 파일을 읽게 된다.
 20. **레시피 id가 파일명과 다르거나 형식에 안 맞으면 조용히 사라진다.** `RecipeStore.refresh()`는 id가 `^[a-z0-9][a-z0-9-]{0,63}$`에 안 맞거나, 파일명(확장자 제외)과 id가 다르거나, id가 중복이면 그 파일을 목록에서 빼고 `recipe` 로그에만 남긴다(경로 조작 방어가 목적이라 UI에는 알리지 않는다). recipes 폴더의 JSON을 손으로 편집·복사할 때는 파일명과 id를 같게, 소문자·숫자·하이픈만 쓸 것.
 21. **앱 이름 변경/재설치 시 키체인 접근 제어(ACL) 거부 발생.** 앱 번들이 `/Applications/livenote2.app`에서 `/Applications/LiveNote.app`으로 변경되면 과거 빌드가 생성한 키체인 항목의 ACL 신뢰 앱 경로와 불일치해 `SecItemCopyMatching`이나 `SecItemUpdate` 시 `errSecAuthFailed`(-25293)가 반환된다. 이때 update-in-place 원칙에 따라 delete 재시도를 하지 않으며, `GeminiKeychain`은 상태 코드를 삼키지 않고 `GeminiKeychainError`(`.accessDenied`, `.inaccessibleItem`, `.readFailed`, `.corruptData`, `.invalidKeyData`, `.writeFailed`)로 throw한다. UI에서는 Keychain Access(키체인 접근) 앱에서 기존 `com.byungjoo.livenote2.gemini` 항목을 삭제하고 다시 저장하도록 명확한 오류 안내를 보여준다.
+22. **세션 시작 시 `purgeStale()`과 진행 중인 백그라운드 2-pass 오디오 충돌.** 이전 회의의 오프라인 다이어라이제이션이나 me 성문 등록이 백그라운드에서 아직 진행 중일 때 새 세션을 시작하면서 `purgeStale()`이 호출되면, 아직 읽고 있는 이전 세션의 WAV 폴더가 삭제될 위험이 있었다. `ActiveFolderRegistry`를 통해 현재 프로세스의 활성 세션 폴더를 추적하고 `purgeStale()`에서 제외(lease)하며, 백그라운드 작업이 완전히 끝난 후 내부 정리 태스크가 안전하게 삭제하도록 보장한다.
 
 ---
 

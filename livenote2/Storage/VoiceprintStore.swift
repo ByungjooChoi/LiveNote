@@ -438,12 +438,13 @@ final class VoiceprintStore: VoiceprintStoring {
                     let normalizedMerged = Self.l2Normalize(mergedVec)
                     let mergedQuality = (existingCentroid.quality * w1 + meanQuality * w2) / max(1e-6, mergedWeight)
 
+                    // 정상 등록은 충돌 증거를 지우지 않는다
                     updated.centroids[nearestIdx] = VoiceCentroid(
                         v: normalizedMerged,
                         n: mergedN,
                         quality: mergedQuality,
                         updated: Date(),
-                        conflicts: 0,
+                        conflicts: existingCentroid.conflicts,
                         weight: mergedWeight
                     )
                 } else {
@@ -607,7 +608,7 @@ final class VoiceprintStore: VoiceprintStoring {
                     n: mergedN,
                     quality: mergedQuality,
                     updated: max(existing.updated, sCentroid.updated),
-                    conflicts: min(existing.conflicts, sCentroid.conflicts),
+                    conflicts: max(existing.conflicts, sCentroid.conflicts),
                     weight: mergedWeight
                 )
             } else {

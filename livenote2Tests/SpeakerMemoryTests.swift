@@ -1218,7 +1218,8 @@ final class SpeakerMemoryTests: XCTestCase {
         }
 
         var owner: DummyOwner? = DummyOwner()
-        weak var weakOwner = owner
+        weak var weakOwner: DummyOwner? = nil
+        weakOwner = owner
 
         let gate = AsyncTestGateHelper()
         let fakeVoiceprints = VoiceprintStore(rootURL: store.rootURL.appendingPathComponent("fakeVP", isDirectory: true))
@@ -1517,6 +1518,7 @@ final class SpeakerMemoryTests: XCTestCase {
             diarizerRef: nil,
             geminiRef: GeminiLiveTranslator(),
             offlineDiarizer: OfflineDiarizer(),
+            embeddingExtractor: OfflineDiarizer(),
             voiceprints: fakeVP,
             meetingStore: store,
             promoter: promoter,
@@ -1544,6 +1546,158 @@ final class SpeakerMemoryTests: XCTestCase {
             return XCTFail("Failed to reload meeting from store")
         }
         XCTAssertEqual(reloaded.rows[0].speakerName, "RefinedSpeaker", "Disk save must happen using job.meetingStore even after owner deallocated")
+    }
+
+    // MARK: - R10-3 Refined Save Decision & Retry Tests (T8..T10)
+
+    func testRefinedSaveDecisionSuccess() {
+        let dummyURL = URL(fileURLWithPath: "/tmp/dummy-meeting")
+        let sessionMatchesDecision = AppState.refinedSaveDecision(
+            error: nil,
+            meetingURL: dummyURL,
+            sessionMatches: true
+        )
+        XCTAssertEqual(
+            sessionMatchesDecision,
+            .saved(notice: "Transcript refined and saved.")
+        )
+
+        let sessionDiffersDecision = AppState.refinedSaveDecision(
+            error: nil,
+            meetingURL: dummyURL,
+            sessionMatches: false
+        )
+        XCTAssertEqual(
+            sessionDiffersDecision,
+            .saved(notice: nil)
+        )
+    }
+
+    func testRefinedSaveDecisionFailure() {
+        let dummyURL = URL(fileURLWithPath: "/tmp/dummy-meeting")
+        let testError = NSError(domain: "test.save", code: 42, userInfo: [NSLocalizedDescriptionKey: "Disk write failed"])
+
+        let withURLDecision = AppState.refinedSaveDecision(
+            error: testError,
+            meetingURL: dummyURL,
+            sessionMatches: true
+        )
+        XCTAssertEqual(
+            withURLDecision,
+            .pending(notice: "Refined transcript could not be saved: Disk write failed", payloadURL: dummyURL)
+        )
+
+        let withoutURLDecision = AppState.refinedSaveDecision(
+            error: testError,
+            meetingURL: nil,
+            sessionMatches: true
+        )
+        XCTAssertEqual(
+            withoutURLDecision,
+            .pending(notice: "Refined transcript could not be saved: Disk write failed", payloadURL: nil)
+        )
+
+        let mismatchSessionDecision = AppState.refinedSaveDecision(
+            error: testError,
+            meetingURL: dummyURL,
+            sessionMatches: false
+        )
+        XCTAssertEqual(
+            mismatchSessionDecision,
+            .pending(notice: nil, payloadURL: dummyURL)
+        )
+    }
+
+    func testRefinedSaveFailureRetryAndManualEditPreservation() throws {
+        let store = try MeetingStoreFixture.makeStore()
+        defer { MeetingStoreFixture.cleanUp(store) }
+
+        let initialRow = TranscriptRow(
+            id: UUID(),
+            channel: .them,
+            speakerSlot: 0,
+            speakerName: nil,
+            english: "Hello world",
+            korean: nil,
+            startSeconds: 0.0,
+            endSeconds: 5.0,
+            nameSource: nil,
+            candidateNames: nil,
+            clusterID: nil
+        )
+
+        let meetingURL = try store.save(
+            rows: [initialRow],
+            myName: "Me",
+            speakerNames: [0: "Speaker 1"],
+            startedAt: Date(),
+            durationSeconds: 5.0,
+            title: "Test Meeting",
+            summary: nil,
+            attendees: nil,
+            existingURL: nil
+        )
+
+        // Make the meeting folder read-only to inject updateRows failure
+        let originalPermissions = try FileManager.default.attributesOfItem(atPath: meetingURL.path)[.posixPermissions] as? NSNumber
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: meetingURL.path)
+        defer {
+            if let originalPermissions {
+                try? FileManager.default.setAttributes([.posixPermissions: originalPermissions], ofItemAtPath: meetingURL.path)
+            }
+        }
+
+        let refinedRow = TranscriptRow(
+            id: UUID(),
+            channel: .them,
+            speakerSlot: 0,
+            speakerName: "ComputedSpeaker",
+            english: "Hello refined world",
+            korean: nil,
+            startSeconds: 0.0,
+            endSeconds: 5.0,
+            nameSource: NameSource.voice,
+            candidateNames: nil,
+            clusterID: "c1"
+        )
+
+        XCTAssertThrowsError(try store.updateRows(at: meetingURL, rows: [refinedRow], speakerNames: [0: "ComputedSpeaker"]))
+
+        // Build pending payload
+        let sessionID = UUID()
+        let pending = AppState.PendingDiarizationResult(
+            sessionID: sessionID,
+            meetingURL: meetingURL,
+            rows: [refinedRow],
+            names: [0: "ComputedSpeaker"],
+            diarization: nil
+        )
+
+        // Restore permissions so we can write a manual edit directly
+        if let originalPermissions {
+            try FileManager.default.setAttributes([.posixPermissions: originalPermissions], ofItemAtPath: meetingURL.path)
+        }
+
+        // Write a manual edit to disk
+        guard var manualEditedMeeting = store.load(meetingURL) else {
+            return XCTFail("Meeting not found on disk")
+        }
+        var manualRow = manualEditedMeeting.rows[0]
+        manualRow.speakerName = "ManualBob"
+        manualRow.nameSource = NameSource.manual
+        manualEditedMeeting.rows = [manualRow]
+        manualEditedMeeting.speakerNames = [0: "ManualBob"]
+        try store.updateRows(at: meetingURL, rows: manualEditedMeeting.rows, speakerNames: manualEditedMeeting.speakerNames)
+
+        // Run retry payload logic
+        let latest = store.load(meetingURL)
+        guard let unwrapRetry = AppState.retryPayload(latest: latest, pending: pending) else {
+            return XCTFail("retryPayload returned nil")
+        }
+
+        XCTAssertFalse(unwrapRetry.rows.isEmpty)
+        XCTAssertEqual(unwrapRetry.rows[0].speakerName, "ManualBob", "Manual edit must survive in retry merged rows")
+        XCTAssertEqual(unwrapRetry.rows[0].nameSource, NameSource.manual)
     }
 }
 

@@ -8,6 +8,37 @@ import Foundation
 /// 용량: 시간당 채널별 약 115MB.
 actor SessionAudioRecorder {
 
+    private final class ActiveFolderRegistry: @unchecked Sendable {
+        private let lock = NSLock()
+        private var folders = Set<String>()
+
+        func register(_ name: String) {
+            lock.lock()
+            folders.insert(name)
+            lock.unlock()
+        }
+
+        func unregister(_ name: String) {
+            lock.lock()
+            folders.remove(name)
+            lock.unlock()
+        }
+
+        func contains(_ name: String) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return folders.contains(name)
+        }
+
+        func snapshot() -> Set<String> {
+            lock.lock()
+            defer { lock.unlock() }
+            return folders
+        }
+    }
+
+    private static let activeFolders = ActiveFolderRegistry()
+
     private let sampleRate: Int = 16_000
     private var handles: [AudioChannel: FileHandle] = [:]
     private var dataBytes: [AudioChannel: UInt32] = [:]
@@ -15,8 +46,8 @@ actor SessionAudioRecorder {
 
     private let folder: URL
 
-    init() {
-        folder = FileManager.default.temporaryDirectory
+    init(rootDirectory: URL = FileManager.default.temporaryDirectory) {
+        folder = rootDirectory
             .appendingPathComponent("livenote2-session-\(UUID().uuidString)", isDirectory: true)
     }
 
@@ -24,7 +55,7 @@ actor SessionAudioRecorder {
     nonisolated var sessionFolder: URL { folder }
     var folderURL: URL { folder }
 
-    /// 세션 폴더에 retained-until-restart 마커 파일 작성
+    /// 세션 폴더에 retained-until-restart 마커 파일 작성. 세션 오디오는 화자 인식이 완료될 때까지 유지되며 완료 후 삭제되고, 영구 미완료 시 다음 앱 실행 시 삭제됩니다.
     func markRetainedUntilRestart() {
         let marker = folder.appendingPathComponent("retained-until-restart")
         FileManager.default.createFile(atPath: marker.path, contents: nil)
@@ -32,6 +63,7 @@ actor SessionAudioRecorder {
 
     /// 채널별 WAV 파일 생성 (헤더는 finish에서 확정)
     func start() {
+        Self.activeFolders.register(folder.lastPathComponent)
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             for channel in [AudioChannel.me, .them] {
@@ -45,6 +77,7 @@ actor SessionAudioRecorder {
             }
             AppLog.write("app", "세션 오디오 임시 기록 시작 (2-pass용)")
         } catch {
+            Self.activeFolders.unregister(folder.lastPathComponent)
             AppLog.write("app", "세션 오디오 기록 시작 실패: \(error.localizedDescription)")
             handles = [:]
         }
@@ -83,18 +116,43 @@ actor SessionAudioRecorder {
     func deleteFiles() {
         for handle in handles.values { try? handle.close() }
         handles = [:]
-        try? FileManager.default.removeItem(at: folder)
-        AppLog.write("app", "세션 오디오 임시 파일 삭제")
+        do {
+            try FileManager.default.removeItem(at: folder)
+            AppLog.write("app", "세션 오디오 임시 파일 삭제")
+        } catch {
+            AppLog.write("app", "세션 오디오 임시 파일 삭제 실패: \(error.localizedDescription)")
+        }
+        Self.activeFolders.unregister(folder.lastPathComponent)
     }
 
     /// 이전 세션이 비정상 종료로 남긴 임시 폴더 청소 (앱 시작 시 호출)
-    nonisolated static func purgeStale() {
-        let tmp = FileManager.default.temporaryDirectory
+    nonisolated static func purgeStale(
+        in tmp: URL = FileManager.default.temporaryDirectory,
+        excluding active: Set<String>? = nil
+    ) {
+        let activeSet = active ?? activeFolders.snapshot()
         let items = (try? FileManager.default.contentsOfDirectory(
             at: tmp, includingPropertiesForKeys: nil)) ?? []
+        var skippedCount = 0
         for item in items where item.lastPathComponent.hasPrefix("livenote2-session-") {
-            try? FileManager.default.removeItem(at: item)
+            if activeSet.contains(item.lastPathComponent) {
+                skippedCount += 1
+                continue
+            }
+            do {
+                try FileManager.default.removeItem(at: item)
+                AppLog.write("app", "purgeStale removed: \(item.lastPathComponent)")
+            } catch {
+                AppLog.write("app", "purgeStale failed to remove \(item.lastPathComponent): \(error.localizedDescription)")
+            }
         }
+        if skippedCount > 0 {
+            AppLog.write("app", "purgeStale skipped \(skippedCount) active session folders")
+        }
+    }
+
+    nonisolated static func isActiveFolder(_ url: URL) -> Bool {
+        activeFolders.contains(url.lastPathComponent)
     }
 
     // MARK: - WAV 헤더 (16kHz mono 16-bit PCM)

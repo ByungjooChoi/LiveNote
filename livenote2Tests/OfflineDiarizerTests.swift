@@ -328,39 +328,288 @@ final class OfflineDiarizerTests: XCTestCase {
         XCTAssertEqual(diarization.audioSeconds, 1.0, accuracy: 0.01)
     }
 
-    func testLoadWAVCappedMaxSeconds() throws {
-        // 5-minute synthetic WAV at 16 kHz (5 * 60 * 16,000 = 4,800,000 samples)
+    // MARK: - R10-2 Streaming Me-Enrollment Tests (T4..T7 & X5)
+
+    func testMeEnrollmentClipScansPastInitialSilence() async throws {
+        // T4: 60s silence + 25s tone (0.3 amplitude) + 5s silence at 16 kHz
+        let sr = 16_000
+        let silence60s = [Float](repeating: 0.0, count: 60 * sr)
+        let tone25s = (0..<(25 * sr)).map { _ in Float(0.3) }
+        let silence5s = [Float](repeating: 0.0, count: 5 * sr)
+        let totalSamples = silence60s + tone25s + silence5s
+
+        let wavURL = try createWAVFile(samples: totalSamples, sampleRate: sr)
+
+        let (clip, clipSecs) = try OfflineDiarizer.meEnrollmentClip(wavURL: wavURL, maxSeconds: 60.0)
+
+        // Must scan past the first 60s of silence and collect the 25s of tone
+        XCTAssertGreaterThanOrEqual(clipSecs, 24.5, "Must collect at least 24.5s of voiced audio")
+        XCTAssertEqual(clipSecs, Double(clip.count) / Double(sr), accuracy: 0.01)
+    }
+
+    func testCollectVoicedSamplesStopsEarly() throws {
+        // T5: 5-minute WAV of continuous tone (16 kHz, 300s total)
+        // With 10s chunks, collecting 60s should stop after at most 7 pulls.
+        let sr = 16_000
+        let tone10s = [Float](repeating: 0.3, count: 10 * sr)
+        var totalChunksAvailable = 30 // 30 * 10s = 300s
+        var pullCount = 0
+
+        let result = try OfflineDiarizer.collectVoicedSamples(
+            next: {
+                pullCount += 1
+                if totalChunksAvailable > 0 {
+                    totalChunksAvailable -= 1
+                    return tone10s
+                } else {
+                    return nil
+                }
+            },
+            sampleRate: sr,
+            maxSeconds: 60.0
+        )
+
+        XCTAssertEqual(result.seconds, 60.0, accuracy: 0.01)
+        XCTAssertEqual(result.samples.count, 60 * sr)
+        XCTAssertLessThanOrEqual(pullCount, 7, "Must stop early without pulling all chunks (expected <= 7 pulls, got \(pullCount))")
+    }
+
+    func testMeEnrollmentClip48kHzResampled() async throws {
+        // T6: 48 kHz WAV with speech (tone) only after 70s of silence (70s silence + 10s tone)
+        let sr48k = 48_000
+        let silence70s = [Float](repeating: 0.0, count: 70 * sr48k)
+        let tone10s = [Float](repeating: 0.3, count: 10 * sr48k)
+        let total48k = silence70s + tone10s
+        let wavURL = try createWAVFile(samples: total48k, sampleRate: sr48k)
+
+        let (clip, clipSecs) = try OfflineDiarizer.meEnrollmentClip(wavURL: wavURL, maxSeconds: 60.0)
+
+        // Resampled output is at 16 kHz, should be ~10s of voiced audio
+        XCTAssertEqual(clipSecs, 10.0, accuracy: 0.2)
+        XCTAssertEqual(Double(clip.count) / 16_000.0, clipSecs, accuracy: 0.01)
+    }
+
+    func testWAVStreamReaderTruncatedDataChunk() throws {
+        // T7: WAV whose data chunk declares 1,000,000 bytes but file only contains 1600 samples (3200 bytes)
+        let sr = 16_000
+        let actualSamples = [Float](repeating: 0.2, count: 1600)
+        let fakeDataSize: UInt32 = 1_000_000
+        let fileSize: UInt32 = 36 + fakeDataSize
+
+        let fileURL = tempDir.appendingPathComponent("truncated_\(UUID().uuidString).wav")
+        var data = Data()
+        data.append(contentsOf: "RIFF".utf8)
+        var fileSizeLE = fileSize.littleEndian
+        data.append(Data(bytes: &fileSizeLE, count: 4))
+        data.append(contentsOf: "WAVEfmt ".utf8)
+        var fmtSize: UInt32 = 16
+        data.append(Data(bytes: &fmtSize, count: 4))
+        var format: UInt16 = 1
+        data.append(Data(bytes: &format, count: 2))
+        var ch: UInt16 = 1
+        data.append(Data(bytes: &ch, count: 2))
+        var sRate: UInt32 = UInt32(sr)
+        data.append(Data(bytes: &sRate, count: 4))
+        var byteRate: UInt32 = UInt32(sr * 2)
+        data.append(Data(bytes: &byteRate, count: 4))
+        var blockAlign: UInt16 = 2
+        data.append(Data(bytes: &blockAlign, count: 2))
+        var bits: UInt16 = 16
+        data.append(Data(bytes: &bits, count: 2))
+
+        data.append(contentsOf: "data".utf8)
+        var dSizeLE = fakeDataSize.littleEndian
+        data.append(Data(bytes: &dSizeLE, count: 4))
+
+        for sample in actualSamples {
+            let int16Val = Int16(sample * 32767.0).littleEndian
+            var val = int16Val
+            data.append(Data(bytes: &val, count: 2))
+        }
+
+        try data.write(to: fileURL)
+
+        var reader = try OfflineDiarizer.WAVStreamReader(url: fileURL)
+        defer { reader.close() }
+
+        let firstChunk = try reader.nextFrames(maxFrames: 1600)
+        XCTAssertNotNil(firstChunk)
+        XCTAssertEqual(firstChunk?.count, 1600)
+
+        // Second chunk reaches EOF and returns nil gracefully without throwing
+        let secondChunk = try reader.nextFrames(maxFrames: 1600)
+        XCTAssertNil(secondChunk)
+    }
+
+    func testMeEnrollmentClipFiveMinuteContinuousTone() async throws {
+        // X5 updated: 5-minute synthetic WAV at 16 kHz
         let sr = 16_000
         let fiveMinSamples = [Float](repeating: 0.25, count: 5 * 60 * sr)
         let wavURL = try createWAVFile(samples: fiveMinSamples, sampleRate: sr)
 
-        // Read capped at 60s
-        let (cappedSamples, loadedSR) = try OfflineDiarizer.loadWAV(url: wavURL, maxSeconds: 60.0)
-        XCTAssertEqual(loadedSR, sr)
-        // Must return exactly 60 seconds worth of samples (60 * 16,000 = 960,000)
-        XCTAssertEqual(cappedSamples.count, 60 * sr)
-        XCTAssertEqual(Double(cappedSamples.count) / Double(loadedSR), 60.0, accuracy: 0.01)
-    }
+        let (clip, clipSecs) = try OfflineDiarizer.meEnrollmentClip(wavURL: wavURL, maxSeconds: 60.0)
 
-    func testMeEnrollmentClip() async throws {
-        let sr = 16_000
-        // 90s audio: 80s speech + 10s silence
-        let speech = [Float](repeating: 0.4, count: 80 * sr)
-        let silence = [Float](repeating: 0.0, count: 10 * sr)
-        let totalSamples = speech + silence
-        let wavURL = try createWAVFile(samples: totalSamples, sampleRate: sr)
-
-        final class DummyEngine: OfflineDiarizationEngine, @unchecked Sendable {
-            func prepare() async throws {}
-            func diarize(samples: [Float]) throws -> [SpeakerSegment] { [] }
-            func embedding(for samples: [Float]) throws -> [Float] { [0.1] }
-        }
-
-        let diarizer = OfflineDiarizer(engine: DummyEngine())
-        let (clip, clipSecs) = try await diarizer.meEnrollmentClip(wavURL: wavURL, maxSeconds: 60.0)
-
-        // Clipped to maxSeconds (60s)
         XCTAssertEqual(clip.count, 60 * sr)
         XCTAssertEqual(clipSecs, 60.0, accuracy: 0.01)
     }
+
+    // MARK: - R11-1 Concurrency Isolation Tests (F1a & F1b)
+
+    func testEmbeddingExtractorIndependentOfRunningDiarization_F1a() async throws {
+        let enterGate = AsyncTestGate()
+        let blockGate = AsyncTestGate()
+        let diarizerA = OfflineDiarizer(engine: BlockingDiarizationEngine(enterGate: enterGate, blockGate: blockGate))
+        let extractorB = OfflineDiarizer(engine: FixedEmbeddingEngine(fixedEmbedding: [Float](repeating: 0.42, count: 256)))
+
+        // Small synthetic WAV with non-silent tone
+        let sr = 16_000
+        let toneSamples = [Float](repeating: 0.3, count: sr)
+        let wavURL = try createWAVFile(samples: toneSamples, sampleRate: sr)
+
+        let taskA = Task {
+            try await diarizerA.diarize(wavURL: wavURL, skipSilence: false)
+        }
+
+        // Wait until diarizer A enters synchronous diarize
+        await enterGate.wait()
+
+        // Extractor B embedding must return within 1s while A is blocked
+        let embStart = Date()
+        let embedding = try await extractorB.embedding(samples: [0.1, 0.2, 0.3])
+        let embDuration = Date().timeIntervalSince(embStart)
+        XCTAssertLessThan(embDuration, 1.0, "Extractor B embedding must complete within 1s while Diarizer A is blocked")
+        XCTAssertEqual(embedding.first, 0.42)
+
+        // OfflineDiarizer.meEnrollmentClip must also complete within 1s
+        let clipStart = Date()
+        let (_, clipSecs) = try OfflineDiarizer.meEnrollmentClip(wavURL: wavURL, maxSeconds: 1.0)
+        let clipDuration = Date().timeIntervalSince(clipStart)
+        XCTAssertLessThan(clipDuration, 1.0, "meEnrollmentClip must complete within 1s while Diarizer A is blocked")
+        XCTAssertGreaterThan(clipSecs, 0)
+
+        // Finally open blockGate and await A
+        await blockGate.open()
+        let resultA = try await taskA.value
+        XCTAssertEqual(resultA.segments.count, 0)
+    }
+
+    func testSingleDiarizerEmbeddingBlocksBehindDiarization_F1b() async throws {
+        let enterGate = AsyncTestGate()
+        let blockGate = AsyncTestGate()
+        let diarizerA = OfflineDiarizer(engine: BlockingDiarizationEngine(enterGate: enterGate, blockGate: blockGate))
+
+        let sr = 16_000
+        let toneSamples = [Float](repeating: 0.3, count: sr)
+        let wavURL = try createWAVFile(samples: toneSamples, sampleRate: sr)
+
+        let taskA = Task {
+            try await diarizerA.diarize(wavURL: wavURL, skipSilence: false)
+        }
+
+        // Wait until diarizer A enters synchronous diarize
+        await enterGate.wait()
+
+        // Calling embedding on instance A itself must NOT complete within 0.5s while gate is closed
+        let didCompleteFlag = AtomicFlag()
+        let embTask = Task {
+            let res = try await diarizerA.embedding(samples: [0.1, 0.2, 0.3])
+            didCompleteFlag.set(true)
+            return res
+        }
+
+        try await Task.sleep(nanoseconds: 500_000_000)
+        XCTAssertFalse(didCompleteFlag.get(), "Calling embedding on blocked Diarizer A must not complete within 0.5s")
+
+        // Open the gate and await tasks to prevent dangling tasks
+        await blockGate.open()
+        _ = try await taskA.value
+        _ = try await embTask.value
+        XCTAssertTrue(didCompleteFlag.get(), "Embedding must complete after unblocking Diarizer A")
+    }
+}
+
+// MARK: - Concurrency Test Helpers
+
+private final class AtomicFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Bool = false
+
+    func set(_ val: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        value = val
+    }
+
+    func get() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
+private actor AsyncTestGate {
+    private var isOpen = false
+    private var continuations: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { cont in
+            continuations.append(cont)
+        }
+    }
+
+    func open() {
+        isOpen = true
+        for cont in continuations {
+            cont.resume()
+        }
+        continuations.removeAll()
+    }
+}
+
+private final class BlockingDiarizationEngine: OfflineDiarizationEngine, @unchecked Sendable {
+    let enterGate: AsyncTestGate
+    let blockGate: AsyncTestGate
+    let fixedEmbedding: [Float]
+
+    init(
+        enterGate: AsyncTestGate,
+        blockGate: AsyncTestGate,
+        fixedEmbedding: [Float] = [Float](repeating: 0.1, count: 256)
+    ) {
+        self.enterGate = enterGate
+        self.blockGate = blockGate
+        self.fixedEmbedding = fixedEmbedding
+    }
+
+    func prepare() async throws {}
+
+    func diarize(samples: [Float]) throws -> [SpeakerSegment] {
+        Task {
+            await enterGate.open()
+        }
+        let sema = DispatchSemaphore(value: 0)
+        Task {
+            await blockGate.wait()
+            sema.signal()
+        }
+        sema.wait()
+        return []
+    }
+
+    func embedding(for samples: [Float]) throws -> [Float] {
+        return fixedEmbedding
+    }
+}
+
+private final class FixedEmbeddingEngine: OfflineDiarizationEngine, @unchecked Sendable {
+    let fixedEmbedding: [Float]
+
+    init(fixedEmbedding: [Float] = [Float](repeating: 0.2, count: 256)) {
+        self.fixedEmbedding = fixedEmbedding
+    }
+
+    func prepare() async throws {}
+    func diarize(samples: [Float]) throws -> [SpeakerSegment] { [] }
+    func embedding(for samples: [Float]) throws -> [Float] { fixedEmbedding }
 }

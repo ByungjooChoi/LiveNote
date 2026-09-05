@@ -106,6 +106,7 @@ final class FluidOfflineEngine: OfflineDiarizationEngine, @unchecked Sendable {
 }
 
 /// 2-pass 오프라인 화자 분리 및 성문 임베딩 추출 액터
+/// diarize holds the actor for the whole synchronous engine call; callers that must not wait behind it use a separate OfflineDiarizer instance (own engine, own DiarizerManager).
 actor OfflineDiarizer {
 
     private let engine: OfflineDiarizationEngine
@@ -187,25 +188,86 @@ actor OfflineDiarizer {
         return try engine.embedding(for: samples)
     }
 
-    /// 본인(Me) 음성 등록용 오디오 클립 추출 (최대 maxSeconds 바이트 상한 읽기, 침묵 제거, 16kHz 리샘플링)
-    func meEnrollmentClip(wavURL: URL, maxSeconds: Double = 60.0) async throws -> (samples: [Float], seconds: Double) {
-        let (rawSamples, sr) = try Self.loadWAV(url: wavURL, maxSeconds: maxSeconds)
-        let samples16k: [Float]
-        let sampleRate: Int
-        if sr != 16_000 {
-            samples16k = Self.resampleTo16k(rawSamples, from: sr)
-            sampleRate = 16_000
-        } else {
-            samples16k = rawSamples
-            sampleRate = sr
+    /// 본인(Me) 음성 등록용 오디오 클립 추출 (마이크 전체 WAV를 스트리밍 스캔하여 최대 maxSeconds 음성 수집, 침묵 제거, 16kHz 리샘플링)
+    nonisolated static func meEnrollmentClip(wavURL: URL, maxSeconds: Double = 60.0) throws -> (samples: [Float], seconds: Double) {
+        var reader = try WAVStreamReader(url: wavURL)
+        defer { reader.close() }
+        let chunkFrames = reader.sampleRate * 10
+        return try collectVoicedSamples(
+            next: { try reader.nextFrames(maxFrames: chunkFrames) },
+            sampleRate: reader.sampleRate,
+            maxSeconds: maxSeconds
+        )
+    }
+
+    /// 스트리밍 방식으로 오디오 청크를 당겨와 RMS 무음 게이트를 통과한 음성 샘플을 최대 maxSeconds(16kHz 기준)까지 수집
+    static func collectVoicedSamples(
+        next: () throws -> [Float]?,
+        sampleRate: Int,
+        maxSeconds: Double,
+        frameSize: Int = 1_600,
+        rmsThreshold: Float = 0.005
+    ) throws -> (samples: [Float], seconds: Double) {
+        guard maxSeconds > 0 else { return ([], 0) }
+        let targetCount = Int(ceil(maxSeconds * 16_000))
+        var collected: [Float] = []
+        collected.reserveCapacity(targetCount)
+        var remainder: [Float] = []
+
+        while collected.count < targetCount {
+            guard let rawChunk = try next(), !rawChunk.isEmpty else {
+                break
+            }
+
+            let chunk16k: [Float]
+            if sampleRate != 16_000 {
+                chunk16k = resampleTo16k(rawChunk, from: sampleRate)
+            } else {
+                chunk16k = rawChunk
+            }
+
+            let inputSamples = remainder + chunk16k
+            var offset = 0
+
+            while offset + frameSize <= inputSamples.count {
+                let frame = Array(inputSamples[offset..<(offset + frameSize)])
+                var sumSquares: Float = 0
+                vDSP_svesq(frame, 1, &sumSquares, vDSP_Length(frameSize))
+                let rms = sqrt(sumSquares / Float(frameSize))
+
+                if rms >= rmsThreshold {
+                    let needed = targetCount - collected.count
+                    if needed <= frameSize {
+                        collected.append(contentsOf: frame.prefix(needed))
+                        break
+                    } else {
+                        collected.append(contentsOf: frame)
+                    }
+                }
+                offset += frameSize
+                if collected.count >= targetCount { break }
+            }
+
+            if collected.count >= targetCount {
+                remainder = []
+                break
+            }
+
+            remainder = Array(inputSamples[offset..<inputSamples.count])
         }
 
-        let activeSamples = Self.filterSilence(samples: samples16k, sampleRate: sampleRate)
-        let maxCount = Int(maxSeconds * Double(sampleRate))
-        let clipCount = min(activeSamples.count, maxCount)
-        let clip = Array(activeSamples.prefix(clipCount))
-        let clipSecs = Double(clip.count) / Double(sampleRate)
-        return (clip, clipSecs)
+        if collected.count < targetCount && !remainder.isEmpty {
+            var sumSquares: Float = 0
+            vDSP_svesq(remainder, 1, &sumSquares, vDSP_Length(remainder.count))
+            let rms = sqrt(sumSquares / Float(remainder.count))
+            if rms >= rmsThreshold {
+                let needed = targetCount - collected.count
+                collected.append(contentsOf: remainder.prefix(needed))
+            }
+        }
+
+        let seconds = Double(collected.count) / 16_000.0
+        return (collected, seconds)
     }
 
     // MARK: - 샘플레이트 리샘플링 (순수 함수)
@@ -308,133 +370,199 @@ actor OfflineDiarizer {
         return result
     }
 
-    // MARK: - WAV 로더 (순수 함수)
+    // MARK: - WAV 로더 및 스트리밍 리더 (순수 함수 및 구조체)
 
-    /// 16-bit PCM WAV 파일을 읽어 Float 배열([-1.0, 1.0]) 및 샘플레이트 반환 (maxSeconds 지정 시 바이트 상한 읽기)
-    static func loadWAV(url: URL, maxSeconds: Double? = nil) throws -> (samples: [Float], sampleRate: Int) {
-        guard let maxSec = maxSeconds, maxSec > 0 else {
-            let data = try Data(contentsOf: url)
-            return try parseWAVData(data)
-        }
-
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { try? handle.close() }
-
-        // 헤더 메타데이터 파싱용 첫 4KB 읽기
-        guard let headerData = try handle.read(upToCount: 4096), headerData.count >= 12 else {
-            throw NSError(
-                domain: "livenote2.wav",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "WAV file too short for header"]
-            )
-        }
-
-        let (channels, sampleRate, bitsPerSample, dataOffset) = try parseWAVHeaderMeta(headerData)
-        let bytesPerSample = bitsPerSample / 8
-        let bytesPerSecond = channels * sampleRate * bytesPerSample
-        let maxBytesToRead = Int(ceil(maxSec * Double(bytesPerSecond))) + 1024 // 마진
-
-        try handle.seek(toOffset: 0)
-        let cappedData = try handle.read(upToCount: dataOffset + maxBytesToRead) ?? Data()
-        let maxFrames = Int(ceil(maxSec * Double(sampleRate)))
-        return try parseWAVData(cappedData, allowTruncatedDataChunk: true, maxFrames: maxFrames)
+    /// 16-bit PCM WAV 파일을 읽어 Float 배열([-1.0, 1.0]) 및 샘플레이트 반환
+    static func loadWAV(url: URL) throws -> (samples: [Float], sampleRate: Int) {
+        let data = try Data(contentsOf: url)
+        return try parseWAVData(data)
     }
 
-    /// WAV 헤더 메타데이터 파싱
-    private static func parseWAVHeaderMeta(_ data: Data) throws -> (channels: Int, sampleRate: Int, bitsPerSample: Int, dataOffset: Int) {
-        guard data.count >= 12 else {
-            throw NSError(
-                domain: "livenote2.wav",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "WAV file too short (\(data.count) bytes)"]
-            )
+    /// 스트리밍 방식으로 16-bit PCM WAV 파일에서 오디오 프레임을 청크 단위로 읽는 리더
+    struct WAVStreamReader {
+        private let handle: FileHandle
+        let channels: Int
+        let sampleRate: Int
+        let bitsPerSample: Int
+        let dataOffset: Int
+        let dataSize: Int
+        private var bytesReadFromData: Int = 0
+
+        init(url: URL) throws {
+            let handle = try FileHandle(forReadingFrom: url)
+            self.handle = handle
+
+            guard let headerData = try handle.read(upToCount: 4096), headerData.count >= 12 else {
+                try? handle.close()
+                throw NSError(
+                    domain: "livenote2.wav",
+                    code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: "WAV file too short for header"]
+                )
+            }
+
+            let (ch, sr, bits, offset, size) = try Self.parseHeader(headerData)
+            self.channels = ch
+            self.sampleRate = sr
+            self.bitsPerSample = bits
+            self.dataOffset = offset
+            self.dataSize = size
+
+            try handle.seek(toOffset: UInt64(offset))
         }
 
-        let riff = data.subdata(in: 0..<4)
-        guard riff == Data("RIFF".utf8) else {
-            throw NSError(
-                domain: "livenote2.wav",
-                code: -2,
-                userInfo: [NSLocalizedDescriptionKey: "Missing RIFF header"]
-            )
+        func close() {
+            try? handle.close()
         }
 
-        let wave = data.subdata(in: 8..<12)
-        guard wave == Data("WAVE".utf8) else {
-            throw NSError(
-                domain: "livenote2.wav",
-                code: -3,
-                userInfo: [NSLocalizedDescriptionKey: "Missing WAVE header"]
-            )
+        mutating func nextFrames(maxFrames: Int) throws -> [Float]? {
+            guard maxFrames > 0, bytesReadFromData < dataSize else { return nil }
+
+            let bytesPerFrame = channels * (bitsPerSample / 8)
+            let bytesWanted = maxFrames * bytesPerFrame
+            let bytesAvailable = dataSize - bytesReadFromData
+            let bytesToRead = min(bytesWanted, bytesAvailable)
+
+            guard bytesToRead > 0 else { return nil }
+
+            guard let chunkData = try handle.read(upToCount: bytesToRead), !chunkData.isEmpty else {
+                return nil
+            }
+
+            bytesReadFromData += chunkData.count
+
+            let validByteCount = chunkData.count - (chunkData.count % bytesPerFrame)
+            guard validByteCount >= bytesPerFrame else {
+                return nil
+            }
+
+            let totalFrames = validByteCount / bytesPerFrame
+            var floatSamples = [Float](repeating: 0, count: totalFrames)
+
+            if channels == 1 {
+                chunkData.withUnsafeBytes { rawBuffer in
+                    for i in 0..<totalFrames {
+                        let raw = rawBuffer.loadUnaligned(fromByteOffset: i * 2, as: Int16.self)
+                        let val = Int16(littleEndian: raw)
+                        floatSamples[i] = Float(val) / 32768.0
+                    }
+                }
+            } else {
+                chunkData.withUnsafeBytes { rawBuffer in
+                    for frame in 0..<totalFrames {
+                        var sum: Float = 0
+                        for c in 0..<channels {
+                            let byteOffset = (frame * channels + c) * 2
+                            let raw = rawBuffer.loadUnaligned(fromByteOffset: byteOffset, as: Int16.self)
+                            let val = Int16(littleEndian: raw)
+                            sum += Float(val) / 32768.0
+                        }
+                        floatSamples[frame] = sum / Float(channels)
+                    }
+                }
+            }
+
+            return floatSamples
         }
 
-        var offset = 12
-        var channels: Int?
-        var sampleRate: Int?
-        var bitsPerSample: Int?
-        var audioFormat: Int?
-        var dataChunkOffset = 44
+        private static func parseHeader(_ data: Data) throws -> (channels: Int, sampleRate: Int, bitsPerSample: Int, dataOffset: Int, dataSize: Int) {
+            guard data.count >= 12 else {
+                throw NSError(
+                    domain: "livenote2.wav",
+                    code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: "WAV file too short (\(data.count) bytes)"]
+                )
+            }
 
-        while offset + 8 <= data.count {
-            let chunkID = String(decoding: data.subdata(in: offset..<(offset + 4)), as: UTF8.self)
-            let chunkSize = Int(
-                UInt32(data[offset + 4]) |
-                (UInt32(data[offset + 5]) << 8) |
-                (UInt32(data[offset + 6]) << 16) |
-                (UInt32(data[offset + 7]) << 24)
-            )
-            let chunkDataStart = offset + 8
-            let chunkDataEnd = chunkDataStart + chunkSize
+            let riff = data.subdata(in: 0..<4)
+            guard riff == Data("RIFF".utf8) else {
+                throw NSError(
+                    domain: "livenote2.wav",
+                    code: -2,
+                    userInfo: [NSLocalizedDescriptionKey: "Missing RIFF header"]
+                )
+            }
 
-            if chunkID == "fmt " {
-                guard chunkSize >= 16, chunkDataStart + 16 <= data.count else {
-                    throw NSError(
-                        domain: "livenote2.wav",
-                        code: -4,
-                        userInfo: [NSLocalizedDescriptionKey: "Truncated or invalid fmt chunk"]
-                    )
+            let wave = data.subdata(in: 8..<12)
+            guard wave == Data("WAVE".utf8) else {
+                throw NSError(
+                    domain: "livenote2.wav",
+                    code: -3,
+                    userInfo: [NSLocalizedDescriptionKey: "Missing WAVE header"]
+                )
+            }
+
+            var offset = 12
+            var channels: Int?
+            var sampleRate: Int?
+            var bitsPerSample: Int?
+            var audioFormat: Int?
+            var dataChunkOffset: Int?
+            var dataChunkSize: Int?
+
+            while offset + 8 <= data.count {
+                let chunkID = String(decoding: data.subdata(in: offset..<(offset + 4)), as: UTF8.self)
+                let chunkSize = Int(
+                    UInt32(data[offset + 4]) |
+                    (UInt32(data[offset + 5]) << 8) |
+                    (UInt32(data[offset + 6]) << 16) |
+                    (UInt32(data[offset + 7]) << 24)
+                )
+                let chunkDataStart = offset + 8
+                let chunkDataEnd = chunkDataStart + chunkSize
+
+                if chunkID == "fmt " {
+                    guard chunkSize >= 16, chunkDataStart + 16 <= data.count else {
+                        throw NSError(
+                            domain: "livenote2.wav",
+                            code: -4,
+                            userInfo: [NSLocalizedDescriptionKey: "Truncated or invalid fmt chunk"]
+                        )
+                    }
+
+                    let format = UInt16(data[chunkDataStart]) | (UInt16(data[chunkDataStart + 1]) << 8)
+                    let numChannels = UInt16(data[chunkDataStart + 2]) | (UInt16(data[chunkDataStart + 3]) << 8)
+                    let sRate = UInt32(data[chunkDataStart + 4]) |
+                        (UInt32(data[chunkDataStart + 5]) << 8) |
+                        (UInt32(data[chunkDataStart + 6]) << 16) |
+                        (UInt32(data[chunkDataStart + 7]) << 24)
+                    let bits = UInt16(data[chunkDataStart + 14]) | (UInt16(data[chunkDataStart + 15]) << 8)
+
+                    audioFormat = Int(format)
+                    channels = Int(numChannels)
+                    sampleRate = Int(sRate)
+                    bitsPerSample = Int(bits)
+                } else if chunkID == "data" {
+                    dataChunkOffset = chunkDataStart
+                    dataChunkSize = chunkSize
+                    break
                 }
 
-                let format = UInt16(data[chunkDataStart]) | (UInt16(data[chunkDataStart + 1]) << 8)
-                let numChannels = UInt16(data[chunkDataStart + 2]) | (UInt16(data[chunkDataStart + 3]) << 8)
-                let sRate = UInt32(data[chunkDataStart + 4]) |
-                    (UInt32(data[chunkDataStart + 5]) << 8) |
-                    (UInt32(data[chunkDataStart + 6]) << 16) |
-                    (UInt32(data[chunkDataStart + 7]) << 24)
-                let bits = UInt16(data[chunkDataStart + 14]) | (UInt16(data[chunkDataStart + 15]) << 8)
-
-                audioFormat = Int(format)
-                channels = Int(numChannels)
-                sampleRate = Int(sRate)
-                bitsPerSample = Int(bits)
-            } else if chunkID == "data" {
-                dataChunkOffset = chunkDataStart
-                break
+                offset = min(chunkDataEnd, data.count)
+                if chunkSize % 2 != 0 && offset < data.count {
+                    offset += 1
+                }
             }
 
-            offset = min(chunkDataEnd, data.count)
-            if chunkSize % 2 != 0 && offset < data.count {
-                offset += 1
+            guard let fmt = audioFormat, fmt == 1 else {
+                throw NSError(
+                    domain: "livenote2.wav",
+                    code: -6,
+                    userInfo: [NSLocalizedDescriptionKey: "Unsupported audio format, only PCM (1) supported"]
+                )
             }
-        }
 
-        guard let fmt = audioFormat, fmt == 1 else {
-            throw NSError(
-                domain: "livenote2.wav",
-                code: -6,
-                userInfo: [NSLocalizedDescriptionKey: "Unsupported audio format, only PCM (1) supported"]
-            )
-        }
+            guard let ch = channels, ch >= 1, let sr = sampleRate, let bits = bitsPerSample, bits == 16,
+                  let dOffset = dataChunkOffset, let dSize = dataChunkSize else {
+                throw NSError(
+                    domain: "livenote2.wav",
+                    code: -7,
+                    userInfo: [NSLocalizedDescriptionKey: "Unsupported format or missing chunks in header"]
+                )
+            }
 
-        guard let ch = channels, ch >= 1, let sr = sampleRate, let bits = bitsPerSample, bits == 16 else {
-            throw NSError(
-                domain: "livenote2.wav",
-                code: -7,
-                userInfo: [NSLocalizedDescriptionKey: "Unsupported format or missing chunks in header"]
-            )
+            return (ch, sr, bits, dOffset, dSize)
         }
-
-        return (ch, sr, bits, dataChunkOffset)
     }
 
     /// WAV 바이너리 데이터 파싱 (엄격한 범위 검증 및 프레임 상한 지원)

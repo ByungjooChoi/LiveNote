@@ -57,6 +57,7 @@ struct TwoPassJob: Sendable {
     let diarizerRef: SpeakerDiarizer?
     let geminiRef: GeminiLiveTranslator
     let offlineDiarizer: OfflineDiarizer
+    let embeddingExtractor: OfflineDiarizer
     let voiceprints: VoiceprintStore
     let meetingStore: MeetingStore
     let promoter: LiveVoicePromoter
@@ -64,6 +65,11 @@ struct TwoPassJob: Sendable {
     let zoomNameLookup: @Sendable (TranscriptRow) -> String?
     let fallbackName: String?
     let myName: String
+}
+
+/// AppState 약참조 래퍼 (Task.detached 캡처 시 강참조 방지용 Sendable)
+struct WeakAppState: @unchecked Sendable {
+    weak var value: AppState?
 }
 
 /// 앱 전체 상태와 파이프라인 배선.
@@ -201,6 +207,8 @@ final class AppState {
     let voiceprints = VoiceprintStore()
     /// 2-pass 오프라인 다이어라이저
     @ObservationIgnored let offlineDiarizer: OfflineDiarizer
+    /// 성문 임베딩 전용 오프라인 다이어라이저
+    @ObservationIgnored let embeddingExtractor: OfflineDiarizer
     /// 라이브 화자 승격 프로모터
     @ObservationIgnored let livePromoter: LiveVoicePromoter
     /// 라이브 화자 승격 세대 번호 (세션 교체 시 이전 콜백 무시용)
@@ -661,7 +669,9 @@ final class AppState {
     init() {
         let offlineDiarizer = OfflineDiarizer(engine: FluidOfflineEngine())
         self.offlineDiarizer = offlineDiarizer
-        let promoter = LiveVoicePromoter(diarizer: offlineDiarizer)
+        let embeddingExtractor = OfflineDiarizer(engine: FluidOfflineEngine())
+        self.embeddingExtractor = embeddingExtractor
+        let promoter = LiveVoicePromoter(diarizer: embeddingExtractor)
         self.livePromoter = promoter
 
         let localChatRef = localChat
@@ -1079,6 +1089,25 @@ final class AppState {
         }
     }
 
+    public enum RefinedSaveDecision: Equatable, Sendable {
+        case saved(notice: String?)
+        case pending(notice: String?, payloadURL: URL?)
+    }
+
+    nonisolated static func refinedSaveDecision(
+        error: Error?,
+        meetingURL: URL?,
+        sessionMatches: Bool
+    ) -> RefinedSaveDecision {
+        if let error {
+            let notice = sessionMatches ? "Refined transcript could not be saved: \(error.localizedDescription)" : nil
+            return .pending(notice: notice, payloadURL: meetingURL)
+        } else {
+            let notice = sessionMatches ? "Transcript refined and saved." : nil
+            return .saved(notice: notice)
+        }
+    }
+
     public struct PendingDiarizationResult: Equatable, Sendable {
         public let sessionID: UUID
         public let meetingURL: URL
@@ -1121,8 +1150,9 @@ final class AppState {
         guard let pending = pendingDiarizationResults[url] else { return }
         let latest = meetingStore.load(url)
         guard let (mergedRows, mergedNames) = Self.retryPayload(latest: latest, pending: pending) else {
+            let msg = pending.diarization != nil ? "Speaker recognition results could not be saved: meeting not found on disk" : "Refined transcript could not be saved: meeting not found on disk"
             AppLog.write("voice", "Retry updating saved meeting at \(url.lastPathComponent) failed: meeting folder not found")
-            noticeMessage = "Speaker recognition results could not be saved: meeting not found on disk"
+            noticeMessage = msg
             return
         }
 
@@ -1136,13 +1166,16 @@ final class AppState {
                 self.speakerNames = mergedNames
                 if let diarization = pending.diarization {
                     self.lastDiarization = diarization
+                    self.noticeMessage = "Speaker recognition finished"
+                } else {
+                    self.noticeMessage = "Transcript refined and saved."
                 }
                 self.queuedManualEnrollments.removeAll()
-                self.noticeMessage = "Speaker recognition finished"
             }
         } catch {
+            let msg = pending.diarization != nil ? "Speaker recognition results could not be saved: \(error.localizedDescription)" : "Refined transcript could not be saved: \(error.localizedDescription)"
             AppLog.write("voice", "Retry updating saved meeting failed: \(error.localizedDescription)")
-            noticeMessage = "Speaker recognition results could not be saved: \(error.localizedDescription)"
+            noticeMessage = msg
         }
     }
 
@@ -1192,7 +1225,7 @@ final class AppState {
             if let markRetained {
                 await markRetained()
             }
-            AppLog.write("voice", "Session audio retained because speaker recognition did not finish; it will be purged at next launch")
+            AppLog.write("voice", "Session audio kept until speaker recognition finishes; it is deleted afterwards, or at next launch if it never finishes")
             onHardLimitExceeded?()
             return false
         }
@@ -2004,6 +2037,7 @@ final class AppState {
             diarizerRef: diarizerRef,
             geminiRef: geminiRef,
             offlineDiarizer: self.offlineDiarizer,
+            embeddingExtractor: self.embeddingExtractor,
             voiceprints: self.voiceprints,
             meetingStore: self.meetingStore,
             promoter: self.livePromoter,
@@ -2091,22 +2125,75 @@ final class AppState {
 
                         currentJob.snapshot.rows = finalRefined
 
-                        await MainActor.run { [weak self] in
-                            guard let self else { return }
-                            for (slot, name) in currentJob.snapshot.speakerNames {
-                                self.speakerNames[slot] = name
+                        var saveError: Error? = nil
+                        if let meetingURL = currentJob.snapshot.meetingURL {
+                            do {
+                                try currentJob.meetingStore.updateRows(
+                                    at: meetingURL,
+                                    rows: finalRefined,
+                                    speakerNames: currentJob.snapshot.speakerNames
+                                )
+                            } catch {
+                                saveError = error
+                                AppLog.write("app", "Failed to save refined transcript: \(error.localizedDescription)")
                             }
-                            self.rows = finalRefined
-                            self.persistCurrentSession()
-                            self.noticeMessage = "Transcript refined and saved."
+                        } else {
+                            await MainActor.run { [weak self] in
+                                guard let self else { return }
+                                do {
+                                    self.rows = finalRefined
+                                    for (slot, name) in currentJob.snapshot.speakerNames {
+                                        self.speakerNames[slot] = name
+                                    }
+                                    let url = try self.persistCurrentSessionThrowing()
+                                    currentJob.snapshot.meetingURL = url
+                                } catch {
+                                    saveError = error
+                                    AppLog.write("app", "Failed to save refined transcript: \(error.localizedDescription)")
+                                }
+                            }
                         }
 
-                        if let meetingURL = currentJob.snapshot.meetingURL {
-                            try? currentJob.meetingStore.updateRows(
-                                at: meetingURL,
-                                rows: finalRefined,
-                                speakerNames: currentJob.snapshot.speakerNames
+                        await MainActor.run { [weak self] in
+                            guard let self else { return }
+                            let sessionMatches = Self.shouldUpdateLiveState(current: self.sessionID, snapshot: currentJob.snapshot.sessionID)
+                            let decision = Self.refinedSaveDecision(
+                                error: saveError,
+                                meetingURL: currentJob.snapshot.meetingURL,
+                                sessionMatches: sessionMatches
                             )
+
+                            switch decision {
+                            case .saved(let notice):
+                                AppLog.write("app", "Refined transcript saved")
+                                if sessionMatches {
+                                    for (slot, name) in currentJob.snapshot.speakerNames {
+                                        self.speakerNames[slot] = name
+                                    }
+                                    self.rows = finalRefined
+                                    self.noticeMessage = notice
+                                } else {
+                                    AppLog.write("app", "refined transcript for previous meeting saved to its folder only")
+                                }
+                            case .pending(let notice, let payloadURL):
+                                if sessionMatches {
+                                    for (slot, name) in currentJob.snapshot.speakerNames {
+                                        self.speakerNames[slot] = name
+                                    }
+                                    self.rows = finalRefined
+                                    self.noticeMessage = notice
+                                }
+                                if let payloadURL {
+                                    self.pendingDiarizationResults[payloadURL] = PendingDiarizationResult(
+                                        sessionID: currentJob.snapshot.sessionID,
+                                        meetingURL: payloadURL,
+                                        rows: finalRefined,
+                                        names: currentJob.snapshot.speakerNames,
+                                        diarization: nil
+                                    )
+                                    self.schedulePendingDiarizationRetry(for: payloadURL)
+                                }
+                            }
                         }
                     }
 
@@ -2128,9 +2215,10 @@ final class AppState {
                             let minEnrollSecs = currentJob.thresholds.minEnrollSeconds
                             let myName = currentJob.myName
                             let voiceprintsRef = currentJob.voiceprints
+                            let extractorRef = currentJob.embeddingExtractor
                             meEnrollmentTask = Task.detached(priority: .utility) {
                                 do {
-                                    let (clipSamples, clipSecs) = try await offlineDiarizerRef.meEnrollmentClip(wavURL: meURL, maxSeconds: 60.0)
+                                    let (clipSamples, clipSecs) = try OfflineDiarizer.meEnrollmentClip(wavURL: meURL, maxSeconds: 60.0)
                                     guard Self.shouldEnrollMe(
                                         didRefine: true,
                                         alreadyEnrolled: false,
@@ -2140,7 +2228,7 @@ final class AppState {
                                         AppLog.write("voice", "Me enrollment skipped: speech duration (\(String(format: "%.1f", clipSecs))s) < minEnrollSeconds (\(minEnrollSecs)s)")
                                         return
                                     }
-                                    let emb = try await offlineDiarizerRef.embedding(samples: clipSamples)
+                                    let emb = try await extractorRef.embedding(samples: clipSamples)
                                     let sample = EnrollmentSample(embedding: emb, quality: 1.0, seconds: clipSecs)
 
                                     await MainActor.run {
@@ -2179,6 +2267,7 @@ final class AppState {
                     let voiceprintsRef = currentJob.voiceprints
                     let zoomNameRef = currentJob.zoomNameLookup
                     let fallbackNameRef = currentJob.fallbackName
+                    let meTaskRef = meEnrollmentTask
 
                     switch raceOutcome {
                     case .finished(let outcome):
@@ -2214,12 +2303,13 @@ final class AppState {
 
                         // WAV 파일 정리는 diarizationTask 및 meEnrollmentTask가 모두 완료되거나 하드 리밋(30분) 초과 시 수행
                         let snapshotRef = finalSnapshot
-                        Task.detached(priority: .utility) { [weak self] in
+                        let weakApp = WeakAppState(value: self)
+                        Task.detached(priority: .utility) {
                             await Self.runGuardedCleanup(
                                 hardLimitSeconds: hardLimit,
                                 work: {
                                     _ = try? await diarizationTask.value
-                                    _ = await meEnrollmentTask?.value
+                                    _ = await meTaskRef?.value
                                 },
                                 deleteFiles: {
                                     await recorderRef.deleteFiles()
@@ -2228,10 +2318,9 @@ final class AppState {
                                     await recorderRef.markRetainedUntilRestart()
                                 },
                                 onHardLimitExceeded: {
-                                    Task { @MainActor [weak self] in
-                                        guard let self else { return }
-                                        if Self.shouldUpdateLiveState(current: self.sessionID, snapshot: snapshotRef.sessionID) {
-                                            self.noticeMessage = "Session audio retained because speaker recognition did not finish; it will be purged at next launch"
+                                    Task { @MainActor in
+                                        if let appState = weakApp.value, Self.shouldUpdateLiveState(current: appState.sessionID, snapshot: snapshotRef.sessionID) {
+                                            appState.noticeMessage = "Session audio kept until speaker recognition finishes; it is deleted afterwards, or at next launch if it never finishes"
                                         }
                                     }
                                 }
@@ -2246,7 +2335,8 @@ final class AppState {
 
                         // Timeout 후에도 diarizationTask가 완료되면 동일한 completion path를 실행 (하드 리밋으로 보호)
                         let snapshotRef = finalSnapshot
-                        Task.detached(priority: .utility) { [weak self] in
+                        let weakApp = WeakAppState(value: self)
+                        Task.detached(priority: .utility) {
                             await Self.runGuardedCleanup(
                                 hardLimitSeconds: hardLimit,
                                 work: {
@@ -2259,8 +2349,15 @@ final class AppState {
                                     }
 
                                     if let lateResult {
-                                        await MainActor.run { [weak self] in
-                                            guard let self else {
+                                        await MainActor.run {
+                                            if let appState = weakApp.value {
+                                                appState.applyDiarizationCompletion(
+                                                    snapshot: snapshotRef,
+                                                    diarization: lateResult,
+                                                    zoomName: zoomNameRef,
+                                                    fallbackName: fallbackNameRef
+                                                )
+                                            } else {
                                                 Self.applyDiarizationToDiskOnly(
                                                     snapshot: snapshotRef,
                                                     diarization: lateResult,
@@ -2269,18 +2366,11 @@ final class AppState {
                                                     zoomName: zoomNameRef,
                                                     fallbackName: fallbackNameRef
                                                 )
-                                                return
                                             }
-                                            self.applyDiarizationCompletion(
-                                                snapshot: snapshotRef,
-                                                diarization: lateResult,
-                                                zoomName: zoomNameRef,
-                                                fallbackName: fallbackNameRef
-                                            )
                                         }
                                     }
 
-                                    _ = await meEnrollmentTask?.value
+                                    _ = await meTaskRef?.value
                                 },
                                 deleteFiles: {
                                     await recorderRef.deleteFiles()
@@ -2289,10 +2379,9 @@ final class AppState {
                                     await recorderRef.markRetainedUntilRestart()
                                 },
                                 onHardLimitExceeded: {
-                                    Task { @MainActor [weak self] in
-                                        guard let self else { return }
-                                        if Self.shouldUpdateLiveState(current: self.sessionID, snapshot: snapshotRef.sessionID) {
-                                            self.noticeMessage = "Session audio retained because speaker recognition did not finish; it will be purged at next launch"
+                                    Task { @MainActor in
+                                        if let appState = weakApp.value, Self.shouldUpdateLiveState(current: appState.sessionID, snapshot: snapshotRef.sessionID) {
+                                            appState.noticeMessage = "Session audio kept until speaker recognition finishes; it is deleted afterwards, or at next launch if it never finishes"
                                         }
                                     }
                                 }
@@ -2396,25 +2485,35 @@ final class AppState {
 
     // MARK: - 회의 저장
 
+    /// 현재 세션을 저장(또는 같은 폴더에 재저장). 실패 시 에러를 throw.
+    @discardableResult
+    func persistCurrentSessionThrowing() throws -> URL {
+        guard !rows.isEmpty, let startedAt = sessionStartedAt else {
+            throw MeetingStoreError.emptyRows
+        }
+        let duration = rows.map(\.endSeconds).max() ?? 0
+        let savedURL = try meetingStore.save(
+            rows: rows,
+            myName: myName,
+            speakerNames: speakerNames,
+            startedAt: startedAt,
+            durationSeconds: duration,
+            title: meetingTitle,
+            summary: currentSummary,
+            attendees: meetingAttendees.isEmpty ? nil : meetingAttendees,
+            existingURL: currentMeetingURL
+        )
+        currentMeetingURL = savedURL
+        if let currentMeetingURL {
+            briefing.copyBriefIfAvailable(toMeetingFolder: currentMeetingURL)
+        }
+        return savedURL
+    }
+
     /// 현재 세션을 저장(또는 같은 폴더에 재저장). 저장 후에도 이름 변경·늦은 번역이 오면 갱신됨.
     private func persistCurrentSession() {
-        guard !rows.isEmpty, let startedAt = sessionStartedAt else { return }
-        let duration = rows.map(\.endSeconds).max() ?? 0
         do {
-            currentMeetingURL = try meetingStore.save(
-                rows: rows,
-                myName: myName,
-                speakerNames: speakerNames,
-                startedAt: startedAt,
-                durationSeconds: duration,
-                title: meetingTitle,
-                summary: currentSummary,
-                attendees: meetingAttendees.isEmpty ? nil : meetingAttendees,
-                existingURL: currentMeetingURL
-            )
-            if let currentMeetingURL {
-                briefing.copyBriefIfAvailable(toMeetingFolder: currentMeetingURL)
-            }
+            try persistCurrentSessionThrowing()
         } catch {
             AppLog.write("app", "Failed to save meeting: \(error.localizedDescription)")
             noticeMessage = "Failed to save meeting: \(error.localizedDescription)"
