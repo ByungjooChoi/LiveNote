@@ -4,7 +4,7 @@ import Observation
 
 /// 종료를 감지할 회의 앱 번들 ID.
 /// (Sendable 클로저에서 참조하므로 MainActor 격리 밖의 파일 스코프 상수로 둠)
-private let meetingAppBundleIDs: Set<String> = [
+let meetingAppBundleIDs: Set<String> = [
     "us.zoom.xos",              // Zoom
     "com.microsoft.teams2",     // Teams (신버전)
     "com.microsoft.teams",      // Teams (구버전)
@@ -200,6 +200,9 @@ final class AppState {
     let tasks = TasksController()
     /// 사전 브리핑 관리자 (Phase 2 Briefing)
     let briefing: BriefingController
+    /// 녹음 누락 방지 리마인더 (Phase 4 Recording Reminder)
+    let recordingReminder: RecordingReminder
+    @ObservationIgnored private var reminderTerminateObserver: NSObjectProtocol?
     var isRecipeRunning = false
     var lastRecipeError: String?
 
@@ -690,6 +693,14 @@ final class AppState {
             language: { LanguagePrefs.summaryLanguage }
         )
 
+        let reminderProbe = SystemRecordingReminderProbe()
+        let reminderNotifier = RecordingReminderNotifier()
+        let reminder = RecordingReminder(
+            probe: reminderProbe,
+            notifier: reminderNotifier
+        )
+        self.recordingReminder = reminder
+
         let promoterRef = promoter
         Task {
             await promoterRef.setOnEmbedding { [weak self] slot, emb, secs, gen in
@@ -879,6 +890,33 @@ final class AppState {
             self?.calendar.todayUpcoming ?? []
         })
         briefing.calendarItemsUpdated(calendar.todayUpcoming)
+
+        reminderProbe.isActive = { [weak self] in
+            self?.isActive ?? true
+        }
+        reminderNotifier.onStart = { [weak self] in
+            guard let self, !self.isActive else { return }
+            self.start()
+            NSApp.activate(ignoringOtherApps: true)
+        }
+
+        // 항상 켜져 있는 회의 앱 종료 감지 옵저버: 앱이 종료되면 리마인더 상태를 리셋하여 다음 회의에 다시 알림 가능하게 함.
+        // AppState는 앱 프로세스 수명 동안 유지되므로 별도의 deinit 제거는 필요하지 않음.
+        reminderTerminateObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didTerminateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  let bundleID = app.bundleIdentifier,
+                  meetingAppBundleIDs.contains(bundleID) else { return }
+            Task { @MainActor [weak self] in
+                self?.recordingReminder.meetingAppTerminated()
+            }
+        }
+        if recordingReminder.isEnabled {
+            recordingReminder.start()
+        }
     }
 
     // MARK: - 화자 이름
@@ -1243,25 +1281,29 @@ final class AppState {
         latestNames: [Int: String]
     ) -> (rows: [TranscriptRow], names: [Int: String]) {
         var manualRowOverridesByID: [UUID: TranscriptRow] = [:]
+        var latestByID: [UUID: TranscriptRow] = [:]
         var manualSlots: Set<Int> = []
         var manualClusters: Set<String> = []
         var manualSlotNames: [Int: String] = [:]
         var manualClusterNames: [String: String] = [:]
         var manualRows: [TranscriptRow] = []
 
-        for row in latest where row.nameSource == .manual {
-            manualRowOverridesByID[row.id] = row
-            manualRows.append(row)
-            if let slot = row.speakerSlot {
-                manualSlots.insert(slot)
-                if let name = row.speakerName {
-                    manualSlotNames[slot] = name
+        for row in latest {
+            latestByID[row.id] = row
+            if row.nameSource == .manual {
+                manualRowOverridesByID[row.id] = row
+                manualRows.append(row)
+                if let slot = row.speakerSlot {
+                    manualSlots.insert(slot)
+                    if let name = row.speakerName {
+                        manualSlotNames[slot] = name
+                    }
                 }
-            }
-            if let cluster = row.clusterID {
-                manualClusters.insert(cluster)
-                if let name = row.speakerName {
-                    manualClusterNames[cluster] = name
+                if let cluster = row.clusterID {
+                    manualClusters.insert(cluster)
+                    if let name = row.speakerName {
+                        manualClusterNames[cluster] = name
+                    }
                 }
             }
         }
@@ -1292,6 +1334,9 @@ final class AppState {
 
         var resultRows: [TranscriptRow] = []
         for var row in refined {
+            if let latestRow = latestByID[row.id], latestRow.english != row.english {
+                row.english = latestRow.english
+            }
             if let manualRow = manualRowOverridesByID[row.id] {
                 row.speakerName = manualRow.speakerName
                 row.nameSource = manualRow.nameSource
@@ -2537,6 +2582,10 @@ final class AppState {
 
     // MARK: - 회의 앱 실행 감지 (자동 시작)
 
+    func setRecordingReminder(_ enabled: Bool) {
+        recordingReminder.setEnabled(enabled)
+    }
+
     func setAutoStart(_ enabled: Bool) {
         autoStartOnMeetingApp = enabled
         UserDefaults.standard.set(enabled, forKey: "autoStartOnMeetingApp")
@@ -2652,21 +2701,28 @@ final class AppState {
                     // 이미 다른 세션이 시작됐다: 현재 화면 상태(meetingTitle/currentMeetingURL/
                     // currentSummary)는 건드리지 않고 대상 회의 폴더에만 요약과 자동 제목을 반영한다.
                     if let targetURL {
-                        self.meetingStore.updateSummary(at: targetURL, summary: output.summary)
-                        self.tasks.record(
-                            summaryOutput: output,
-                            meetingURL: targetURL,
-                            meetingTitle: self.meetingStore.load(targetURL)?.title ?? capturedTitle,
-                            meetingDate: targetStartedAt,
-                            attendees: capturedAttendees,
-                            speakerNames: capturedSpeakerNames,
-                            myName: capturedMyName
-                        )
-                        AppLog.write("summary", "세션 교체됨: 이전 회의 폴더에만 요약 반영")
-                        if targetNeedsAutoTitle,
-                           let title = MeetingStore.titleFromSummary(output.summary),
-                           self.meetingStore.rename(at: targetURL, title: title) != nil {
-                            AppLog.write("app", "세션 교체됨: 이전 회의에 자동 제목 반영 \(title.count)자")
+                        do {
+                            if let warning = try self.meetingStore.updateSummary(at: targetURL, summary: output.summary) {
+                                self.noticeMessage = warning
+                            }
+                            self.tasks.record(
+                                summaryOutput: output,
+                                meetingURL: targetURL,
+                                meetingTitle: self.meetingStore.load(targetURL)?.title ?? capturedTitle,
+                                meetingDate: targetStartedAt,
+                                attendees: capturedAttendees,
+                                speakerNames: capturedSpeakerNames,
+                                myName: capturedMyName
+                            )
+                            AppLog.write("summary", "세션 교체됨: 이전 회의 폴더에만 요약 반영")
+                            if targetNeedsAutoTitle,
+                               let title = MeetingStore.titleFromSummary(output.summary),
+                               self.meetingStore.rename(at: targetURL, title: title) != nil {
+                                AppLog.write("app", "세션 교체됨: 이전 회의에 자동 제목 반영 \(title.count)자")
+                            }
+                        } catch {
+                            self.noticeMessage = "Minutes for the previous meeting could not be saved: \(error.localizedDescription)"
+                            AppLog.write("summary", "세션 교체됨: 이전 회의 요약 저장 실패: \(error.localizedDescription)")
                         }
                     }
                     return
@@ -2749,7 +2805,15 @@ final class AppState {
             guard let self else { return }
             do {
                 let output = try await self.runSummary(transcript: transcript, meetingDate: meeting.startedAt)
-                self.meetingStore.updateSummary(at: url, summary: output.summary)
+                do {
+                    if let warning = try self.meetingStore.updateSummary(at: url, summary: output.summary) {
+                        self.noticeMessage = warning
+                    }
+                } catch {
+                    AppLog.write("summary", "요약 저장 실패 \(url.lastPathComponent): \(error.localizedDescription)")
+                    self.summaryPhase = .failed("Minutes were generated but could not be saved: \(error.localizedDescription)")
+                    return
+                }
                 self.tasks.record(
                     summaryOutput: output,
                     meetingURL: url,

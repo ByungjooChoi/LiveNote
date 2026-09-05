@@ -16,7 +16,7 @@ struct TranscriptRow: Identifiable, Sendable, Codable {
     var speakerSlot: Int?
     /// Zoom 태그 등에서 자동 인식된 화자 이름 (있으면 슬롯보다 우선, 편집 불가)
     var speakerName: String?
-    let english: String
+    var english: String
     var korean: String?          // 번역 도착 전 nil
     let startSeconds: Double     // 세션 시작 기준 초
     let endSeconds: Double

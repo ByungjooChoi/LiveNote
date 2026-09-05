@@ -174,19 +174,23 @@ Phase 0 (기반·G 일부) ─┬─> Phase 1 (Recipes)
 
 ## Phase 4: 전사 편집·용어 학습 + People 뷰 + 리마인더 + 내보내기 (v1.8.0)
 
-### 4.1 전사 편집·찾아바꾸기 (F)
+**4.1 및 4.3 완료 (2026-09-05, codex 승인 라운드 5, 테스트 442개). 4.2 People 뷰와 4.4 내보내기는 2차 실행에서 v1.8.0으로 묶어 완료 예정.**
+
+### 4.1 전사 편집·찾아바꾸기 (F) (완료)
 - `MeetingDetailView` 전사 행 더블클릭 인라인 TextField(이미 `editingRowID` 상태 존재, 화자 편집용이던 것을 텍스트 편집으로 확장). 저장 시 `MeetingStore.updateRow(at:url, rowID:, english:)` → session.json + md 재생성 + `edits.json` append.
 - `Views/FindReplaceBar.swift`: ⌘F로 토글, 검색어/치환어, 대소문자·단어 단위, 일치 수, [Replace all], "Also apply to summary" 체크. `MeetingStore.replaceAll(...)` 구현.
 - 용어 학습 토스트: 치환 대상이 대문자 시작 또는 전부 대문자(약어)면 "Add 'X' to internal jargon?" → `setInternalJargon` append.
 - "Edited N" 배지 + Undo 메뉴(edits.json 역순 적용).
 - 재요약 제안 배너(편집 5건 이상).
 - 디코더 반영(word boost)은 라이브 경로 교체 작업으로 이관(이 Phase 범위 밖).
+- 실제 구현 및 설계 구체화: `edits.json`은 원자적 배치 로그(inline/replaceAll 배치, before/after 및 요약 변경 기록)로 관리, 되돌리기(Undo)는 LIFO 단일 배치 단위로 디스크 텍스트 일치 충돌 검증 후 복원, 트랜잭션 스테이징 및 고정 순서(`session.json` 최우선 -> `edits.json` -> md 파일들) 커밋, 요약 전용 찾아바꾸기도 1건의 편집으로 가산, 비단어 문자(예: C++)로 시작/끝나는 용어의 `\b` 폴백 처리.
 
 ### 4.2 People / Accounts 뷰 (G.7)
 - HomeView 상단 세그먼트 "Meetings | People". `Views/PeopleView.swift`: attendees(P0) + speakerNames 집계 → 사람 카드(회의 수, 마지막, 열린 태스크 수). 클릭 → 그 사람 회의 타임라인(기존 meetingCard 재사용). 이메일 도메인으로 회사 그룹핑(선택).
 
-### 4.3 녹음 리마인더 (G.5)
+### 4.3 녹음 리마인더 (G.5) (완료)
 - 신규 `Engine/RecordingReminder.swift`: 60초 주기. 조건 = 회의 앱 실행 중 + 기본 입력 장치 `kAudioDevicePropertyDeviceIsRunningSomewhere` true + `!app.isActive`. 세션당 1회 `NSUserNotification`(UNUserNotificationCenter) "Meeting in progress? [Start LiveNote]". Settings > Meetings 토글.
+- 실제 구현 및 설계 구체화: Condition C(회의 앱 실행 중 + 기본 입력 오디오 장치 사용 중 + LiveNote 유휴 상태)를 60초 주기로 평가, 2회 연속 충족 시 회의당 1회 `UNUserNotificationCenter` 알림 발송, 단일 비행(single-flight) 지연 권한 요청, 세대(generation) 가드 기반 오래된 비동기 배송 무효화, Settings > Meetings 토글 및 권한/에러 상태 메시지, `reminder.log` 로깅.
 
 ### 4.4 내보내기 (G.6)
 - MeetingDetailView 툴바: "Copy summary"(md → NSPasteboard), "Export…"(NSSavePanel, md/HTML; HTML은 SummaryRenderView 규칙을 간단 변환). 레시피 결과 대화에도 동일 버튼.
@@ -208,7 +212,7 @@ Phase 0 (기반·G 일부) ─┬─> Phase 1 (Recipes)
 | 1 | v1.5.0 | Recipes(내장 5 + Weekly Update 규칙) | 1.5일 | 금요일 주간보고 초안 |
 | 2 | v1.6.0 | Tasks 추출·화면, 사전 브리핑 (완료 2026-09-05) | 3일 | Craig 1:1 브리핑 |
 | 3 | v1.7.0 | Speaker Memory(오프라인 등록·매칭, 라이브 승격) (완료 2026-09-05) | 4일 | Teams/발표자 보기 자동 명명 |
-| 4 | v1.8.0 | 전사 편집·용어 학습, People 뷰, 리마인더, 내보내기 | 2.5일 | 오인식 정정 루프 |
+| 4 | v1.8.0 | 전사 편집·용어 학습, People 뷰, 리마인더, 내보내기 (4.1·4.3 완료 2026-09-05, 4.2·4.4 진행 예정) | 2.5일 | 오인식 정정 루프 |
 
 총 13일 규모. Phase 1은 Phase 0 직후 가장 먼저 체감되는 항목이므로, Phase 0에서 ContextBuilder만 먼저 끝내면 Phase 1을 병행 착수할 수 있다.
 
@@ -249,3 +253,21 @@ Phase 3 (Speaker Memory, v1.7.0) 구현 및 안정화 완료.
 - 에코 케이스 검증: them 채널 구간이 내 성문(isMe)과 매칭되어 오분류되지 않는지 확인
 - Teams 통화에서 30초 발화 후 라이브 승격(Live promotion)이 정상 동작하는지 확인
 - 3개의 FluidOfflineEngine 인스턴스(오프라인 다이어라이저, 라이브 임베딩 추출기, Me 등록 임시 추출기)의 메모리 점유 및 초기화 비용 확인
+
+## Phase 4a 후속 항목 (codex follow-ups, 비차단)
+- (r1) 최초 리마인더 알림까지 약 120초 소요 (60초 첫 틱 + 2회 연속 히트): 시작 시 즉시 첫 프로브 실행 검토.
+- (r1) 요약 생성 전에 수행된 편집을 되돌릴 경우 editCount가 editsAtLastSummary 아래로 감소하여, 이후 수정된 요약에 대해 배너가 트리거되지 않을 수 있음.
+- (r1, disputed) 1글자 교체어는 전문용어로 제안하지 않음 (리드 결정: 교정 풀 노이즈 방지).
+
+### Phase 4a 수동 QA 항목
+- ⌘F 전사 숨김 상태 토글: 전사 표시가 꺼진 상태에서 ⌘F 또는 "Find & Replace" 클릭 시 "Show transcript"가 자동으로 켜지며 FindReplaceBar가 열리는지 확인
+- 화자 팝오버 열림 중 더블클릭 편집: 화자 이름 변경 팝오버(`SpeakerNamePopover`)가 열린 상태에서 인라인 편집 상호작용이 독립적으로 안전하게 동작하는지 확인
+- 요약 재생성 후 되돌리기: 요약을 변경한 배치를 Undo할 때 전사 행과 요약 마크다운이 함께 복원되거나, 요약이 이미 재생성된 경우 충돌 오류가 정상 표시되는지 확인
+- 전문용어 토스트 12초 타이머: 제안 토스트가 12초 후 자동 닫히거나 다른 화면 이동 시 취소되는지 확인
+- 유휴 회의 리마인더 알림: LiveNote가 멈춘 상태에서 Zoom 마이크 활성화 시 약 60~120초 후 시스템 배너 알림("Meeting in progress? Zoom is using the microphone but LiveNote is not recording.")이 1회 발송되는지 확인
+- "Start LiveNote" 액션: 알림의 "Start LiveNote" 버튼 또는 배너 클릭 시 LiveNote 창이 활성화되고 녹음 세션이 즉시 시작되는지 확인
+- 알림 억제 및 리셋: Zoom 회의가 지속되는 동안 중복 알림이 발생하지 않으며, Zoom 종료 후 재참가 시 2틱 후 다시 알림이 오는지 확인
+- 설정 토글 동작: Settings > Meetings에서 녹음 리마인더 토글을 끄면 타이머가 중지되고 알림이 발생하지 않는지 확인
+- 동일 회의 중 토글 껐다 켜기: Zoom 회의 중 알림이 이미 발송된 후 설정을 껐다 켜도 동일 회의 내에서 중복 알림이 발생하지 않는지 확인
+- 알림 권한 거부: 시스템 설정에서 알림 권한을 끈 경우 토글 아래에 "Notifications are off for LiveNote in System Settings > Notifications." 상태 메시지가 노출되는지 확인
+- 세션 교체 요약 저장 실패 에러 처리: 백그라운드 요약 생성 중 세션 교체로 읽기 전용 폴더에 저장 실패 시 "Minutes for the previous meeting could not be saved: <error>" 배너가 노출되는지 확인

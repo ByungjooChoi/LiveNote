@@ -812,9 +812,10 @@ final class SpeakerMemoryTests: XCTestCase {
             return
         }
 
-        // Rows and speakerNames rewritten
+        // Rows and speakerNames rewritten. Phase 4a (AC11): for a row id that already exists on disk,
+        // updateRows keeps the on-disk english (user edits win); speaker and cluster fields come from the caller.
         XCTAssertEqual(loaded.rows.count, 1)
-        XCTAssertEqual(loaded.rows[0].english, "Refined text")
+        XCTAssertEqual(loaded.rows[0].english, "Initial text")
         XCTAssertEqual(loaded.rows[0].korean, "정제된 텍스트")
         XCTAssertEqual(loaded.rows[0].speakerName, "Alice")
         XCTAssertEqual(loaded.rows[0].nameSource, .voice)
@@ -1698,6 +1699,51 @@ final class SpeakerMemoryTests: XCTestCase {
         XCTAssertFalse(unwrapRetry.rows.isEmpty)
         XCTAssertEqual(unwrapRetry.rows[0].speakerName, "ManualBob", "Manual edit must survive in retry merged rows")
         XCTAssertEqual(unwrapRetry.rows[0].nameSource, NameSource.manual)
+    }
+
+    func testDiarizationMergePreservesEditedEnglishText() {
+        let rowID = UUID()
+        let diskRow = TranscriptRow(
+            id: rowID,
+            channel: .them,
+            speakerSlot: 0,
+            speakerName: nil,
+            english: "Edited English text on disk",
+            korean: nil,
+            startSeconds: 0,
+            endSeconds: 4,
+            nameSource: .slot,
+            candidateNames: nil,
+            clusterID: nil
+        )
+
+        let computedRow = TranscriptRow(
+            id: rowID,
+            channel: .them,
+            speakerSlot: 0,
+            speakerName: "Alice",
+            english: "Original unedited transcript",
+            korean: nil,
+            startSeconds: 0,
+            endSeconds: 4,
+            nameSource: .voice,
+            candidateNames: nil,
+            clusterID: "cluster_1"
+        )
+
+        let (mergedRows, mergedNames) = AppState.mergePreservingManual(
+            latest: [diskRow],
+            latestNames: [:],
+            computed: [computedRow],
+            computedNames: [0: "Alice"]
+        )
+
+        XCTAssertEqual(mergedRows.count, 1)
+        XCTAssertEqual(mergedRows[0].english, "Edited English text on disk", "User edited text on disk must be preserved")
+        XCTAssertEqual(mergedRows[0].speakerName, "Alice", "Computed speaker name should be applied")
+        XCTAssertEqual(mergedRows[0].clusterID, "cluster_1", "Computed clusterID should be applied")
+        XCTAssertEqual(mergedRows[0].nameSource, .voice, "Computed name source should be applied")
+        XCTAssertEqual(mergedNames[0], "Alice")
     }
 }
 

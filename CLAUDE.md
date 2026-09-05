@@ -27,7 +27,7 @@ macOS 네이티브 회의 노트테이커 (SwiftUI, Apple Silicon). 봇 없이 �
 
 ## 데이터·로그
 - 회의: `~/Documents/LiveNote/<yyyy-MM-dd HHmm 제목>/` (session.json, en.md, ko.md, combined.md, summary.md). 오디오는 저장하지 않는다(2-pass 후 임시 WAV 삭제).
-- 채팅: `~/Documents/LiveNote/chats/*.json`. 레시피: `~/Documents/LiveNote/recipes/*.json`, 산출물 `~/Documents/LiveNote/recipes-output/`. 태스크: 회의 폴더 `tasks.json`(추출 원본) + `~/Documents/LiveNote/tasks/index.json`(상태 포함 권위 데이터). 브리핑: `~/Documents/LiveNote/briefs/<eventKey>.md`, 회의 저장 시 폴더에 `brief.md` 복사. 성문: `~/Documents/LiveNote/voiceprints.json` (오디오는 저장하지 않음; 손상 시 .corrupt-<ts>로 이동). 로그: `~/Documents/LiveNote/logs/{app,cloud,chat,summary,zoomtag,recipe,tasks,brief,voice}.log` (내용은 기록하지 않음, 상태·크기·오류만).
+- 채팅: `~/Documents/LiveNote/chats/*.json`. 레시피: `~/Documents/LiveNote/recipes/*.json`, 산출물 `~/Documents/LiveNote/recipes-output/`. 태스크: 회의 폴더 `tasks.json`(추출 원본) + `~/Documents/LiveNote/tasks/index.json`(상태 포함 권위 데이터). 브리핑: `~/Documents/LiveNote/briefs/<eventKey>.md`, 회의 저장 시 폴더에 `brief.md` 복사. 성문: `~/Documents/LiveNote/voiceprints.json` (오디오는 저장하지 않음; 손상 시 .corrupt-<ts>로 이동). 로그: `~/Documents/LiveNote/logs/{app,cloud,chat,summary,zoomtag,recipe,tasks,brief,voice,reminder}.log` (내용은 기록하지 않음, 상태·크기·오류만).
 - Gemini API 키: 키체인 `com.byungjoo.livenote2.gemini`.
 - `~/Documents/LiveNote-v1-archive`는 폐기된 v1 파이썬 프로젝트. 건드리지 말 것.
 

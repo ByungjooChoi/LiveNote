@@ -455,6 +455,83 @@ Weekly Update의 system 프롬프트는 SA(Solutions Architect) 주간보고 규
 - 성문 임베딩 분리 3개 인스턴스 규칙: 다이어라이제이션과 임베딩 추출은 동기 엔진 호출 동안 액터를 점유하므로 3개 인스턴스로 분리 사용. 세션 다이어라이저(`AppState.offlineDiarizer`), 라이브 승격(`AppState.liveEmbeddingExtractor`), 그리고 me 등록 태스크 내부에서 생성 및 해제되는 임시 인스턴스(`OfflineDiarizer(engine: currentJob.makeEmbeddingEngine())`)로 분리되어 서로 대기하지 않음 (하드 리밋 초과 시 알림 문구: "Session audio kept until speaker recognition finishes; it is deleted afterwards, or at next launch if it never finishes").
 - 본인 성문 멱등 등록(`enrollMeIfAbsent`): 저장소 변경 시점에 isMe 프로필 부재 여부를 원자적으로 재확인하므로 overlapping 2-pass 완료 시에도 중복 Me 프로필이 생성되지 않음.
 
+### 5.17 전사 편집, 찾아바꾸기, 사내 전문용어 학습 (v1.8.0, Phase 4a)
+
+**1. 파일 배치 및 `edits.json` 스키마**:
+- 회의 폴더 내 `edits.json`에 원자적 편집 배치(Batch) 이력을 보관.
+- 스키마:
+  - `version: Int` (기본값 1)
+  - `editsAtLastSummary: Int` (요약이 마지막으로 생성/재생성되었을 때의 총 rowEdits 개수)
+  - `batches: [TranscriptEditBatch]`
+    - `id: UUID`, `at: Date`, `kind: TranscriptEditKind (inline / replaceAll)`
+    - `find: String?`, `replacement: String?`, `caseSensitive: Bool?`, `wholeWord: Bool?`
+    - `rowEdits: [RowEdit]` (`rowID: UUID`, `before: String`, `after: String`, 요약 전용 배치일 때만 빈 배열 가능)
+    - `summaryBefore: String?`, `summaryAfter: String?`
+- `editCount`: `batches.reduce(0) { $0 + $1.rowEdits.count + ($1.summaryAfter != nil ? 1 : 0) }` (요약 변경도 1건의 편집으로 가산).
+- 손상 파일 트랜잭션 복구: JSON 디코딩 실패, 0바이트 빈 파일(empty file) 또는 version > 1 감지 시 쓰기 트랜잭션의 스테이징 성공 후 커밋 직전에 `edits.json.corrupt-<unix ts>-<UUID prefix 8>`로 백업 이동하고 빈 로그로 커밋하며 결과 경고("Edit history was unreadable and has been reset") 반환. 읽기 실패(권한 오류 등)는 `.writeFailed("read edits.json: ...")`로 전파. 빈 로그 상태에서 undo 호출 시에도 손상 파일 백업 커밋을 수행하고 경고와 함께 `changedRowCount: 0` 반환.
+
+**2. 원자적 스테이징 및 커밋 계약 (Ordering Contract)**:
+1. 디스크에서 최신 `session.json`을 직접 읽어 행을 조회(호출자의 메모리 복사본 신뢰 금지). 대상 `rowID` 누락 시 `MeetingStoreError.rowNotFound(UUID)`, 누락/파싱 실패 시 `.meetingNotFound` 발생(쓰기 중단).
+   - 행 ID 유일성 검증 (`validateUniqueIDs`): `save`(신규 및 기존 덮어쓰기) 인입 행, `updateRows` 인입 행, 그리고 `updateRow`, `replaceAll`, `undoLastEdit`, `updateSummary`, `markSummaryRegenerated`의 디스크 로드 행 전체에서 중복 `rowID` 감지 시 스테이징 전 즉시 `MeetingStoreError.duplicateRowID(UUID)` 발생 ("Meeting data has a duplicate row id: <uuid>.").
+   - `updateRows(at:rows:speakerNames:)`는 `rows.isEmpty`일 때 `.emptyRows`를 발생시켜 빈 전사 덮어쓰기를 방지하고, `preservingDiskEnglish` 병합을 적용하여 다이어라이제이션 결과가 최신 디스크 편집 텍스트를 덮어쓰지 않도록 보장.
+   - `save(rows:..., existingURL:)` 디스크 우선 소유권 규칙 (Ownership rule): `existingURL` 분기에서 `load(existingURL)` 실패 시 `.meetingNotFound` 발생. 성공 시 비영어 상태는 디스크 데이터를 우선 보존 (`summary = existingMeeting.summary ?? summary`, `title = existingMeeting.title ?? title`, `attendees = existingMeeting.attendees ?? attendees`). `speakerNames` 및 행 화자 필드는 호출자 소유(2-pass/다이어라이제이션 파이프라인 소유)를 유지하며, 디스크의 최신 `english` 텍스트를 보존 (`preservingDiskEnglish`).
+2. 메모리 상에서 변경된 `SavedMeeting` 및 `TranscriptEditLog` 계산.
+3. 잔여 스테이징 폴더 정리 후 스테이징: 디렉터리 열거 실패 시 app.log에 "staging sweep failed"를 기록하고 커밋은 계속 진행. `<meetingFolder>/.staging-<UUID>/` 생성 후 모든 출력 파일(`session.json`, `edits.json`, `en.md`, `combined.md`, `ko.md`(번역 행 존재 시), `summary.md`(요약 존재 시))을 스테이징 폴더에 기록. 실패 시 스테이징 폴더 정리 후 `.writeFailed("stage <file>: <reason>")` 던짐.
+4. 커밋: 스테이징된 파일들을 고정 순서로 `FileManager.replaceItemAt` (대상 미존재 시 `moveItem`) 이동.
+   고정 순서: `session.json` 최우선 -> `edits.json` -> `en.md` -> `ko.md` -> `combined.md` -> `summary.md`.
+   이후 잔재 파일 정리: 한국어 번역 행이 없으면 stale `ko.md` 삭제, 요약이 nil이면 stale `summary.md` 삭제. 삭제 실패 시 `.writeFailed("remove <file>: <reason>")` 발생.
+   커밋 실패 시 `.writeFailed("commit <file>: <reason>")` 발생. `defer`에서 스테이징 폴더 정리(실패 시 app.log 기록).
+5. 커밋 성공 후에만 인메모리 상태 갱신(`refresh()`) 및 결과 반환.
+- 원자성 근거: `session.json`이 SSOT이며 `edits.json`은 감사/되돌리기 로그이고 md 파일은 파생 산출물이다. `session.json`을 `edits.json`보다 먼저 쓰는 순서는 중간 비정상 종료 시 편집은 유지되고 되돌리기만 불가한 상태로 데이터를 보존한다.
+
+**3. 되돌리기 (Undo) 및 충돌 검증**:
+- 스택의 마지막 배치만 되돌리기 가능 (LIFO).
+- 되돌리기 전 각 `rowEdit`에 대해 디스크 상의 행 텍스트가 `after`와 일치하는지 검증. 불일치 시 `MeetingStoreError.undoConflict(UUID)` 발생("This row was changed after that edit; undo is not possible"). 요약도 `summaryAfter`와 일치하는지 검증하고 불일치 시 `MeetingStoreError.undoSummaryConflict` 발생("The minutes changed after that edit; undo is not possible.").
+- 검증 통과 시 `before` 텍스트로 복원 후 마지막 배치를 제거하고 원자적 스테이징 커밋 실행.
+- 요약 전용 배치의 되돌리기 메뉴 라벨은 `Undo last edit (Replace all, summary only)`로 표시.
+
+**4. 찾아바꾸기 단어 경계(`\b`) 폴백 및 동일 교체 방어**:
+- 단어 단위 일치(`wholeWord`) 시 검색어가 단어 문자(문자, 숫자, 밑줄)로 시작하고 끝나는 경우에만 `\b` 패턴을 적용.
+- "C++", "#tag"와 같이 비단어 문자로 시작하거나 끝나는 용어는 정규식 `\b`가 오동작하므로 일반 부분문자열 일치로 안전하게 폴백.
+- `replaceAll`은 `replaced != original`인 경우에만 `RowEdit` 및 summaryBefore/After를 기록. 일치 항목이 발견되었으나 실제 텍스트가 동일하여 변경된 행 및 요약이 없는 경우(예: `foo -> foo` 또는 이미 `Foo`인 텍스트에 대소문자 무시 `Foo -> Foo`), 파일 쓰기 없이 `MeetingStoreError.noChanges` ("The replacement text is identical to the matched text.")를 발생시키며 `editCount`를 변경하지 않음.
+
+**5. 사내 전문용어(Jargon) 제안 규칙**:
+- 찾아바꾸기 교체어가 2글자 이상의 단일 토큰(공백 없음)이며, 대문자로 시작하거나 전체가 대문자/숫자이면서 최소 1개 이상의 문자를 포함(`trimmed.contains(where: \.isLetter)`)하고 기존 `internalJargon`에 없는 경우 `JargonToast`를 통해 등록 제안 ("2026" 등 순수 숫자는 제외).
+- 12초 후 자동 닫힘 및 "Add" 클릭 시 쉼표+공백으로 기존 목록에 추가.
+
+**6. 요약 재생성 알림 (Re-summarize Banner)**:
+- 요약이 이미 생성된 회의에서 요약 시점 이후 누적 전사 수정(`pendingEditsSinceSummary`)이 5건 이상인 경우 상단 배너로 요약 재생성 안내.
+- 요약 저장 API `MeetingStore.updateSummary(at:summary:) throws -> String?` 및 `markSummaryRegenerated(at:) throws -> String?`가 단일 트랜잭션으로 요약 갱신 및 `editsAtLastSummary` 동기화를 원자적으로 수행하고, 손상 로그 복구 시 경고 문구(미발생 시 nil)를 반환.
+
+### 5.18 녹음 리마인더 (RecordingReminder + RecordingReminderNotifier, 2026-09-05 추가, v1.8.0)
+
+회의 중 LiveNote 기록이 누락되는 상황을 방지하기 위한 시스템 알림 기능.
+
+**1. 감지 조건 (Condition C)**:
+- 회의 앱 실행 중 (`meetingAppName != nil`, 대상: Zoom, Teams 1/2, Webex).
+- 기본 입력 오디오 장치 사용 중 (CoreAudio `kAudioDevicePropertyDeviceIsRunningSomewhere` on `kAudioHardwarePropertyDefaultInputDevice` == true).
+- LiveNote 유휴 상태 (`!app.isActive`, 즉 listening/preparing 중이 아니며 카운트다운 대기 중도 아님).
+
+**2. 2-tick 룰 및 회의별 1회 발송**:
+- 60초 폴링 주기 (`tickInterval = 60s`).
+- Condition C가 2회 연속 충족(약 1~2분 지속)될 때 1회 알림 발송 (`notify(appName)`).
+- 알림이 한 번 발송되면 회의 앱이 계속 실행 중인 동안에는 추가 알림을 억제 (`suppressed`).
+- 회의 도중 설정을 껐다 켜도(`setEnabled(false)` -> `setEnabled(true)`) 연속 충족 카운트만 초기화되고 발송 여부(`notified`)는 보존되어 동일 회의 중복 발송을 방지함.
+- 회의 앱 종료 감지 (`appName == nil` 또는 `NSWorkspace.didTerminateApplicationNotification`) 시 리셋(`policy.reset()`)되어 다음 회의에서 다시 알림 가능. 이때 대기 중인 비동기 권한 요청 배송도 무효화(`generation += 1`, `pendingDelivery = nil`)하여 종료된 회의 알림 누출을 방지.
+- LiveNote 세션이 시작되면 Condition C가 false가 되어 idle로 돌아가지만, 이미 발송된 회의에서는 알림 억제 상태를 유지.
+- 알림 발송 전 취소 시 재장전(Rearm): `notifier.deliver` 호출 전 세션 무효화(`stale generation`), 직전 재검증 실패(`condition no longer holds`), 권한 대기 중 조건 해제(`condition dropped while awaiting authorization`) 등 사전 취소 시 `policy.rearm()`을 수행하여 같은 회의에서 조건 재충족 시 2-tick 후 다시 알림 가능. 반면 `notifier.deliver` 호출 후 시스템 알림 배송 실패(post-submit failure)는 회의당 1회 시도 원칙에 따라 재장전하지 않음.
+
+**3. 알림 발송 및 권한 처리 (`Engine/RecordingReminderNotifier.swift`)**:
+- UNUserNotificationCenter 카테고리 `livenote.recording-reminder` 등록.
+- 알림 제목 "Meeting in progress?", 본문 "<App name> is using the microphone but LiveNote is not recording.".
+- 액션: "Start LiveNote" (`.foreground`) 또는 배너 기본 탭 -> LiveNote 창 활성화 및 `app.start()`.
+- 권한 게이트 및 지연 요청: 앱 시작 시 즉시 묻지 않고 Condition C가 최초 참이 된 tick에 지연 요청 (`requestAuthorizationIfNeeded`). 모든 알림 발송은 현재 권한 상태에 의해 게이트되며(every delivery is gated on the current authorization status), 시스템 권한 프롬프트는 최초 1회만 표시됨(the system prompt appears at most once). 권한 거부 시 `statusMessage`에 "Notifications are off for LiveNote in System Settings > Notifications."를 설정하고 로그 1회 기록.
+- 배송 실패 시 에러 문구를 `statusMessage`에 반영.
+
+**4. 설정 및 로깅**:
+- UserDefaults 키: `recordingReminderEnabled` (기본값 true).
+- 로그 카테고리: `reminder` (`~/Documents/LiveNote/logs/reminder.log`). 매 tick이 아닌 상태 전이 시에만 기록 ("armed", "notify intent <app>", "delivered <app>", "reset", "authorization denied", "notify failed: <error>", "notify intent cancelled: condition no longer holds", "notify intent cancelled: condition dropped while awaiting authorization", "notify intent cancelled: stale generation", "stale delivery dropped").
+
 ---
 
 ## 6. 파일별 스펙 (livenote2/livenote2/ 아래 주요 파일)
@@ -462,7 +539,8 @@ Weekly Update의 system 프롬프트는 SA(Solutions Architect) 주간보고 규
 | 파일 | 역할 · 핵심 내용 |
 |---|---|
 | `livenote2App.swift` | `WindowGroup(id:"main")` 1020×680(min 840×520) + `MenuBarExtra`(waveform 아이콘, 실행 중 filled). MenuBarView: 상태줄, 시작/중지, 메인 창 열기(openWindow+activate), 자동 시작 토글, 종료(실행 중이면 stop 후 4.5s 지연 terminate — 저장 보장) |
-| `Models/TranscriptModels.swift` | `AudioChannel{me,them}`(Codable) · `TranscriptRow{id,channel,speakerSlot?,speakerName?,nameSource?,clusterID?,english,korean?,startSeconds,endSeconds}`(Identifiable+Codable, timeLabel mm:ss) · `FinalSegment` · `NameSource{zoom,voice,manual}` |
+| `Models/TranscriptModels.swift` | `AudioChannel{me,them}`(Codable) · `TranscriptRow{id,channel,speakerSlot?,speakerName?,nameSource?,clusterID?,var english,korean?,startSeconds,endSeconds}`(Identifiable+Codable, timeLabel mm:ss) · `FinalSegment` · `NameSource{zoom,voice,manual}` |
+| `Models/TranscriptReplace.swift` | §5.17 (v1.8.0 추가) `TranscriptReplace`(단어 경계 fallback 포함 찾아바꾸기 정규식 순수 함수) 및 `JargonSuggestion`(교체어 전문용어 등록 추천 판정) |
 | `Models/SpeakerMemoryModels.swift` | §5.16 (v1.7.0 추가) `Person` · `VoiceCentroid` · `EnrollmentSample` · `VoiceMatch` · `SpeakerSegment` · `OfflineDiarization` · `VoiceprintThresholds` · `VoiceprintStoring` 프로토콜 |
 | `Audio/AudioConverter16k.swift` | AVAudioConverter 래퍼: 임의 포맷 → 16kHz mono Float32. 스트림당 1인스턴스(리샘플 상태 유지). 입력버퍼 1회 공급 클로저 패턴 |
 | `Audio/MicCapture.swift` | AVAudioEngine inputNode 탭(4096). **VPIO 사용 안 함**(§7.3). onSamples + onLevel(0.25s마다 peak RMS×8). `requestPermission()` = AVCaptureDevice.requestAccess(.audio) |
@@ -473,11 +551,18 @@ Weekly Update의 system 프롬프트는 SA(Solutions Architect) 주간보고 규
 | `Engine/LiveVoicePromoter.swift` | §5.16 (v1.7.0 추가) actor. 90초 링 버퍼, 슬롯별 30초 발화 축적 시 성문 임베딩 추출 및 실시간 승격 알림 |
 | `Engine/TranscriptRefiner.swift` | §5.1-2 + §5.16 2-pass 전사 재디코딩 및 오프라인 다이어라이제이션 dominantCluster ID 할당 |
 | `Engine/SpeakerMemory.swift` | §5.16 (v1.7.0 추가) @MainActor. 성문 매칭 화자 명명(Zoom > Voice > Slot 우선순위), 다수결 확정 이름 도출, 자동 성문 등록 및 충돌 완화 |
+| `Engine/RecordingReminder.swift` | §5.18 (v1.8.0 추가) @MainActor @Observable. 녹음 누락 방지 리마인더: CoreAudio/NSWorkspace 프로브, 2-tick 상태 머신 정책, 타이머 루프 |
+| `Engine/RecordingReminderNotifier.swift` | §5.18 (v1.8.0 추가) `UNUserNotificationCenter` 알림 발송, "Start LiveNote" 액션 처리, 지연 권한 요청 |
 | `Storage/VoiceprintStore.swift` | §5.16 (v1.7.0 추가) @MainActor final class. `VoiceprintStoring` 구현체. vDSP 가속 성문 매칭, 다중 중심 등록/병합, 충돌 완화, 원자적 JSON 영속화 |
+| `Storage/TranscriptEditLog.swift` | §5.17 (v1.8.0 추가) `RowEdit` · `TranscriptEditKind` · `TranscriptEditBatch` · `TranscriptEditLog` (edits.json 영속화 및 손상 시 안전 격리) |
 | `Views/SpeakerChip.swift` | §5.16 (v1.7.0 추가) `SpeakerChipLabel` 화자 칩 레이블 및 이름 출처별 아이콘 매핑 |
 | `Views/SpeakerNamePopover.swift` | §5.16 (v1.7.0 추가) 화자 이름 변경, 성문 기억 토글, 후보 제안 팝오버 |
 | `Views/SpeakersSettings.swift` | §5.16 (v1.7.0 추가) Settings > Speakers 성문 관리 카드 (인물 목록, 이름 변경, 병합, 삭제, 전체 삭제) |
 | `Views/SpeakersSummaryLine.swift` | §5.16 (v1.7.0 추가) 회의 상세 화면 상단 화자별 총 발화 시간 요약 줄 |
+| `Views/FindReplaceBar.swift` | §5.17 (v1.8.0 추가) 전사 본문 찾아바꾸기 툴바 (대소문자/단어/요약 포함 옵션, 일치 건수 표시) |
+| `Views/TranscriptEditBadge.swift` | §5.17 (v1.8.0 추가) 전사 편집 횟수 배지 및 마지막 편집 되돌리기(Undo) 메뉴 |
+| `Views/ResummarizeBanner.swift` | §5.17 (v1.8.0 추가) 전사 5건 이상 수정 누적 시 요약 재생성 안내 배너 |
+| `Views/JargonToast.swift` | §5.17 (v1.8.0 추가) 교체어 사내 전문용어 등록 제안 토스트 (12초 자동 닫힘) |
 | `Engine/TranslationCoordinator.swift` | @MainActor @Observable. config 보유, `serve(session:state:)` 루프, issueMessage 배너 |
 | `Engine/GeminiKeychain.swift` | `GeminiKeychain`(API 키 Keychain 보관, SecItemUpdate update-in-place 갱신, ACL 거부 감지, 에러 throw, cloud.log 로깅) + `KeychainAPI` 프로토콜(테스트 주입용) |
 | `Engine/GeminiKeyController.swift` | @MainActor @Observable. Gemini 키 로드/저장/삭제 및 통합 에러 상태(geminiKeychainError) 관리 컨트롤러 |
@@ -492,9 +577,9 @@ Weekly Update의 system 프롬프트는 SA(Solutions Architect) 주간보고 규
 | `Calendar/MeetingAlertPanel.swift` | `MeetingAlertPanelController`(NSPanel 생성·우상단 배치·닫기) + `MeetingAlertView`(SwiftUI: 제목·시간·카운트다운·분할 참가 버튼/Dismiss, §5.8, 제안 안건 표시) |
 | `Calendar/CountdownPanel.swift` | §5.12 (v1.4.0 추가) `CountdownPanelController`(NSPanel) + `CountdownView`(사유·카운트다운·Cancel). 자동 시작 전 취소 유예 |
 | `Engine/SummaryService.swift` | actor. §5.5. 모델 ID 상수 한 줄로 교체 가능하게 유지할 것 |
-| `AppState.swift` | @MainActor @Observable 중심 허브. phase(idle/preparing/listening/error), rows, volatileText, 배너 4종(systemAudio/diarizer/translation/notice), micLevel, echoFilterEnabled·myName·autoStartOnMeetingApp(UserDefaults 영속), start(mode:)/stop() 오케스트레이션(§4 흐름, v1.4.0부터 online/inPerson 분기 §5.11), 에코 dedup(§5.2③), 저장·재저장(§5.6~7), 자동 시작/종료 옵저버(§5.12 카운트다운 경유), 요약 상태머신(summaryPhase), `pendingScreen`(팝업 메뉴 → Settings 화면 전환 신호), v1.5.0: `recipeStore`·`runRecipe(_:scope:model:language:)`·`recipeMeetings(for:)`(§5.13), `askChat`이 레시피로 시작한 대화의 첫 promptText 턴을 고정 포함. **파이프라인 내부 상태 14개 프로퍼티에 @ObservationIgnored 필수**(§7.4). 회의 앱 번들ID 목록은 **파일 스코프 상수**(§7.5) |
+| `AppState.swift` | @MainActor @Observable 중심 허브. phase(idle/preparing/listening/error), rows, volatileText, 배너 4종(systemAudio/diarizer/translation/notice), micLevel, echoFilterEnabled·myName·autoStartOnMeetingApp(UserDefaults 영속), start(mode:)/stop() 오케스트레이션(§4 흐름, v1.4.0부터 online/inPerson 분기 §5.11), 에코 dedup(§5.2③), 저장·재저장(§5.6~7), 자동 시작/종료 옵저버(§5.12 카운트다운 경유), 요약 상태머신(summaryPhase), `pendingScreen`(팝업 메뉴 → Settings 화면 전환 신호), v1.5.0: `recipeStore`·`runRecipe(_:scope:model:language:)`·`recipeMeetings(for:)`(§5.13), `askChat`이 레시피로 시작한 대화의 첫 promptText 턴을 고정 포함, v1.8.0: `recordingReminder`·`setRecordingReminder` (§5.18). **파이프라인 내부 상태 14개 프로퍼티에 @ObservationIgnored 필수**(§7.4). 회의 앱 번들ID 목록은 **파일 스코프 상수**(§7.5) |
 | `ContentView.swift` | NavigationSplitView: 사이드바(라이브 + MeetingStore.meetings, 컨텍스트 메뉴: Finder에서 보기/삭제) / LiveMeetingView(헤더: 상태·미터·에코필터 토글·시작/중지 ⌘R·In person 배지(§5.11), 배너들, SummaryCard, 전사 리스트: 화자칩 popover rename·EN·KO·"번역 중…"·타임스탬프·잠정 행, 자동 스크롤) / SavedMeetingView(읽기전용 + SummaryCard + onChange(summaryPhase) 재로드) / MeetingDetailView 툴바 "Recipes" 메뉴(currentMeeting 범위 레시피만, §5.13) / Settings > Meetings(자동 시작 카운트다운·캘린더 시작 시각 트리거 토글, §5.12) / Settings > Recipes 카드(§5.13). 화자칩 색: me=blue, 슬롯=8색 팔레트 순환, nil=회색 |
-| `Storage/MeetingStore.swift` | §5.7 + `resolveName(row:myName:speakerNames:)` 정적 헬퍼(이름 해석 단일 소스) + 마크다운 생성기 4종 + `transcriptForSummary` + v1.4.0: `attendees` 필드, `rename(at:title:)`, `titleFromSummary(_:)`(자동 제목) |
+| `Storage/MeetingStore.swift` | §5.7 + §5.17 원자적 스테이징 커밋 트랜잭션 쓰기, `updateRow`, `replaceAll`, `undoLastEdit`, `updateSummary(at:summary:) throws -> String?`, `markSummaryRegenerated throws -> String?`, `resolveName(row:myName:speakerNames:)` 정적 헬퍼(이름 해석 단일 소스) + 마크다운 생성기 4종 + `transcriptForSummary` + v1.4.0: `attendees` 필드, `rename(at:title:)`, `titleFromSummary(_:)`(자동 제목) |
 | `Storage/RecipeStore.swift` | §5.13 (v1.5.0 추가) @MainActor @Observable. `recipes`, `upsert`, `delete`, `resetBuiltins`, `seedBuiltinsIfNeeded`, `uniqueID(for:)` |
 | `Storage/RecipeOutputStore.swift` | §5.13 (v1.5.0 추가) `recipes-output/<yyyy-MM-dd> <title>.md` 저장, 파일명 충돌 시 " (2)" 접미사 |
 | `Storage/BriefStore.swift` | §5.15 (v1.6.0 추가) `briefs/<safe eventKey>.md` 브리핑 마크다운 및 메타데이터 저장소 |

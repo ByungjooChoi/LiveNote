@@ -469,14 +469,66 @@ struct MeetingDetailView: View {
     let url: URL
     @Binding var screen: ContentView.Screen
     @State private var meeting: SavedMeeting?
+    @State private var editLog = TranscriptEditLog()
     @State private var showTranscript = false
     @State private var selectedRecipe: Recipe?
     @State private var editingRowID: UUID?
     @State private var popoverError: String?
 
+    @State private var editingTextRowID: UUID?
+    @State private var editDraft = ""
+    @State private var editError: String?
+
+    @State private var showFindReplace = false
+    @State private var findText = ""
+    @State private var replaceText = ""
+    @State private var findCaseSensitive = false
+    @State private var findWholeWord = false
+    @State private var findIncludeSummary = true
+    @State private var findMatchCount = 0
+    @State private var findMatchedRows = 0
+    @State private var isReplacing = false
+
+    @State private var jargonSuggestion: String?
+    @State private var resummarizeDismissed = false
+
     var body: some View {
         VStack(spacing: 0) {
             toolbar
+            if let error = editError {
+                HStack {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(Theme.vermilion)
+                        .textSelection(.enabled)
+                    Spacer()
+                    Button {
+                        editError = nil
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.caption2)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 4)
+                .background(Theme.vermilion.opacity(0.1))
+            }
+            if showFindReplace {
+                FindReplaceBar(
+                    find: $findText,
+                    replacement: $replaceText,
+                    caseSensitive: $findCaseSensitive,
+                    wholeWord: $findWholeWord,
+                    includeSummary: $findIncludeSummary,
+                    matchCount: findMatchCount,
+                    matchedRows: findMatchedRows,
+                    isBusy: isReplacing,
+                    onReplaceAll: handleReplaceAll,
+                    onClose: { showFindReplace = false }
+                )
+            }
             Divider()
             if let meeting {
                 ScrollView {
@@ -489,6 +541,15 @@ struct MeetingDetailView: View {
                         }))
 
                         metaLine(meeting)
+
+                        if meeting.summary != nil && editLog.pendingEditsSinceSummary >= 5 && !resummarizeDismissed {
+                            ResummarizeBanner(
+                                pendingEdits: editLog.pendingEditsSinceSummary,
+                                isGenerating: app.summaryPhase == .generating,
+                                onRegenerate: { app.generateSummary(for: url) },
+                                onDismiss: { resummarizeDismissed = true }
+                            )
+                        }
 
                         if app.summaryPhase == .generating {
                             HStack(spacing: 10) {
@@ -550,10 +611,36 @@ struct MeetingDetailView: View {
             Divider()
             ChatPanel(scope: .saved(url))
         }
-        .onAppear { meeting = app.meetingStore.load(url) }
-        .onChange(of: app.summaryPhase) { _, newPhase in
-            if newPhase == .idle { meeting = app.meetingStore.load(url) }
+        .overlay(alignment: .bottomTrailing) {
+            if let term = jargonSuggestion {
+                JargonToast(
+                    term: term,
+                    onAdd: {
+                        app.setInternalJargon(JargonSuggestion.appending(term, to: app.internalJargon))
+                        jargonSuggestion = nil
+                    },
+                    onDismiss: {
+                        jargonSuggestion = nil
+                    }
+                )
+                .padding(20)
+            }
         }
+        .onAppear {
+            meeting = app.meetingStore.load(url)
+            editLog = app.meetingStore.editLog(at: url)
+            updateFindMatches()
+        }
+        .onChange(of: app.summaryPhase) { _, newPhase in
+            if newPhase == .idle {
+                meeting = app.meetingStore.load(url)
+                editLog = app.meetingStore.editLog(at: url)
+            }
+        }
+        .onChange(of: findText) { _, _ in updateFindMatches() }
+        .onChange(of: findCaseSensitive) { _, _ in updateFindMatches() }
+        .onChange(of: findWholeWord) { _, _ in updateFindMatches() }
+        .onChange(of: findIncludeSummary) { _, _ in updateFindMatches() }
         .sheet(item: $selectedRecipe) { recipe in
             RecipeRunSheet(recipe: recipe, currentMeeting: url)
         }
@@ -584,6 +671,19 @@ struct MeetingDetailView: View {
                         .font(.caption)
                 }
             }
+            Button {
+                showFindReplace.toggle()
+                if showFindReplace {
+                    showTranscript = true
+                }
+            } label: {
+                Label("Find & Replace", systemImage: "magnifyingglass")
+                    .font(.caption)
+            }
+            .keyboardShortcut("f", modifiers: .command)
+
+            TranscriptEditBadge(log: editLog, onUndo: handleUndo)
+
             Toggle("Show transcript", isOn: $showTranscript)
                 .toggleStyle(.checkbox)
                 .font(.caption)
@@ -620,8 +720,19 @@ struct MeetingDetailView: View {
         let name = MeetingStore.resolveName(row: row, myName: meeting.myName, speakerNames: meeting.speakerNames)
         let color = LiveMeetingView.chipColor(channel: row.channel, slot: row.speakerSlot, name: row.speakerName)
         let icon = SpeakerChipLabel.icon(for: row.nameSource)
+        let isEdited = editLog.editedRowIDs.contains(row.id)
+        let isEditingThis = editingTextRowID == row.id
 
         return HStack(alignment: .top, spacing: 10) {
+            if isEdited {
+                Circle()
+                    .fill(Theme.accent)
+                    .frame(width: 6, height: 6)
+                    .opacity(0.6)
+                    .padding(.top, 6)
+                    .help("Original: \(editLog.originalText(for: row.id) ?? "")")
+            }
+
             Button {
                 editingRowID = row.id
             } label: {
@@ -653,9 +764,47 @@ struct MeetingDetailView: View {
             }
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(row.english)
-                    .font(.callout)
-                    .textSelection(.enabled)
+                if isEditingThis {
+                    VStack(alignment: .leading, spacing: 6) {
+                        TextField("", text: $editDraft, axis: .vertical)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.callout)
+                            .onSubmit {
+                                saveInlineEdit(rowID: row.id)
+                            }
+                            .onExitCommand {
+                                editingTextRowID = nil
+                                editDraft = ""
+                            }
+
+                        HStack(spacing: 8) {
+                            Button("Save") {
+                                saveInlineEdit(rowID: row.id)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                            .tint(Theme.accent)
+
+                            Button("Cancel") {
+                                editingTextRowID = nil
+                                editDraft = ""
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
+                    }
+                } else {
+                    Text(row.english)
+                        .font(.callout)
+                        .textSelection(.enabled)
+                        .contentShape(Rectangle())
+                        .onTapGesture(count: 2) {
+                            editingTextRowID = row.id
+                            editDraft = row.english
+                            editError = nil
+                        }
+                }
+
                 if let korean = row.korean {
                     Text(korean)
                         .font(.caption)
@@ -668,6 +817,85 @@ struct MeetingDetailView: View {
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .monospacedDigit()
+        }
+    }
+
+    private func updateFindMatches() {
+        guard let meeting else {
+            findMatchCount = 0
+            findMatchedRows = 0
+            return
+        }
+        let options = TranscriptReplace.Options(caseSensitive: findCaseSensitive, wholeWord: findWholeWord)
+        let matches = TranscriptReplace.matches(in: meeting.rows, find: findText, options: options)
+        var rowMatchTotal = matches.reduce(0) { $0 + $1.count }
+        if findIncludeSummary, let summary = meeting.summary {
+            rowMatchTotal += TranscriptReplace.matchCount(in: summary, find: findText, options: options)
+        }
+        findMatchCount = rowMatchTotal
+        findMatchedRows = matches.count
+    }
+
+    private func saveInlineEdit(rowID: UUID) {
+        do {
+            let result = try app.meetingStore.updateRow(at: url, rowID: rowID, english: editDraft)
+            meeting = result.meeting
+            editLog = result.log
+            editingTextRowID = nil
+            editDraft = ""
+            if let warning = result.warning {
+                editError = warning
+            } else {
+                editError = nil
+            }
+            updateFindMatches()
+        } catch {
+            editError = error.localizedDescription
+        }
+    }
+
+    private func handleReplaceAll() {
+        guard !isReplacing else { return }
+        isReplacing = true
+        do {
+            let result = try app.meetingStore.replaceAll(
+                at: url,
+                find: findText,
+                replacement: replaceText,
+                caseSensitive: findCaseSensitive,
+                wholeWord: findWholeWord,
+                includeSummary: findIncludeSummary
+            )
+            meeting = result.meeting
+            editLog = result.log
+            if let warning = result.warning {
+                editError = warning
+            } else {
+                editError = nil
+            }
+            if JargonSuggestion.shouldSuggest(replacement: replaceText, existingJargon: app.internalJargon) {
+                jargonSuggestion = replaceText.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            updateFindMatches()
+        } catch {
+            editError = error.localizedDescription
+        }
+        isReplacing = false
+    }
+
+    private func handleUndo() {
+        do {
+            let result = try app.meetingStore.undoLastEdit(at: url)
+            meeting = result.meeting
+            editLog = result.log
+            if let warning = result.warning {
+                editError = warning
+            } else {
+                editError = nil
+            }
+            updateFindMatches()
+        } catch {
+            editError = error.localizedDescription
         }
     }
 }
@@ -1708,6 +1936,18 @@ struct SettingsView: View {
                         get: { app.autoStartAtCalendarTime },
                         set: { app.setAutoStartAtCalendarTime($0) }
                     ))
+                    Toggle("Remind me when a meeting app uses the mic and LiveNote is idle", isOn: Binding(
+                        get: { app.recordingReminder.isEnabled },
+                        set: { app.setRecordingReminder($0) }
+                    ))
+                    Text("Sends one notification per meeting after one to two minutes of an unrecorded call.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if let message = app.recordingReminder.statusMessage {
+                        Text(message)
+                            .font(.caption)
+                            .foregroundStyle(Theme.vermilion)
+                    }
                     Divider().padding(.vertical, 4)
                     BriefSettingsRows(controller: app.briefing)
                 }
