@@ -532,6 +532,68 @@ Weekly Update의 system 프롬프트는 SA(Solutions Architect) 주간보고 규
 - UserDefaults 키: `recordingReminderEnabled` (기본값 true).
 - 로그 카테고리: `reminder` (`~/Documents/LiveNote/logs/reminder.log`). 매 tick이 아닌 상태 전이 시에만 기록 ("armed", "notify intent <app>", "delivered <app>", "reset", "authorization denied", "notify failed: <error>", "notify intent cancelled: condition no longer holds", "notify intent cancelled: condition dropped while awaiting authorization", "notify intent cancelled: stale generation", "stale delivery dropped").
 
+### 5.19 People 뷰 (PeopleDirectory + PeopleView, 2026-09-05 추가, v1.8.0)
+
+저장된 회의의 참석자(attendees)와 화자명(speakerNames)을 통합 색인하여 인물별 회의 이력 및 태스크를 관리하는 기능.
+
+**1. 신원 식별 및 병합 규칙 (Identity Merge Rules)**:
+- 후보 데이터 소스: `MeetingSummary.attendees` (이름, 이메일) 및 각 회의의 `speakerNames` (지연 로딩된 session.json 내 화자 목록 및 전사 행 화자명).
+- 이름 정규화 (`PeopleAggregator.normalizedName`): trim, 내부 공백 축약, 소문자화, 후행 괄호(예: " (Elastic)") 및 후행 접미사(예: " - Company") 제거.
+- 제외 조건: 빈 이름, 정규화된 이름이 본인(`myName`)과 일치하는 경우, 플레이스홀더 이름(`^speaker \d+$`).
+- 신원 모델 및 카드 ID: 이메일이 있는 참석자는 이메일 신원(`email:<email>`), 이메일 없는 참석자 및 화자명은 이름 후보(`name:<norm>`). 서로 다른 이메일 신원은 이름이 같아도 절대 병합되지 않음 (각각 독립 카드 유지).
+- 화자/무이메일 후보 병합: 동일 회의에 해당 정규화 이름을 가진 이메일 신원이 존재하면 우선 결합. 동일 회의에 없으면 전체 회의 중 해당 이름을 가진 유일한 이메일 신원과 결합. 둘 이상의 이메일 신원이 해당 이름을 공유하고 동일 회의에 존재하지 않으면 독립된 이름 전용 카드(`name:<norm>`)로 유지. 이름 전용 후보끼리는 동일 정규화 이름 기준으로 상호 병합.
+- 카드 ID 타입화: 이메일 신원 카드는 `email:<email>`, 이름 전용 카드는 `name:<norm>`으로 타입 접두사를 포함하여 식별자 충돌 방지.
+- 표시 이름(`displayName`): 가장 빈번하게 등장한 원래 표기 채택 (동률 시 최초 등장 표기).
+- 별칭(`aliases`): 중복 없는 고유한 원본 표기 목록 (표시 이름 우선).
+- 회의 URL(`meetingURLs`): 중복 제거 후 회의 시작 시각(`startedAt`) 최신순 정렬.
+
+**2. 캐싱 및 동시성 제어 (Coalescing & Cache)**:
+- 세션 디렉터리 내 `session.json`의 수정 일자(`modificationDate`)를 캐시 키로 사용하여 미변경 폴더의 반복 디스크 I/O를 차단.
+- 백그라운드 읽기: 비동기 `Task.detached(priority: .utility)`에서 경량 Decodable 구조체(`LightweightSession`)로 `speakerNames`([Int: String] 키 정렬 디코딩) 및 rows의 `speakerName`만 선별 디코딩하며, 타입 불일치 등 손상 오류를 숨기지 않고 전파.
+- 디스크 읽기 실패 시 에러를 집계하여 1회 로깅(`AppLog.write("app", "People 디렉터리 읽기 실패 N건: <first error>")`) 및 검색창 하단 `lastWarning`으로 노출하며, 실패한 폴더의 참석자는 그대로 보존.
+- Coalescing: 새로고침 실행 중 들어온 요청은 1회로 합쳐져 현재 실행 뒤에 한 번 더 실행되며, 진행 중인 태스크를 재사용하여 데이터 불일치 및 경쟁 방지.
+
+**3. 회사별 그룹화 및 검색 필터링**:
+- 그룹화: 첫 번째 이메일 도메인을 회사(`company`)로 취급. 이메일이 없는 인물은 "Other" 그룹으로 최하단 배치.
+- 그룹 정렬: 소속 인원수 내림차순 -> 회사명 오름차순. "Other"는 항상 마지막.
+- 그룹 내 정렬: 최근 회의 시작 시각 내림차순 -> 표시 이름 오름차순.
+- 검색: 이름, 별칭, 이메일에 대한 대소문자 무시 부분 문자열 일치 필터링.
+
+**4. 태스크 및 타임라인 연동 (Tasks Linkage & Timeline)**:
+- 각 사람 카드의 미완료 태스크 수는 `app.tasks.openCount(forAttendeeNames: card.aliases)`를 통해 순수 인메모리 토큰 매칭으로 실시간 계산.
+- 카드 클릭 시 인물 타임라인 화면으로 전환되며, 해당 인물이 참여한 유효 회의 목록을 `MeetingCardView` 행으로 최신순 렌더링.
+
+### 5.20 내보내기 (MeetingExporter + ExportMenu, 2026-09-05 추가, v1.8.0)
+
+회의 상세 및 AI 채팅/레시피 산출물을 마크다운(.md) 또는 자체 완결형 HTML(.html)로 파일 내보내기 및 클립보드 복사하는 기능.
+
+**1. 마크다운 문서 레이아웃 (`MeetingExporter.markdown`)**:
+- 문서 구조: `# <제목>` -> 빈 줄 -> `<긴 일시> · <시간>m · <N> participants` (참석자는 본인 포함 고유한 해석 이름 목록) -> 빈 줄.
+- 참석자 목록(`## Attendees`): 캘린더 참석자가 존재하는 경우 각 인물별 `- <이름> <<이메일>>` (이메일 부재 시 `- <이름>`) 불릿 나열 -> 빈 줄.
+- 요약 본문: 공백 검사 후 원문(`meeting.summary`)의 선행 들여쓰기와 공백을 손상 없이 그대로(verbatim) 출력, 부재 시 `_No minutes._` 출력.
+- 전사 옵션(`includeTranscript`): 활성화 시 빈 줄 -> `## Transcript` -> 빈 줄 -> 행별 `- **[mm:ss] <화자명>:** <영어원문>` 출력. 한국어 번역이 존재하는 경우 하위에 중첩 불릿 `  - <한국어>` 출력.
+- 문서 끝에는 정확히 1개의 개행(`\n`)만 유지.
+
+**2. HTML 변환 및 이스케이프 (`MarkdownHTML`)**:
+- NUL 문자 위조 방지 및 단일 패스 복원: 텍스트 처리 시작 시 모든 U+0000(NUL) 문자를 제거하여 플레이스홀더 위조를 차단하고, 플레이스홀더 복원은 한 번의 문자열 순회(`restorePlaceholders`)로 처리하여 이미 삽입된 HTML이 재스캔/재치환되지 않도록 보장.
+- 특수문자 이스케이프: `&`, `<`, `>`, `"`, `'`를 우선 이스케이프하여 사용자 텍스트가 HTML 태그로 해석되지 않도록 방어.
+- 인라인 서식 토큰화: 단일 교차 정규식(alternation regex, `` `([^`]+)`|\[([^\]]+)\]\((https?://[^)\s"]+)\) ``) 1회 매칭 패스로 선형(linear) 시간 내에 토큰화하며, NSRegularExpression의 최좌측 우선(leftmost-first) 일치 규칙으로 더 일찍 시작하는 항목을 최선두로 선택. 코드 스팬은 내부 링크/강조 파싱 없이 리터럴 소비. 링크는 원본 URL(백틱 보존)을 보존하고 라벨은 동일 세그먼트 파이프라인을 재귀 적용(라벨에 `]` 미포함이므로 중첩 링크 방지). 치환 토큰은 오직 NUL, 알파벳 1자, 숫자, NUL(`\u{0000}C(n)\u{0000}`, `\u{0000}L(n)\u{0000}`)만 사용하여 밑줄(_)이나 별표(*)를 배제함으로써 `_italic_` 정규식의 룩어라운드 간섭을 방지. 이후 `applyBoldItalic`을 1회 적용하고 인덱스 기반 단일 패스(`restorePlaceholders`)로 복원.
+- 블록 변환: `# ` -> `<h1>`, `## ` -> `<h2>`, 공백 기준 들여쓰기 깊이(`leadingSpaces / 2`)에 따른 중첩 목록(`<ul>` 및 `<li>`), 그 외 일반 텍스트는 개별 `<p>` 단락으로 변환. 비목록 줄 도달 시 열려 있는 모든 목록 닫기.
+- 전체 페이지: `<!doctype html>`, UTF-8 메타 태그, 이스케이프된 `<title>`, 시스템 폰트 및 max-width 720px 반응형 인라인 스타일시트 포함.
+
+**3. 저장 패널 및 상태/오류 피드백 (`ExportMenu`, `ClipboardWriter`, `ExportFeedback`)**:
+- 동적 소스 연동 (`ExportSource`): `ExportMenu`는 고정 매개변수 대신 `makeSource: () -> ExportSource?` 클로저를 통해 실행 시점의 최신 마크다운, 제목, 시작 일시를 실시간 공급받음.
+- 비보유 패널 완료자 (`makeCompletion`) 및 피드백 상태 객체 (`ExportFeedback`): `panel.begin` 완료 블록 및 상태 수신 클로저는 부모 뷰나 Environment(AppState)를 강한 참조하지 않고, 독립된 `@Observable final class ExportFeedback` 인스턴스만을 명시적 캡처(`[feedback]`)하여 메모리 누수를 원천 방지. 타이머 태스크는 `[weak self]`로 관리되며 화면 퇴장(`.onDisappear`) 시 `cancelTimers()`로 즉시 정리됨.
+- 기본 디렉터리: 최초 실행 시 사용자의 Downloads 폴더를 기본값으로 지정하고, 저장 성공 시 `exportLastDirectory` UserDefaults 키로 마지막 경로를 기억하여 재사용.
+- 기본 파일명: `yyyy-MM-dd HHmm <safeTitle>.<ext>` (`RecipeOutputStore.safeTitle` 적용, 제목 부재 시 "Meeting").
+- 상태 및 오류 표시: 성공 시 툴바에 1.5초간 "Exported" 상태 표시 및 `export` 로그 기록(`내보내기 <format> <bytes>B transcript=<bool>`), 실패 시 상단에 닫기 가능한 적색 배너로 `Export failed: <reason>` 표시.
+- 요약 클립보드 복사: `ClipboardWriter`를 통해 `setString` 반환값을 검증하여 실패 시 "Copied" 노출 없이 `Copy failed: clipboard write was rejected` 오류 배너 표시 및 실패 로그 기록.
+
+**4. AI 채팅 및 레시피 결과 연동**:
+- ChatPanel 말풍선 내 어시스턴트 메시지 우측에 항상 표시되는 미니 툴바 제공: 복사(클립보드) 버튼 및 내보내기(Markdown / HTML) 메뉴.
+- 클립보드 복사는 `ClipboardWriter`를 통해 실패 감지 시 하단 에러 캡션 표시.
+- 레시피 결과 대화인 경우 직전 유저 메시지(`Recipe: <제목> (...)`)로부터 레시피 제목을 파싱하여 `ExportSource`의 기본 제목으로 전달하고, 일반 채팅 답변인 경우 "Chat answer"로 명명.
+
 ---
 
 ## 6. 파일별 스펙 (livenote2/livenote2/ 아래 주요 파일)
@@ -612,6 +674,11 @@ Weekly Update의 system 프롬프트는 SA(Solutions Architect) 주간보고 규
 | `Views/ActionItemsCard.swift` | §5.14 (v1.6.0 추가) 회의 상세 화면 요약 하단 Action Items 카드 컴포넌트 |
 | `Resources/Recipes/extract-tasks.json` | §5.14 (v1.6.0 추가) 과거 회의 태스크 일괄 추출 내장 레시피 |
 | `Resources/Recipes/*.json` | §5.13 (v1.5.0 추가) 내장 레시피 원본. 동기화 그룹이 번들 루트로 평탄화해 복사하므로(§7.19) pbxproj 수정 없이 파일만 추가하면 되지만 id(=파일명)는 다른 번들 리소스와 겹치면 안 됨 |
+| `Engine/PeopleDirectory.swift` | §5.19 (v1.8.0 추가) @MainActor @Observable. 인물 색인 관리, 결정론적 신원 클러스터링 병합, 캐시 기반 디스크 지연 로딩, coalescing 동시성 제어 |
+| `Views/PeopleView.swift` | §5.19 (v1.8.0 추가) People 목록 화면 (검색 필터, 회사별 그룹, 태스크 배지, 인물별 회의 타임라인) |
+| `Views/MeetingCardView.swift` | §5.19 (v1.8.0 추가) 회의 카드 공용 뷰 (HomeView 피드 및 People 타임라인 공용 컴포넌트, Finder 보기 및 삭제 컨텍스트 메뉴) |
+| `Engine/MeetingExporter.swift` | §5.20 (v1.8.0 추가) 회의 및 텍스트의 Markdown/HTML 변환 순수 엔진, HTML 이스케이프 및 블록 렌더러, 파일명 포맷터, 원자적 파일 쓰기 |
+| `Views/ExportMenu.swift` | §5.20 (v1.8.0 추가) 회의 상세 및 채팅 공용 내보내기 메뉴 (NSSavePanel 연동, 최근 저장 디렉터리 기억, 상태 피드백) |
 
 ---
 
@@ -640,6 +707,7 @@ Weekly Update의 system 프롬프트는 SA(Solutions Architect) 주간보고 규
 20. **레시피 id가 파일명과 다르거나 형식에 안 맞으면 조용히 사라진다.** `RecipeStore.refresh()`는 id가 `^[a-z0-9][a-z0-9-]{0,63}$`에 안 맞거나, 파일명(확장자 제외)과 id가 다르거나, id가 중복이면 그 파일을 목록에서 빼고 `recipe` 로그에만 남긴다(경로 조작 방어가 목적이라 UI에는 알리지 않는다). recipes 폴더의 JSON을 손으로 편집·복사할 때는 파일명과 id를 같게, 소문자·숫자·하이픈만 쓸 것.
 21. **앱 이름 변경/재설치 시 키체인 접근 제어(ACL) 거부 발생.** 앱 번들이 `/Applications/livenote2.app`에서 `/Applications/LiveNote.app`으로 변경되면 과거 빌드가 생성한 키체인 항목의 ACL 신뢰 앱 경로와 불일치해 `SecItemCopyMatching`이나 `SecItemUpdate` 시 `errSecAuthFailed`(-25293)가 반환된다. 이때 update-in-place 원칙에 따라 delete 재시도를 하지 않으며, `GeminiKeychain`은 상태 코드를 삼키지 않고 `GeminiKeychainError`(`.accessDenied`, `.inaccessibleItem`, `.readFailed`, `.corruptData`, `.invalidKeyData`, `.writeFailed`)로 throw한다. UI에서는 Keychain Access(키체인 접근) 앱에서 기존 `com.byungjoo.livenote2.gemini` 항목을 삭제하고 다시 저장하도록 명확한 오류 안내를 보여준다.
 22. **세션 시작 시 `purgeStale()`과 진행 중인 백그라운드 2-pass 오디오 충돌.** 이전 회의의 오프라인 다이어라이제이션이나 me 성문 등록이 백그라운드에서 아직 진행 중일 때 새 세션을 시작하면서 `purgeStale()`이 호출되면, 아직 읽고 있는 이전 세션의 WAV 폴더가 삭제될 위험이 있었다. `ActiveFolderRegistry`를 통해 현재 프로세스의 활성 세션 폴더를 추적하고 `purgeStale()`에서 제외(lease)하며, 백그라운드 작업이 완전히 끝난 후 내부 정리 태스크가 안전하게 삭제하도록 보장한다.
+23. **상대 날짜 포맷팅 시 Calendar와 DateFormatter 타임존 불일치.** `Calendar`에 커스텀 타임존(예: UTC)이 지정되었더라도 `DateFormatter`의 `timeZone`을 별도로 동기화하지 않으면 시스템 로컬 타임존으로 서식화되어 자정 전후의 날짜가 하루씩 어긋나는 문제가 발생함. 상대 날짜 판정 시 `formatter.timeZone = calendar.timeZone`을 명시해야 함.
 
 ---
 

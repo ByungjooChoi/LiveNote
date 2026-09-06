@@ -203,6 +203,14 @@ struct HomeView: View {
     @Binding var screen: ContentView.Screen
     @State private var ask = ""
 
+    enum HomeTab: String, CaseIterable {
+        case meetings = "Meetings"
+        case people = "People"
+    }
+
+    @State private var homeTab: HomeTab = .meetings
+    @State private var directory = PeopleDirectory()
+
     private static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm"
@@ -224,10 +232,24 @@ struct HomeView: View {
                         .font(.system(size: 27, weight: .semibold, design: .serif))
                     comingUpCard
 
-                    Text("Meetings")
-                        .font(.title3.weight(.semibold))
-                        .padding(.top, 6)
-                    meetingFeed
+                    HStack {
+                        Picker("Tab", selection: $homeTab) {
+                            ForEach(HomeTab.allCases, id: \.self) { tab in
+                                Text(tab.rawValue).tag(tab)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(width: 220)
+                        Spacer()
+                    }
+                    .padding(.top, 6)
+
+                    switch homeTab {
+                    case .meetings:
+                        meetingFeed
+                    case .people:
+                        PeopleView(directory: directory, screen: $screen)
+                    }
                 }
                 .padding(28)
                 .padding(.bottom, 84)   // 하단 ask 바에 가리지 않도록
@@ -414,49 +436,10 @@ struct HomeView: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 ForEach(section.meetings) { meeting in
-                    meetingCard(meeting)
+                    MeetingCardView(meeting: meeting) {
+                        screen = .meeting(meeting.url)
+                    }
                 }
-            }
-        }
-    }
-
-    private func meetingCard(_ meeting: MeetingSummary) -> some View {
-        Button {
-            screen = .meeting(meeting.url)
-        } label: {
-            HStack(spacing: 12) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Theme.accent.opacity(0.12))
-                        .frame(width: 36, height: 36)
-                    Text(String(meeting.title.prefix(1)))
-                        .font(.callout.weight(.semibold))
-                        .foregroundStyle(Theme.accent)
-                }
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(meeting.title)
-                        .font(.callout.weight(.medium))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                    Text("\(meeting.dateLabel) · \(meeting.rowCount)건 · \(meeting.durationLabel)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Image(systemName: "chevron.right")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-            }
-            .padding(12)
-            .themedCard()
-        }
-        .buttonStyle(.plain)
-        .contextMenu {
-            Button("Show in Finder") {
-                NSWorkspace.shared.activateFileViewerSelecting([meeting.url])
-            }
-            Button("Delete", role: .destructive) {
-                app.meetingStore.delete(meeting)
             }
         }
     }
@@ -492,6 +475,9 @@ struct MeetingDetailView: View {
     @State private var jargonSuggestion: String?
     @State private var resummarizeDismissed = false
 
+    @State private var feedback = ExportFeedback()
+    @State private var exportIncludeTranscript = false
+
     var body: some View {
         VStack(spacing: 0) {
             toolbar
@@ -504,6 +490,26 @@ struct MeetingDetailView: View {
                     Spacer()
                     Button {
                         editError = nil
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.caption2)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 4)
+                .background(Theme.vermilion.opacity(0.1))
+            }
+            if let message = feedback.message {
+                HStack {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(Theme.vermilion)
+                        .textSelection(.enabled)
+                    Spacer()
+                    Button {
+                        feedback.dismiss()
                     } label: {
                         Image(systemName: "xmark")
                             .font(.caption2)
@@ -630,6 +636,10 @@ struct MeetingDetailView: View {
             meeting = app.meetingStore.load(url)
             editLog = app.meetingStore.editLog(at: url)
             updateFindMatches()
+            exportIncludeTranscript = UserDefaults.standard.bool(forKey: "exportIncludeTranscript")
+        }
+        .onDisappear {
+            feedback.cancelTimers()
         }
         .onChange(of: app.summaryPhase) { _, newPhase in
             if newPhase == .idle {
@@ -694,6 +704,64 @@ struct MeetingDetailView: View {
                     .font(.caption)
             }
             .disabled(app.summaryPhase == .generating)
+
+            Button {
+                guard let fresh = app.meetingStore.load(url) else {
+                    feedback.apply(.failed("Copy failed: meeting could not be read"))
+                    return
+                }
+                meeting = fresh
+                guard let summary = fresh.summary else {
+                    feedback.apply(.failed("Copy failed: this meeting has no minutes"))
+                    return
+                }
+                let status = ClipboardWriter.copy(summary)
+                switch status {
+                case .copied:
+                    AppLog.write("export", "요약 복사 \(summary.count)자")
+                case .failed:
+                    AppLog.write("export", "요약 복사 실패")
+                case .exported:
+                    break
+                }
+                feedback.apply(status)
+            } label: {
+                Label(feedback.isCopied ? "Copied" : "Copy summary", systemImage: feedback.isCopied ? "checkmark" : "doc.on.doc")
+                    .font(.caption)
+            }
+            .disabled(meeting?.summary == nil)
+
+            if feedback.isExported {
+                Label("Exported", systemImage: "checkmark")
+                    .font(.caption)
+                    .foregroundStyle(Theme.accent)
+            } else {
+                let feedback = self.feedback
+                ExportMenu(
+                    makeSource: {
+                        guard let freshMeeting = app.meetingStore.load(url) else {
+                            feedback.apply(.failed("Export failed: meeting could not be read"))
+                            return nil
+                        }
+                        self.meeting = freshMeeting
+                        let md = MeetingExporter.markdown(for: freshMeeting, includeTranscript: exportIncludeTranscript)
+                        let title = freshMeeting.title ?? MeetingStore.resolveTitleFallback(freshMeeting)
+                        return ExportSource(markdown: md, title: title, date: freshMeeting.startedAt)
+                    },
+                    includeTranscriptToggle: Binding(
+                        get: { exportIncludeTranscript },
+                        set: { newValue in
+                            exportIncludeTranscript = newValue
+                            UserDefaults.standard.set(newValue, forKey: "exportIncludeTranscript")
+                        }
+                    ),
+                    onStatus: { [feedback] status in
+                        feedback.apply(status)
+                    }
+                )
+                .disabled(meeting == nil)
+            }
+
             Button {
                 NSWorkspace.shared.activateFileViewerSelecting([url])
             } label: {
@@ -1566,6 +1634,7 @@ struct ChatPanel: View {
     let scope: AppState.ChatScope
     var expanded = false
     @State private var input = ""
+    @State private var feedback = ExportFeedback()
 
     var body: some View {
         VStack(spacing: 10) {
@@ -1610,6 +1679,27 @@ struct ChatPanel: View {
                     }
                 }
             }
+            if let error = feedback.message {
+                HStack {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(Theme.vermilion)
+                        .textSelection(.enabled)
+                    Spacer()
+                    Button {
+                        feedback.dismiss()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.caption2)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Theme.vermilion.opacity(0.1))
+                .cornerRadius(4)
+            }
             HStack(spacing: 8) {
                 TextField(placeholder, text: $input)
                     .textFieldStyle(.roundedBorder)
@@ -1642,6 +1732,9 @@ struct ChatPanel: View {
         .padding(.bottom, expanded ? 20 : 14)
         .background(expanded ? Theme.canvas : Color(nsColor: .controlBackgroundColor))
         .onAppear { app.ensureChatScope(scope) }
+        .onDisappear {
+            feedback.cancelTimers()
+        }
         .onChange(of: scope.key) {
             app.ensureChatScope(scope)
         }
@@ -1673,7 +1766,7 @@ struct ChatPanel: View {
     }
 
     private func bubble(_ message: ChatMessage) -> some View {
-        HStack {
+        HStack(alignment: .top) {
             if message.role == .user { Spacer(minLength: 60) }
             Text(message.text)
                 .font(.callout)
@@ -1684,8 +1777,60 @@ struct ChatPanel: View {
                             ? Theme.accent.opacity(0.12)
                             : Color.primary.opacity(0.05))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
-            if message.role == .assistant { Spacer(minLength: 60) }
+            if message.role == .assistant {
+                let feedback = self.feedback
+                VStack(spacing: 4) {
+                    Button {
+                        let status = ClipboardWriter.copy(message.text)
+                        switch status {
+                        case .copied:
+                            AppLog.write("export", "채팅 복사 \(message.text.count)자")
+                        case .failed:
+                            AppLog.write("export", "채팅 복사 실패")
+                        case .exported:
+                            break
+                        }
+                        feedback.apply(status)
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.tertiary)
+                    .help("Copy")
+
+                    ExportMenu(
+                        isCompact: true,
+                        makeSource: {
+                            let exportTitle = chatExportTitle(for: message)
+                            return ExportSource(markdown: message.text, title: exportTitle, date: Date())
+                        },
+                        onStatus: { [feedback] status in
+                            feedback.apply(status)
+                        }
+                    )
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.tertiary)
+                }
+                Spacer(minLength: 60)
+            }
         }
+    }
+
+    private func chatExportTitle(for message: ChatMessage) -> String {
+        if let idx = app.chatMessages.firstIndex(where: { $0.id == message.id }), idx > 0 {
+            let prev = app.chatMessages[idx - 1]
+            if prev.role == .user && prev.text.hasPrefix("Recipe: ") {
+                let afterPrefix = prev.text.dropFirst("Recipe: ".count)
+                if let parenIdx = afterPrefix.lastIndex(of: "(") {
+                    let title = String(afterPrefix[..<parenIdx]).trimmingCharacters(in: .whitespaces)
+                    if !title.isEmpty { return title }
+                } else {
+                    let title = String(afterPrefix).trimmingCharacters(in: .whitespaces)
+                    if !title.isEmpty { return title }
+                }
+            }
+        }
+        return "Chat answer"
     }
 }
 

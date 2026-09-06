@@ -174,7 +174,7 @@ Phase 0 (기반·G 일부) ─┬─> Phase 1 (Recipes)
 
 ## Phase 4: 전사 편집·용어 학습 + People 뷰 + 리마인더 + 내보내기 (v1.8.0)
 
-**4.1 및 4.3 완료 (2026-09-05, codex 승인 라운드 5, 테스트 442개). 4.2 People 뷰와 4.4 내보내기는 2차 실행에서 v1.8.0으로 묶어 완료 예정.**
+**Phase 4 완료 (v1.8.0, 2026-09-05). 4.1·4.3은 Phase 4a(codex 승인 라운드 5, 테스트 442개), 4.2·4.4는 Phase 4b(codex 승인 라운드 5, 테스트 500개)로 두 번의 팀 실행으로 완료.**
 
 ### 4.1 전사 편집·찾아바꾸기 (F) (완료)
 - `MeetingDetailView` 전사 행 더블클릭 인라인 TextField(이미 `editingRowID` 상태 존재, 화자 편집용이던 것을 텍스트 편집으로 확장). 저장 시 `MeetingStore.updateRow(at:url, rowID:, english:)` → session.json + md 재생성 + `edits.json` append.
@@ -185,20 +185,23 @@ Phase 0 (기반·G 일부) ─┬─> Phase 1 (Recipes)
 - 디코더 반영(word boost)은 라이브 경로 교체 작업으로 이관(이 Phase 범위 밖).
 - 실제 구현 및 설계 구체화: `edits.json`은 원자적 배치 로그(inline/replaceAll 배치, before/after 및 요약 변경 기록)로 관리, 되돌리기(Undo)는 LIFO 단일 배치 단위로 디스크 텍스트 일치 충돌 검증 후 복원, 트랜잭션 스테이징 및 고정 순서(`session.json` 최우선 -> `edits.json` -> md 파일들) 커밋, 요약 전용 찾아바꾸기도 1건의 편집으로 가산, 비단어 문자(예: C++)로 시작/끝나는 용어의 `\b` 폴백 처리.
 
-### 4.2 People / Accounts 뷰 (G.7)
+### 4.2 People / Accounts 뷰 (G.7) (완료)
 - HomeView 상단 세그먼트 "Meetings | People". `Views/PeopleView.swift`: attendees(P0) + speakerNames 집계 → 사람 카드(회의 수, 마지막, 열린 태스크 수). 클릭 → 그 사람 회의 타임라인(기존 meetingCard 재사용). 이메일 도메인으로 회사 그룹핑(선택).
+- 실제 구현 및 설계 구체화: `MeetingSummary.attendees`와 지연 로딩된 `speakerNames`를 통합 집계(Union-Find 연결 요소 클러스터링). 이름 정규화(공백 축약, 소문자화, 접미사 제거), 본인 및 플레이스홀더(`^speaker \d+$`) 자동 제외, 최다 빈도 표기를 표시명으로 채택하고 별칭 보존. `session.json` 수정 시각(mtime) 기반 캐시와 비동기 백그라운드 선별 디코딩(`Task.detached`), 동시 호출 병합(coalescing). 첫 이메일 도메인 기반 회사 그룹화("Other" 하단 배치), 이름·별칭·이메일 검색 필터링, `TasksController.openCount` 연동 열린 태스크 배지, HomeView에서 독립 추출된 `MeetingCardView`를 통한 공용 회의 카드 렌더링.
 
 ### 4.3 녹음 리마인더 (G.5) (완료)
 - 신규 `Engine/RecordingReminder.swift`: 60초 주기. 조건 = 회의 앱 실행 중 + 기본 입력 장치 `kAudioDevicePropertyDeviceIsRunningSomewhere` true + `!app.isActive`. 세션당 1회 `NSUserNotification`(UNUserNotificationCenter) "Meeting in progress? [Start LiveNote]". Settings > Meetings 토글.
 - 실제 구현 및 설계 구체화: Condition C(회의 앱 실행 중 + 기본 입력 오디오 장치 사용 중 + LiveNote 유휴 상태)를 60초 주기로 평가, 2회 연속 충족 시 회의당 1회 `UNUserNotificationCenter` 알림 발송, 단일 비행(single-flight) 지연 권한 요청, 세대(generation) 가드 기반 오래된 비동기 배송 무효화, Settings > Meetings 토글 및 권한/에러 상태 메시지, `reminder.log` 로깅.
 
-### 4.4 내보내기 (G.6)
+### 4.4 내보내기 (G.6) (완료)
 - MeetingDetailView 툴바: "Copy summary"(md → NSPasteboard), "Export…"(NSSavePanel, md/HTML; HTML은 SummaryRenderView 규칙을 간단 변환). 레시피 결과 대화에도 동일 버튼.
+- 실제 구현 및 설계 구체화: 마크다운 문서 레이아웃(메타 헤더, 참석자 불릿, 요약 본문 원문/폴백, `includeTranscript` 활성화 시 타임스탬프·화자명 및 한국어 중첩 불릿). 순수 HTML 렌더러(`MarkdownHTML`: 특수문자 이스케이프, 인라인 서식, 중첩 목록 및 단락 분리, 독립형 UTF-8 HTML5 페이지). 회의 상세 및 채팅 공용 `ExportMenu`(NSSavePanel 연동, Downloads 기본 폴더 및 최근 경로 기억). 내보내기/복사 전 디스크 최신 상태 실시간 재로드, 원자적 파일 쓰기, 1.5초 "Copied"/"Exported" 피드백 및 오류 배너, 채팅 말풍선 미니 툴바(레시피 제목 기반 파일명 생성), `export.log` 로깅.
 
 ### 4.5 검증
-- 이름 오인식 5건 찾아바꾸기 → md 반영, jargon 추가, 다음 회의 교정 풀 적용.
-- People 뷰에서 Craig 클릭 → 회의 타임라인.
-- Zoom 회의 중 LiveNote 미기동 시 60초 후 알림 1회.
+- 이름 오인식 5건 찾아바꾸기 → md 반영, jargon 추가, 다음 회의 교정 풀 적용 (수동 QA, Phase 4a 항목).
+- People 뷰에서 Craig 클릭 → 회의 타임라인 (수동 QA, 실제 회의 데이터 필요).
+- Zoom 회의 중 LiveNote 미기동 시 60초 후 알림 1회 (수동 QA, Phase 4a 항목).
+- 자동 검증: PeopleDirectoryTests 25개, MeetingExporterTests 33개, 전체 500개 통과, Release 빌드 성공.
 
 규모: 2.5일.
 
@@ -212,7 +215,7 @@ Phase 0 (기반·G 일부) ─┬─> Phase 1 (Recipes)
 | 1 | v1.5.0 | Recipes(내장 5 + Weekly Update 규칙) | 1.5일 | 금요일 주간보고 초안 |
 | 2 | v1.6.0 | Tasks 추출·화면, 사전 브리핑 (완료 2026-09-05) | 3일 | Craig 1:1 브리핑 |
 | 3 | v1.7.0 | Speaker Memory(오프라인 등록·매칭, 라이브 승격) (완료 2026-09-05) | 4일 | Teams/발표자 보기 자동 명명 |
-| 4 | v1.8.0 | 전사 편집·용어 학습, People 뷰, 리마인더, 내보내기 (4.1·4.3 완료 2026-09-05, 4.2·4.4 진행 예정) | 2.5일 | 오인식 정정 루프 |
+| 4 | v1.8.0 | 전사 편집·용어 학습, People 뷰, 리마인더, 내보내기 (완료 2026-09-05) | 2.5일 | 오인식 정정 루프 |
 
 총 13일 규모. Phase 1은 Phase 0 직후 가장 먼저 체감되는 항목이므로, Phase 0에서 ContextBuilder만 먼저 끝내면 Phase 1을 병행 착수할 수 있다.
 
@@ -271,3 +274,39 @@ Phase 3 (Speaker Memory, v1.7.0) 구현 및 안정화 완료.
 - 동일 회의 중 토글 껐다 켜기: Zoom 회의 중 알림이 이미 발송된 후 설정을 껐다 켜도 동일 회의 내에서 중복 알림이 발생하지 않는지 확인
 - 알림 권한 거부: 시스템 설정에서 알림 권한을 끈 경우 토글 아래에 "Notifications are off for LiveNote in System Settings > Notifications." 상태 메시지가 노출되는지 확인
 - 세션 교체 요약 저장 실패 에러 처리: 백그라운드 요약 생성 중 세션 교체로 읽기 전용 폴더에 저장 실패 시 "Minutes for the previous meeting could not be saved: <error>" 배너가 노출되는지 확인
+
+## Phase 4b 완료 (v1.8.0, 2026-09-05)
+
+codex critic 리뷰 5라운드에서 승인 완료 (2026-09-05). 단위 테스트 500개 전체 통과 및 Release 빌드 검증 완료. Phase 4.2(People 뷰) 및 4.4(내보내기)가 성공적으로 결합되어 Phase 4 (v1.8.0)의 전체 명세가 완성되었다.
+
+### 구현 요약
+- People 인덱싱 엔진(`PeopleDirectory`): 저장된 회의의 참석자와 화자명을 통합 분석하고, Union-Find 기반 신원 병합 및 표기 빈도 기반 대표명 선정.
+- 디스크 캐시 및 동시성 제어: `session.json` 수정 시각(mtime) 기반 캐시로 중복 디스크 I/O를 방지하고, 비동기 경량 백그라운드 디코딩과 병합(coalescing)으로 반응성 확보.
+- People 화면(`PeopleView`): Home 세그먼트 전환, 이메일 도메인 기반 회사 그룹화, 실시간 검색 필터, `TasksController` 연동 열린 태스크 배지 및 인물별 회의 타임라인 제공.
+- 공용 회의 카드 컴포넌트(`MeetingCardView`): HomeView 피드와 People 타임라인에서 공용 사용되는 회의 카드 추출 및 Finder 보기/삭제 컨텍스트 메뉴 일원화.
+- 순수 문서 내보내기 엔진(`MeetingExporter` & `MarkdownHTML`): 메타 정보, 참석자, 요약, 전사를 포괄하는 마크다운 생성 및 특수문자 이스케이프/중첩 목록을 지원하는 독립형 HTML 변환.
+- 공용 내보내기 메뉴(`ExportMenu`): 회의 상세 및 AI 채팅 말풍선에서 공용으로 사용하는 NSSavePanel 연동, 기본 폴더 및 경로 기억, 원자적 파일 쓰기, 1.5초 상태 피드백 및 오류 배너.
+- AI 대화·레시피 결과 연동: 말풍선 내 Copy/Export 미니 툴바를 배치하고 직전 유저 메시지 분석을 통한 레시피 제목 기반 파일명 자동 생성 지원.
+- 진단 로깅: `export.log` 카테고리를 통해 복사 및 내보내기 작업 크기, 포맷, 옵션, 에러 상황 기록.
+
+### Phase 4b 후속 항목 (codex follow-ups, 비차단)
+- (r5) 인라인 렌더러 선형 시간 테스트는 정상 종료 토큰만 측정한다. 닫히지 않은 `[` 반복 입력을 크기별로 측정하는 테스트를 추가하고, §5.20의 성능 서술은 재검색 제거 효과로 한정한다.
+- (r1) 스펙 §5.19 coalescing 테스트는 `async let` 선언 순서에 의존한다. reader 진입·해제 게이트로 마지막 요청 반영을 검증하도록 보강한다.
+- (lead-0, 설계) HTML 내보내기의 목록 중첩은 2칸 들여쓰기 단위로만 해석한다(SummaryRenderView 규칙과 동일). 들여쓰기 3칸 이상의 요약이 나오면 렌더링 규칙을 함께 조정한다.
+
+### Phase 4b 수동 QA 항목
+- Home 세그먼트 전환과 Coming up 카드 유지: Home 화면에서 "Meetings | People" 세그먼트 전환 시 상단 "Coming up" 카드가 안정적으로 유지되는지 확인
+- People 카드의 정보 일치: People 카드에 표시되는 참여 회의 수, 마지막 회의 상대 시점, 열린 태스크 배지 수가 Tasks 화면의 실제 데이터와 일치하는지 확인
+- 화자명 단독 회의 인물 표시: 캘린더 참석자 없이 전사 화자명만 존재하는 회의의 인물이 "Other" 그룹에 정상 노출되는지 확인
+- 표기 변형 병합: 동일 인물의 다양한 표기(대소문자 차이, " (Elastic)" 또는 " - Company" 접미사 등)가 단일 카드로 정상 병합되는지 확인
+- 검색 필터: 검색창에 이름, 별칭, 이메일 입력 시 대소문자 무관하게 실시간 필터링되는지 확인
+- 타임라인 및 컨텍스트 메뉴: 인물 카드 클릭 시 회의 타임라인이 열리고, 회의 열기 및 우클릭(Show in Finder, Delete) 컨텍스트 메뉴가 정상 동작하는지 확인
+- 회의 삭제 후 People 자동 갱신: 회의 삭제 시 People 디렉터리가 자동으로 재집계되어 회의 수 및 목록이 갱신되는지 확인
+- 손상된 session.json 폴더 내구성: 손상된 session.json 폴더가 존재할 때 검색창 하단에 경고 캡션이 표시되고 나머지 정상 인물 정보는 보존되는지 확인
+- Copy summary 클립보드와 Copied 표시: 회의 상세 툴바에서 "Copy summary" 클릭 시 클립보드에 요약이 복사되고 1.5초간 "Copied" 피드백이 표시되는지 확인
+- Export Markdown/HTML 저장 패널 기본 폴더(Downloads)와 마지막 폴더 기억: Export Markdown/HTML 실행 시 NSSavePanel이 열리고, 기본 Downloads 폴더에서 시작하여 저장 성공 후 마지막 폴더를 기억하는지 확인
+- Include transcript 토글 지속: Export 메뉴의 "Include transcript" 토글 상태가 UserDefaults를 통해 안정적으로 유지되는지 확인
+- HTML 브라우저 렌더링: 생성된 HTML 파일을 브라우저로 열었을 때 제목 색상, 중첩 불릿 목록, 링크, 특수문자 이스케이프가 깨짐 없이 렌더링되는지 확인
+- 읽기 전용 폴더 저장 실패 에러 배너: 읽기 전용 폴더로 저장 시 "Export failed: <reason>" 닫기 가능한 에러 배너가 정상 표시되는지 확인
+- 채팅 말풍선 Copy/Export와 레시피 제목 기반 파일명: 채팅 및 레시피 결과 말풍선에서 Copy 및 Export가 동작하고 레시피 제목 기반으로 파일명이 지정되는지 확인
+- export.log 기록: 작업 수행 시 `~/Documents/LiveNote/logs/export.log`에 올바른 카테고리와 형식으로 로그가 남는지 확인

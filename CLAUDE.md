@@ -1,19 +1,19 @@
 # LiveNote (livenote2) - Claude Code 작업 지침
 
-macOS 네이티브 회의 노트테이커 (SwiftUI, Apple Silicon). 봇 없이 마이크(나)+시스템 오디오(상대방) 2채널 캡처, 로컬 Parakeet STT, 실시간 한국어 번역, Zoom 화자 태그, 자동 회의록, 아카이브 채팅. Granola/Jamie 대체가 목표. 현재 v1.7.0 (Phase 3 Speaker Memory 완료, 2026-09-05).
+macOS 네이티브 회의 노트테이커 (SwiftUI, Apple Silicon). 봇 없이 마이크(나)+시스템 오디오(상대방) 2채널 캡처, 로컬 Parakeet STT, 실시간 한국어 번역, Zoom 화자 태그, 자동 회의록, 아카이브 채팅. Granola/Jamie 대체가 목표. 현재 v1.8.0 (Phase 4 전사 편집·People·리마인더·내보내기 완료, 2026-09-05).
 
 ## 먼저 읽을 문서
 - `livenote2-개발스펙.md`: 아키텍처·알고리즘·튜닝 상수·함정(§7). 기능 변경 시 해당 절을 갱신한다.
 - `docs/product-plan-v2-2026-09.md`: 다음 기능들의 제품 기획 (Recipes, 사전 브리핑, Speaker Memory, Tasks, 전사 편집, 소소한 개선).
-- `docs/implementation-plan-v2-2026-09.md`: 위 기획의 Phase별 구현 계획. **Phase 0·1·2·3 완료 (v1.7.0, 2026-09-05). 다음은 Phase 4.** 후속 항목은 implementation-plan의 "Phase 3 후속 항목" 절 참고.
+- `docs/implementation-plan-v2-2026-09.md`: 위 기획의 Phase별 구현 계획. **Phase 0·1·2·3·4 완료 (v1.8.0, 2026-09-05). 다음 기능은 product-plan의 보류 항목(라이브 경로 교체, 스마트 검색)에서 고른다.** 후속 항목은 implementation-plan의 "Phase 3 후속 항목", "Phase 4a 후속 항목", "Phase 4b 후속 항목" 절 참고.
 - `docs/feature-plan-jamie-granola-2026-09.md`: 경쟁 분석 배경.
 - `README.md`: 사용자 관점 기능 설명.
 
 ## 코드 구조 (livenote2/)
 - `AppState.swift`: 중앙 허브(@MainActor @Observable). 세션 수명, 행 생성, 화자 명명, 번역 파이프라인, 채팅, 2-pass, 설정. 1,300줄 이상이라 새 기능은 별도 파일로.
 - `ContentView.swift`: 전 화면(Home/Chat/Tasks/Live/Meeting/Settings) + Theme. 새 화면은 `Views/` 폴더에 분리해서 추가.
-- `Engine/`: TranscriptionEngine(라이브 STT, 에너지 세그멘테이션), TranscriptRefiner(2-pass), SessionAudioRecorder(세션 한정 WAV), EchoDedup, ZoomSpeakerTagger(AX), SpeakerDiarizer(LS-EEND), GeminiLiveTranslator, TranslationCoordinator, SummaryService(+GeminiSummarizer), ChatService(GeminiChat·LocalChatEngine, systemPrompt 덮어쓰기), ContextBuilder, RecipeRunner, Logging(AppLog, GeminiREST), ModelSeeder, GeminiKeychain(+KeychainAPI), GeminiKeyController, TaskExtractor, TasksController, BriefGenerator, BriefingController, OfflineDiarizer(+FluidOfflineEngine, TimeoutRace), LiveVoicePromoter, SpeakerMemory.
-- `Storage/`: MeetingStore(회의 폴더·md), ChatStore(promptText 포함), RecipeStore(레시피 JSON·내장 시딩), RecipeOutputStore(recipes-output md), TaskStore(회의 폴더 tasks.json 원본 + tasks/index.json 상태), BriefStore(briefs/<eventKey>.md), VoiceprintStore(voiceprints.json, isReadOnly 보호). `Calendar/`: CalendarMonitor(EventKit), MeetingAlertPanel, CountdownPanel. `Models/`: TranscriptModels(공용 타입·LanguagePrefs), RecipeScope, SpeakerMemoryModels. `Views/`: RecipesRow, RecipeRunSheet, RecipeEditorView, StartMenu, ModeBadge, TasksView, ActionItemsCard, BriefPanel, BriefSettingsRows, SpeakerChip, SpeakerNamePopover, SpeakersSettings, SpeakersSummaryLine. `Resources/Recipes/*.json`: 내장 레시피 6종(extract-tasks 포함)(동기화 그룹이 번들 루트로 평탄화해 복사, pbxproj 편집 불필요).
+- `Engine/`: TranscriptionEngine(라이브 STT, 에너지 세그멘테이션), TranscriptRefiner(2-pass), SessionAudioRecorder(세션 한정 WAV), EchoDedup, ZoomSpeakerTagger(AX), SpeakerDiarizer(LS-EEND), GeminiLiveTranslator, TranslationCoordinator, SummaryService(+GeminiSummarizer), ChatService(GeminiChat·LocalChatEngine, systemPrompt 덮어쓰기), ContextBuilder, RecipeRunner, Logging(AppLog, GeminiREST), ModelSeeder, GeminiKeychain(+KeychainAPI), GeminiKeyController, TaskExtractor, TasksController, BriefGenerator, BriefingController, OfflineDiarizer(+FluidOfflineEngine, TimeoutRace), LiveVoicePromoter, SpeakerMemory, PeopleDirectory, MeetingExporter.
+- `Storage/`: MeetingStore(회의 폴더·md), ChatStore(promptText 포함), RecipeStore(레시피 JSON·내장 시딩), RecipeOutputStore(recipes-output md), TaskStore(회의 폴더 tasks.json 원본 + tasks/index.json 상태), BriefStore(briefs/<eventKey>.md), VoiceprintStore(voiceprints.json, isReadOnly 보호). `Calendar/`: CalendarMonitor(EventKit), MeetingAlertPanel, CountdownPanel. `Models/`: TranscriptModels(공용 타입·LanguagePrefs), RecipeScope, SpeakerMemoryModels. `Views/`: RecipesRow, RecipeRunSheet, RecipeEditorView, StartMenu, ModeBadge, TasksView, ActionItemsCard, BriefPanel, BriefSettingsRows, SpeakerChip, SpeakerNamePopover, SpeakersSettings, SpeakersSummaryLine, PeopleView, MeetingCardView, ExportMenu, FindReplaceBar, JargonToast, ResummarizeBanner, TranscriptEditBadge. `Resources/Recipes/*.json`: 내장 레시피 6종(extract-tasks 포함)(동기화 그룹이 번들 루트로 평탄화해 복사, pbxproj 편집 불필요).
 - 의존성: FluidAudio 0.15.5 (Parakeet v2/v3, LS-EEND, 오프라인 DiarizerManager), mlx-swift-lm 3.31 (Qwen 로컬).
 
 ## 빌드·설치·배포
@@ -27,7 +27,7 @@ macOS 네이티브 회의 노트테이커 (SwiftUI, Apple Silicon). 봇 없이 �
 
 ## 데이터·로그
 - 회의: `~/Documents/LiveNote/<yyyy-MM-dd HHmm 제목>/` (session.json, en.md, ko.md, combined.md, summary.md). 오디오는 저장하지 않는다(2-pass 후 임시 WAV 삭제).
-- 채팅: `~/Documents/LiveNote/chats/*.json`. 레시피: `~/Documents/LiveNote/recipes/*.json`, 산출물 `~/Documents/LiveNote/recipes-output/`. 태스크: 회의 폴더 `tasks.json`(추출 원본) + `~/Documents/LiveNote/tasks/index.json`(상태 포함 권위 데이터). 브리핑: `~/Documents/LiveNote/briefs/<eventKey>.md`, 회의 저장 시 폴더에 `brief.md` 복사. 성문: `~/Documents/LiveNote/voiceprints.json` (오디오는 저장하지 않음; 손상 시 .corrupt-<ts>로 이동). 로그: `~/Documents/LiveNote/logs/{app,cloud,chat,summary,zoomtag,recipe,tasks,brief,voice,reminder}.log` (내용은 기록하지 않음, 상태·크기·오류만).
+- 채팅: `~/Documents/LiveNote/chats/*.json`. 레시피: `~/Documents/LiveNote/recipes/*.json`, 산출물 `~/Documents/LiveNote/recipes-output/`. 태스크: 회의 폴더 `tasks.json`(추출 원본) + `~/Documents/LiveNote/tasks/index.json`(상태 포함 권위 데이터). 브리핑: `~/Documents/LiveNote/briefs/<eventKey>.md`, 회의 저장 시 폴더에 `brief.md` 복사. 성문: `~/Documents/LiveNote/voiceprints.json` (오디오는 저장하지 않음; 손상 시 .corrupt-<ts>로 이동). 로그: `~/Documents/LiveNote/logs/{app,cloud,chat,summary,zoomtag,recipe,tasks,brief,voice,reminder,export}.log` (내용은 기록하지 않음, 상태·크기·오류만).
 - Gemini API 키: 키체인 `com.byungjoo.livenote2.gemini`.
 - `~/Documents/LiveNote-v1-archive`는 폐기된 v1 파이썬 프로젝트. 건드리지 말 것.
 
