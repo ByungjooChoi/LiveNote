@@ -162,3 +162,7 @@ Swift/SwiftUI · [FluidAudio](https://github.com/FluidInference/FluidAudio) (Par
 - [`AirTranslate-비교분석-리포트.md`](AirTranslate-비교분석-리포트.md), [`참조프로젝트-7종-분석리포트.md`](참조프로젝트-7종-분석리포트.md): 생태계 분석
 
 전신 LiveNote v1(Python + Gemini S2ST)은 `legacy-livenote1` 브랜치에 있습니다. 개인 프로젝트이며 AI 페어(Claude)와 함께 개발했습니다.
+
+## License
+
+LiveNote is not open source. It is licensed under the PolyForm Internal Use License 1.0.0 with additional permissions for Elastic N.V. personnel (internal sharing and personal use). See [LICENSE](LICENSE) and [NOTICE](NOTICE). Redistribution outside Elastic is not permitted.

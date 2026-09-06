@@ -1,0 +1,30 @@
+LiveNote
+Copyright (c) 2026 Byungjoo Choi
+
+This product bundles the following third-party Swift packages. Each is
+used under its own license; the full license texts are available in the
+linked repositories.
+
+Apache License 2.0
+  FluidAudio            https://github.com/FluidInference/FluidAudio
+  swift-argument-parser https://github.com/apple/swift-argument-parser
+  swift-asn1            https://github.com/apple/swift-asn1
+  swift-atomics         https://github.com/apple/swift-atomics
+  swift-collections     https://github.com/apple/swift-collections
+  swift-crypto          https://github.com/apple/swift-crypto
+  swift-nio             https://github.com/apple/swift-nio
+  swift-numerics        https://github.com/apple/swift-numerics
+  swift-system          https://github.com/apple/swift-system
+  swift-syntax          https://github.com/swiftlang/swift-syntax
+  swift-huggingface     https://github.com/huggingface/swift-huggingface
+  swift-jinja           https://github.com/huggingface/swift-jinja
+  swift-transformers    https://github.com/huggingface/swift-transformers
+
+MIT License
+  EventSource           https://github.com/mattt/EventSource
+  mlx-swift             https://github.com/ml-explore/mlx-swift
+  mlx-swift-lm          https://github.com/ml-explore/mlx-swift-lm
+  yyjson                https://github.com/ibireme/yyjson
+
+Speech and diarization models downloaded at runtime (Parakeet, LS-EEND,
+Qwen) are subject to their respective model licenses.
