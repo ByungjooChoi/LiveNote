@@ -73,6 +73,22 @@ struct TranscriptEditLog: Codable, Equatable, Sendable {
         editCount + revisionOffset
     }
 
+    /// 새 편집 배치를 추가했을 때 예상되는 revision 번호를 계산하고, 오버플로우 발생 시 오류를 던진다.
+    func revisionAfterAppending(weight: Int) throws -> Int {
+        guard weight >= 0 else {
+            throw MeetingStoreError.editLogCorrupt("negative batch weight")
+        }
+        let current = editCount.addingReportingOverflow(revisionOffset)
+        guard !current.overflow else {
+            throw MeetingStoreError.editLogCorrupt("revision counter overflow")
+        }
+        let result = current.partialValue.addingReportingOverflow(weight)
+        guard !result.overflow else {
+            throw MeetingStoreError.editLogCorrupt("revision counter overflow")
+        }
+        return result.partialValue
+    }
+
     var editedRowIDs: Set<UUID> {
         Set(batches.flatMap { $0.rowEdits.map(\.rowID) })
     }
@@ -112,10 +128,20 @@ struct TranscriptEditLog: Codable, Equatable, Sendable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
-        self.editsAtLastSummary = try container.decodeIfPresent(Int.self, forKey: .editsAtLastSummary) ?? 0
-        self.batches = try container.decodeIfPresent([TranscriptEditBatch].self, forKey: .batches) ?? []
+        self.version = try container.decode(Int.self, forKey: .version)
+        self.editsAtLastSummary = try container.decode(Int.self, forKey: .editsAtLastSummary)
+        self.batches = try container.decode([TranscriptEditBatch].self, forKey: .batches)
         self.revisionOffset = try container.decodeIfPresent(Int.self, forKey: .revisionOffset) ?? 0
+
+        guard revisionOffset >= 0,
+              editsAtLastSummary >= 0,
+              !editCount.addingReportingOverflow(revisionOffset).overflow else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .revisionOffset,
+                in: container,
+                debugDescription: "revisionOffset out of range"
+            )
+        }
     }
 
     func encode(to encoder: Encoder) throws {

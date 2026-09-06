@@ -1074,18 +1074,14 @@ final class TaskStoreTests: XCTestCase {
             completedAt: nil
         )
 
-        let outcome = try storeWithFailingCleanup.appendImported([taskToImport])
-        XCTAssertEqual(outcome.saved.count, 0)
-        XCTAssertEqual(outcome.failures.count, 1)
-
-        let failure = try XCTUnwrap(outcome.failures.first)
-        XCTAssertEqual(failure.meetingURL, meetingFolder)
-        guard case let TaskStoreError.commitFailed(move, rollback) = failure.error else {
-            XCTFail("Expected TaskStoreError.commitFailed, got \(failure.error)")
-            return
+        XCTAssertThrowsError(try storeWithFailingCleanup.appendImported([taskToImport])) { error in
+            guard case let TaskStoreError.commitFailed(move, rollback) = error else {
+                XCTFail("Expected TaskStoreError.commitFailed, got \(error)")
+                return
+            }
+            XCTAssertNotNil(move, "Move error should be captured")
+            XCTAssertNotNil(rollback, "Rollback cleanup error should be captured")
+            XCTAssertEqual(rollback?.localizedDescription, mockCleanupError.localizedDescription)
         }
-        XCTAssertNotNil(move, "Move error should be captured")
-        XCTAssertNotNil(rollback, "Rollback cleanup error should be captured")
-        XCTAssertEqual(rollback?.localizedDescription, mockCleanupError.localizedDescription)
     }
 }

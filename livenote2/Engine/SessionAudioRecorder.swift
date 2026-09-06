@@ -1,11 +1,14 @@
 import Foundation
 
-/// 세션 한정 오디오 보관 — 2-pass 재디코딩용.
+/// 세션 한정 오디오 보관 - 2-pass 재디코딩용.
 ///
 /// 회의 중 16kHz mono 샘플을 채널별 WAV(16-bit PCM)로 임시 폴더에 흘려 두었다가,
 /// stop 시점의 전체 문맥 재디코딩(TranscriptRefiner)에 쓰고 즉시 삭제한다.
 /// 오디오는 회의 저장 폴더에 절대 남지 않는다 (전사 후 폐기 정책, Granola와 동일).
 /// 용량: 시간당 채널별 약 115MB.
+///
+/// 단일 세션 전용 인스턴스 (one recorder per session).
+/// deleteFiles 호출 후 해당 인스턴스는 비활성(inert) 상태가 된다.
 actor SessionAudioRecorder {
 
     private final class ActiveFolderRegistry: @unchecked Sendable {
@@ -39,10 +42,14 @@ actor SessionAudioRecorder {
 
     private static let activeFolders = ActiveFolderRegistry()
 
+    nonisolated(unsafe) static var onCancellationExitForTesting: (@Sendable () async -> Void)?
+    nonisolated(unsafe) static var onPurgeBatchDrainedForTesting: (@Sendable (Set<URL>) async -> Void)?
+
     private final class PurgeRetryCoordinator: @unchecked Sendable {
         private let lock = NSLock()
         private var pendingTask: Task<Void, Never>?
         private var roots = Set<URL>()
+        private var generation: Int = 0
 
         var isPending: Bool {
             lock.lock()
@@ -58,19 +65,25 @@ actor SessionAudioRecorder {
                 return false
             }
 
+            generation += 1
+            let taskGen = generation
+
             let task = Task { [weak self] in
                 if seconds > 0 {
                     try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
                 }
                 guard !Task.isCancelled else {
-                    self?.clearSlot()
+                    await SessionAudioRecorder.onCancellationExitForTesting?()
+                    self?.clearSlot(generation: taskGen)
                     return
                 }
-                let targetRoots = self?.drainRoots() ?? []
-                for r in targetRoots {
-                    SessionAudioRecorder.purgeStale(in: r)
+
+                while let targetRoots = self?.drainRootsOrClearSlot(generation: taskGen) {
+                    await SessionAudioRecorder.onPurgeBatchDrainedForTesting?(targetRoots)
+                    for r in targetRoots {
+                        SessionAudioRecorder.purgeStale(in: r)
+                    }
                 }
-                self?.clearSlot()
             }
             pendingTask = task
             lock.unlock()
@@ -79,22 +92,36 @@ actor SessionAudioRecorder {
 
         func cancel() {
             lock.lock()
-            pendingTask?.cancel()
+            generation += 1
+            let oldTask = pendingTask
             pendingTask = nil
             roots.removeAll()
             lock.unlock()
+            oldTask?.cancel()
         }
 
-        private func clearSlot() {
-            lock.lock()
-            pendingTask = nil
-            roots.removeAll()
-            lock.unlock()
-        }
-
-        private func drainRoots() -> Set<URL> {
+        private func clearSlot(generation: Int) {
             lock.lock()
             defer { lock.unlock() }
+            guard generation == self.generation else { return }
+            pendingTask = nil
+            roots.removeAll()
+        }
+
+        private func drainRootsOrClearSlot(generation: Int) -> Set<URL>? {
+            lock.lock()
+            defer { lock.unlock() }
+            guard generation == self.generation, !Task.isCancelled else {
+                if generation == self.generation {
+                    pendingTask = nil
+                    roots.removeAll()
+                }
+                return nil
+            }
+            if roots.isEmpty {
+                pendingTask = nil
+                return nil
+            }
             let current = roots
             roots.removeAll()
             return current
@@ -125,6 +152,7 @@ actor SessionAudioRecorder {
     private let remover: (@Sendable (URL) throws -> Void)?
     private let folder: URL
     private var isDeleting = false
+    private var hasDeleted = false
 
     init(
         rootDirectory: URL = FileManager.default.temporaryDirectory,
@@ -156,6 +184,12 @@ actor SessionAudioRecorder {
 
     /// 채널별 WAV 파일 생성 (헤더는 finish에서 확정)
     func start() {
+        if hasDeleted || isDeleting {
+            AppLog.write("app", "삭제된 세션 레코더 재시작 무시")
+            return
+        }
+        // Register folder name in activeFolders BEFORE creating directory on disk
+        // to ensure concurrent purgeStale checks activeFolders live and does not delete it.
         Self.activeFolders.register(folder.lastPathComponent)
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -205,14 +239,31 @@ actor SessionAudioRecorder {
         return result
     }
 
+    private func isNotFoundError(_ error: any Error) -> Bool {
+        if let cocoaErr = error as? CocoaError {
+            if cocoaErr.code == .fileNoSuchFile || cocoaErr.code == .fileReadNoSuchFile {
+                return true
+            }
+        }
+        let nsError = error as NSError
+        if (nsError.domain == NSCocoaErrorDomain && (nsError.code == NSFileNoSuchFileError || nsError.code == NSFileReadNoSuchFileError)) ||
+           (nsError.domain == NSPOSIXErrorDomain && nsError.code == Int(ENOENT)) {
+            return true
+        }
+        return false
+    }
+
     /// 임시 오디오 완전 삭제 (재디코딩 후 반드시 호출)
     func deleteFiles(retryDelays: [TimeInterval] = [0.5, 2, 5], purgeRetryDelay: TimeInterval = 60) async {
-        guard !isDeleting else {
+        guard !isDeleting, !hasDeleted else {
             AppLog.write("app", "삭제 진행 중, 중복 호출 무시")
             return
         }
         isDeleting = true
-        defer { isDeleting = false }
+        defer {
+            isDeleting = false
+            hasDeleted = true
+        }
 
         for handle in handles.values { try? handle.close() }
         handles = [:]
@@ -224,19 +275,20 @@ actor SessionAudioRecorder {
         while attempt < totalAttempts {
             attempt += 1
 
-            // a folder that no longer exists counts as success
-            if !FileManager.default.fileExists(atPath: folder.path) {
-                AppLog.write("app", "세션 오디오 임시 파일 삭제")
-                Self.activeFolders.unregister(folder.lastPathComponent)
-                return
-            }
-
             do {
                 try removeItem(at: folder)
+                hasDeleted = true
                 AppLog.write("app", "세션 오디오 임시 파일 삭제")
                 Self.activeFolders.unregister(folder.lastPathComponent)
                 return
             } catch {
+                if isNotFoundError(error) {
+                    hasDeleted = true
+                    AppLog.write("app", "세션 오디오 임시 파일 삭제")
+                    Self.activeFolders.unregister(folder.lastPathComponent)
+                    return
+                }
+
                 lastErrorDescription = error.localizedDescription
                 if attempt < totalAttempts {
                     let delay = retryDelays[attempt - 1]
@@ -256,17 +308,25 @@ actor SessionAudioRecorder {
         _ = Self.schedulePurgeRetry(after: purgeRetryDelay, in: rootDirectory)
     }
 
+    nonisolated(unsafe) static var beforeEnumerationForTesting: (() -> Void)? = nil
+
     /// 이전 세션이 비정상 종료로 남긴 임시 폴더 청소 (앱 시작 시 호출)
     nonisolated static func purgeStale(
         in tmp: URL = FileManager.default.temporaryDirectory,
         excluding active: Set<String>? = nil
     ) {
-        let activeSet = active ?? activeFolders.snapshot()
+        beforeEnumerationForTesting?()
         let items = (try? FileManager.default.contentsOfDirectory(
             at: tmp, includingPropertiesForKeys: nil)) ?? []
         var skippedCount = 0
         for item in items where item.lastPathComponent.hasPrefix("livenote2-session-") {
-            if activeSet.contains(item.lastPathComponent) {
+            let isExcluded: Bool
+            if let active = active {
+                isExcluded = active.contains(item.lastPathComponent)
+            } else {
+                isExcluded = activeFolders.contains(item.lastPathComponent)
+            }
+            if isExcluded {
                 skippedCount += 1
                 continue
             }
@@ -284,6 +344,14 @@ actor SessionAudioRecorder {
 
     nonisolated static func isActiveFolder(_ url: URL) -> Bool {
         activeFolders.contains(url.lastPathComponent)
+    }
+
+    nonisolated static func registerActiveFolderForTesting(_ name: String) {
+        activeFolders.register(name)
+    }
+
+    nonisolated static func unregisterActiveFolderForTesting(_ name: String) {
+        activeFolders.unregister(name)
     }
 
     // MARK: - WAV 헤더 (16kHz mono 16-bit PCM)

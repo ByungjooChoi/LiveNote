@@ -713,4 +713,13 @@ final class MeetingExporterTests: XCTestCase {
     func testScalingRepeatedDoubleAsterisk() {
         assertScalingLinear(patternName: "** repeated") { String(repeating: "**", count: $0) }
     }
+
+    // MARK: - Fix Round 1 Tests (F1-3)
+
+    func testLinkRequiresAtLeastOneCharAfterScheme() {
+        XCTAssertEqual(MarkdownHTML.inline("[a](http://)"), "[a](http://)")
+        XCTAssertEqual(MarkdownHTML.inline("[a](https://)"), "[a](https://)")
+        XCTAssertEqual(MarkdownHTML.inline("[a](http://x)"), #"<a href="http://x">a</a>"#)
+        XCTAssertEqual(MarkdownHTML.inline("[a](https://x)"), #"<a href="https://x">a</a>"#)
+    }
 }

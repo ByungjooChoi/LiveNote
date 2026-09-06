@@ -1,11 +1,11 @@
 # LiveNote (livenote2) - Claude Code 작업 지침
 
-macOS 네이티브 회의 노트테이커 (SwiftUI, Apple Silicon). 봇 없이 마이크(나)+시스템 오디오(상대방) 2채널 캡처, 로컬 Parakeet STT, 실시간 한국어 번역, Zoom 화자 태그, 자동 회의록, 아카이브 채팅. Granola/Jamie 대체가 목표. 현재 v1.8.0 (Phase 4 전사 편집·People·리마인더·내보내기 완료, 2026-09-05).
+macOS 네이티브 회의 노트테이커 (SwiftUI, Apple Silicon). 봇 없이 마이크(나)+시스템 오디오(상대방) 2채널 캡처, 로컬 Parakeet STT, 실시간 한국어 번역, Zoom 화자 태그, 자동 회의록, 아카이브 채팅. Granola/Jamie 대체가 목표. 현재 v1.8.1 (Phase 4 완료 후 codex follow-up 11건 정리, 2026-09-06).
 
 ## 먼저 읽을 문서
 - `livenote2-개발스펙.md`: 아키텍처·알고리즘·튜닝 상수·함정(§7). 기능 변경 시 해당 절을 갱신한다.
 - `docs/product-plan-v2-2026-09.md`: 다음 기능들의 제품 기획 (Recipes, 사전 브리핑, Speaker Memory, Tasks, 전사 편집, 소소한 개선).
-- `docs/implementation-plan-v2-2026-09.md`: 위 기획의 Phase별 구현 계획. **Phase 0·1·2·3·4 완료 (v1.8.0, 2026-09-05). 다음 기능은 product-plan의 보류 항목(라이브 경로 교체, 스마트 검색)에서 고른다.** 후속 항목은 implementation-plan의 "Phase 3 후속 항목", "Phase 4a 후속 항목", "Phase 4b 후속 항목" 절 참고.
+- `docs/implementation-plan-v2-2026-09.md`: 위 기획의 Phase별 구현 계획. **Phase 0·1·2·3·4 완료 (v1.8.0), 후속 항목 정리 v1.8.1 (2026-09-06). 다음 기능은 product-plan의 보류 항목(라이브 경로 교체, 스마트 검색)에서 고른다.** 남은 후속 항목은 implementation-plan의 "v1.8.1 후속 항목" 절과 각 Phase 후속 절의 미해결 표시 항목 참고.
 - `docs/feature-plan-jamie-granola-2026-09.md`: 경쟁 분석 배경.
 - `README.md`: 사용자 관점 기능 설명.
 

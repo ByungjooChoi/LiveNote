@@ -225,10 +225,10 @@ Phase 0 (기반·G 일부) ─┬─> Phase 1 (Recipes)
 - Scratchpad·템플릿(E): 제외 결정.
 
 ## Phase 2 후속 항목 (codex 리뷰 7라운드 후 보류, 2026-09-05)
-- TaskStore 2파일 커밋(회의 `tasks.json` → `tasks/index.json`)의 크래시 내구성: 두 쓰기 사이에 강제 종료되면 세대 불일치가 남는다. 저널/커밋 마커와 시작 시 복구가 필요하면 Phase 4 저장소 정리 때 함께 다룬다. 현재는 `.prev` 백업과 `commitFailed` 오류 표면화까지만 구현.
-- 브리핑 세션 귀속: `start()`가 `calendar.ongoingUpcomingItem()` 휴리스틱으로 이벤트를 고른다(Phase 0의 제목·참석자 캡처와 동일 방식). Coming up의 Start now와 캘린더 자동 시작이 정확한 `eventKey`를 넘기도록 바꾸면 겹친 일정·수동 시작의 오귀속이 사라진다.
-- `scheduleMorningBatch` 재호출 시 wake observer가 첫 provider를 유지한다(현재 init에서 1회만 호출하므로 영향 없음). provider를 저장 프로퍼티로 바꾸고 startup task에 취소 확인을 넣을 것.
-- 아침 배치의 LLM 호출 상한(일일 N건, 초과분은 10분 전 트리거·수동 새로고침으로): 공유 캘린더 사용자 대비.
+- (v1.8.1 해결) TaskStore 2파일 커밋(회의 `tasks.json` → `tasks/index.json`)의 크래시 내구성: 두 쓰기 사이에 강제 종료되면 세대 불일치가 남는다. 저널/커밋 마커와 시작 시 복구가 필요하면 Phase 4 저장소 정리 때 함께 다룬다. 현재는 `.prev` 백업과 `commitFailed` 오류 표면화까지만 구현.
+- (v1.8.1 해결) 브리핑 세션 귀속: `start()`가 `calendar.ongoingUpcomingItem()` 휴리스틱으로 이벤트를 고른다(Phase 0의 제목·참석자 캡처와 동일 방식). Coming up의 Start now와 캘린더 자동 시작이 정확한 `eventKey`를 넘기도록 바꾸면 겹친 일정·수동 시작의 오귀속이 사라진다.
+- (v1.8.1 해결) `scheduleMorningBatch` 재호출 시 wake observer가 첫 provider를 유지한다(현재 init에서 1회만 호출하므로 영향 없음). provider를 저장 프로퍼티로 바꾸고 startup task에 취소 확인을 넣을 것.
+- (v1.8.1 해결) 아침 배치의 LLM 호출 상한(일일 N건, 초과분은 10분 전 트리거·수동 새로고침으로): 공유 캘린더 사용자 대비.
 
 ## Phase 3 완료 (v1.7.0, 2026-09-05)
 
@@ -245,10 +245,10 @@ Phase 3 (Speaker Memory, v1.7.0) 구현 및 안정화 완료.
 - 비동기 2-pass 수명주기: 세션 스냅샷 분리, 120초 대기 경주(TimeoutRace), 디스크 수동 편집본과 다이어라이제이션 결과 병합, 세션 WAV 폴더 리스(ActiveFolderRegistry) 및 30분 보존 마커, 저장 실패 시 재시도(pendingDiarizationResults)
 
 ### Phase 3 후속 항목 (codex follow-ups, 비차단)
-- (r13) TwoPassJob.makeEmbeddingEngine 실제 배선을 구동하는 통합 테스트 보강 (현재 결함 증거 없음).
-- (r12) SessionAudioRecorder.deleteFiles() 실패 시 단순 로깅 외 재시도 또는 다음 purge 예약 추가로 민감한 임시 WAV 잔류 방지 (현재 다음 앱/세션 시작 시 purge로 완화).
+- (r13) TwoPassJob.makeEmbeddingEngine 실제 배선을 구동하는 통합 테스트 보강 (현재 결함 증거 없음). v1.8.1 리드 결정: 배선이 AppState 내부라 테스트에서 AppState를 만들어야 하므로 자동화 제외, 수동 QA로 유지.
+- (r12, v1.8.1 해결) SessionAudioRecorder.deleteFiles() 실패 시 단순 로깅 외 재시도 또는 다음 purge 예약 추가로 민감한 임시 WAV 잔류 방지 (현재 다음 앱/세션 시작 시 purge로 완화).
 - (r12) 실제 하드웨어에서 3개의 FluidOfflineEngine 인스턴스에 대한 메모리 및 모델 초기화 비용 측정 (수동 QA).
-- (r11) WAVStreamReader가 선언된 데이터 청크보다 짧은 파일을 정상 EOF로 처리하는 동작을, 외부 WAV 입력 허용 시 명시적 오류로 전환 (현재 자체 생성 세션 WAV에서는 허용).
+- (r11, v1.8.1 해결) WAVStreamReader가 선언된 데이터 청크보다 짧은 파일을 정상 EOF로 처리하는 동작을, 외부 WAV 입력 허용 시 명시적 오류로 전환 (현재 자체 생성 세션 WAV에서는 허용).
 
 ### 수동 QA 항목
 - Zoom 회의 A에서 화자 성문 등록 후, 태그가 없는 회의 B에서 성문으로 자동 명명되는지 확인 (`voice` 로그 d1/d2 마진 확인)
@@ -258,8 +258,8 @@ Phase 3 (Speaker Memory, v1.7.0) 구현 및 안정화 완료.
 - 3개의 FluidOfflineEngine 인스턴스(오프라인 다이어라이저, 라이브 임베딩 추출기, Me 등록 임시 추출기)의 메모리 점유 및 초기화 비용 확인
 
 ## Phase 4a 후속 항목 (codex follow-ups, 비차단)
-- (r1) 최초 리마인더 알림까지 약 120초 소요 (60초 첫 틱 + 2회 연속 히트): 시작 시 즉시 첫 프로브 실행 검토.
-- (r1) 요약 생성 전에 수행된 편집을 되돌릴 경우 editCount가 editsAtLastSummary 아래로 감소하여, 이후 수정된 요약에 대해 배너가 트리거되지 않을 수 있음.
+- (r1, v1.8.1 해결) 최초 리마인더 알림까지 약 120초 소요 (60초 첫 틱 + 2회 연속 히트): 시작 시 즉시 첫 프로브 실행 검토.
+- (r1, v1.8.1 해결) 요약 생성 전에 수행된 편집을 되돌릴 경우 editCount가 editsAtLastSummary 아래로 감소하여, 이후 수정된 요약에 대해 배너가 트리거되지 않을 수 있음.
 - (r1, disputed) 1글자 교체어는 전문용어로 제안하지 않음 (리드 결정: 교정 풀 노이즈 방지).
 
 ### Phase 4a 수동 QA 항목
@@ -267,7 +267,7 @@ Phase 3 (Speaker Memory, v1.7.0) 구현 및 안정화 완료.
 - 화자 팝오버 열림 중 더블클릭 편집: 화자 이름 변경 팝오버(`SpeakerNamePopover`)가 열린 상태에서 인라인 편집 상호작용이 독립적으로 안전하게 동작하는지 확인
 - 요약 재생성 후 되돌리기: 요약을 변경한 배치를 Undo할 때 전사 행과 요약 마크다운이 함께 복원되거나, 요약이 이미 재생성된 경우 충돌 오류가 정상 표시되는지 확인
 - 전문용어 토스트 12초 타이머: 제안 토스트가 12초 후 자동 닫히거나 다른 화면 이동 시 취소되는지 확인
-- 유휴 회의 리마인더 알림: LiveNote가 멈춘 상태에서 Zoom 마이크 활성화 시 약 60~120초 후 시스템 배너 알림("Meeting in progress? Zoom is using the microphone but LiveNote is not recording.")이 1회 발송되는지 확인
+- 유휴 회의 리마인더 알림: LiveNote가 멈춘 상태에서 Zoom 마이크 활성화 시 약 60초 후(v1.8.1부터 시작 즉시 첫 프로브) 시스템 배너 알림("Meeting in progress? Zoom is using the microphone but LiveNote is not recording.")이 1회 발송되는지 확인
 - "Start LiveNote" 액션: 알림의 "Start LiveNote" 버튼 또는 배너 클릭 시 LiveNote 창이 활성화되고 녹음 세션이 즉시 시작되는지 확인
 - 알림 억제 및 리셋: Zoom 회의가 지속되는 동안 중복 알림이 발생하지 않으며, Zoom 종료 후 재참가 시 2틱 후 다시 알림이 오는지 확인
 - 설정 토글 동작: Settings > Meetings에서 녹음 리마인더 토글을 끄면 타이머가 중지되고 알림이 발생하지 않는지 확인
@@ -290,8 +290,8 @@ codex critic 리뷰 5라운드에서 승인 완료 (2026-09-05). 단위 테스�
 - 진단 로깅: `export.log` 카테고리를 통해 복사 및 내보내기 작업 크기, 포맷, 옵션, 에러 상황 기록.
 
 ### Phase 4b 후속 항목 (codex follow-ups, 비차단)
-- (r5) 인라인 렌더러 선형 시간 테스트는 정상 종료 토큰만 측정한다. 닫히지 않은 `[` 반복 입력을 크기별로 측정하는 테스트를 추가하고, §5.20의 성능 서술은 재검색 제거 효과로 한정한다.
-- (r1) 스펙 §5.19 coalescing 테스트는 `async let` 선언 순서에 의존한다. reader 진입·해제 게이트로 마지막 요청 반영을 검증하도록 보강한다.
+- (r5, v1.8.1 해결) 인라인 렌더러 선형 시간 테스트는 정상 종료 토큰만 측정한다. 닫히지 않은 `[` 반복 입력을 크기별로 측정하는 테스트를 추가하고, §5.20의 성능 서술은 재검색 제거 효과로 한정한다.
+- (r1, v1.8.1 해결) 스펙 §5.19 coalescing 테스트는 `async let` 선언 순서에 의존한다. reader 진입·해제 게이트로 마지막 요청 반영을 검증하도록 보강한다.
 - (lead-0, 설계) HTML 내보내기의 목록 중첩은 2칸 들여쓰기 단위로만 해석한다(SummaryRenderView 규칙과 동일). 들여쓰기 3칸 이상의 요약이 나오면 렌더링 규칙을 함께 조정한다.
 
 ### Phase 4b 수동 QA 항목
@@ -310,3 +310,30 @@ codex critic 리뷰 5라운드에서 승인 완료 (2026-09-05). 단위 테스�
 - 읽기 전용 폴더 저장 실패 에러 배너: 읽기 전용 폴더로 저장 시 "Export failed: <reason>" 닫기 가능한 에러 배너가 정상 표시되는지 확인
 - 채팅 말풍선 Copy/Export와 레시피 제목 기반 파일명: 채팅 및 레시피 결과 말풍선에서 Copy 및 Export가 동작하고 레시피 제목 기반으로 파일명이 지정되는지 확인
 - export.log 기록: 작업 수행 시 `~/Documents/LiveNote/logs/export.log`에 올바른 카테고리와 형식으로 로그가 남는지 확인
+
+## v1.8.1 후속 정리 (codex follow-ups 일괄 해결, 2026-09-05)
+
+위 네 절의 codex follow-up 중 수동 QA·disputed·리드 결정 항목을 제외한 11건을 gemini 2레인 + codex 리뷰로 해결했다. 리뷰: 브리프 설계 선검토(라운드 0, 실험 A) 1회 + 코드 리뷰는 레인별 병렬로 진행해 UI 레인 3라운드, 저장소 레인 5라운드(리드 미니라운드 1b·2b 포함) 후 승인. 테스트 595개 전체 통과, Release 빌드 확인, 전체 테스트 중 실제 `~/Documents/LiveNote/logs` mtime 불변 확인.
+
+### 구현 요약
+- TaskStore: `tasks/commit-journal.json`(token, 이전/신규 index SHA-256, 회의별 hadPrevious)로 2파일 커밋을 저널링. `.prev`는 `.prev.tmp` 원자 게시, 커밋 확정점은 index 쓰기 반환. 시작 시 `recoverInterruptedCommit()`이 digest 비교로 roll-forward / roll-back, 손상 저널은 격리, 미해결 저널이 있으면 `recoveryPending`으로 새 커밋 차단.
+- SessionAudioRecorder: `deleteFiles(retryDelays:purgeRetryDelay:)` 백오프 재시도, 최종 실패 시 폴더 등록 해제 후 단일 지연 purge 재시도 예약(`schedulePurgeRetry`/`cancelPurgeRetry`).
+- WAVStreamReader: `TruncationPolicy` (.reject 기본, 세션 WAV는 .tolerate + 로그), `WAVStreamError.truncatedData`.
+- BriefingController: itemsProvider 저장 프로퍼티(재스케줄 시 최신 provider), 시작 태스크 취소 확인, `dailyBatchLimit`(기본 10, `briefsDailyBatchLimit`)로 아침 배치 LLM 호출 상한, 초과분은 캐시만 확인하고 `.deferred`로 보류.
+- 세션 귀속: `start(mode:calendarItem:)`, Home Start now / 알림 "Start LiveNote only" / 캘린더 자동 시작이 정확한 `UpcomingMeetingItem`을 넘김(`resolveSessionItem`, `sessionContext(from:)`), `brief.log`에 `세션 귀속 source=` 기록.
+- 리마인더: `start()`가 즉시 첫 프로브 실행(첫 알림 약 60초).
+- 편집 로그: `revisionOffset`으로 undo가 revision을 정확히 1 올려 `pendingEditsSinceSummary`가 undo로 줄지 않음.
+- MarkdownHTML.inline: 정규식 대안 패스를 UTF-16 단일 전진 스캐너(모노톤 메모)로 교체, 닫히지 않은 `[`·백틱·`**` 반복 입력도 선형.
+- 테스트: PeopleDirectory coalescing을 async 게이트로 검증, `TestLogSandbox`로 전체 테스트가 실제 `~/Documents/LiveNote/logs`에 쓰지 않음(리드가 mtime으로 확인).
+
+### 수동 QA 항목 (세션 귀속, 겹치는 일정 A·B로 확인)
+- Home "Start now"로 B 시작 → brief.log `세션 귀속 source=explicit key=<B>`, 제목·참석자가 B.
+- 알림 "Start LiveNote only"로 B 시작 → B.
+- 캘린더 시각 자동 시작(카운트다운 경유)으로 B 시작 → B.
+- 카운트다운 취소 후 수동 시작 → `source=heuristic`.
+- 회의 앱 실행 자동 시작 → `source=heuristic`.
+- 리마인더 첫 알림이 약 60초에 오는지, 설정 껐다 켜도 같은 회의에서 중복 알림이 없는지.
+- 회의 상세에서 편집 → 요약 재생성 → undo 후 4회 편집 시 재요약 배너가 뜨는지.
+
+### v1.8.1 후속 항목 (codex follow-ups, 비차단)
+- (r4) SessionAudioRecorder의 WAV 바이트 카운터(`dataBytes`, UInt32)는 16kHz 16bit mono 기준 약 37시간에서 넘친다. `append()`에서 `UInt32.max - 36` 한도를 검사하고 초과 시 오류 로그 후 해당 채널 기록을 종료하도록 보강한다.

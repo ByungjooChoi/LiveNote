@@ -1085,4 +1085,217 @@ final class MeetingStoreEditTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: editsFile.path))
         XCTAssertEqual(store.editLog(at: url).editCount, 0)
     }
+
+    // MARK: - Fix Round 1 Tests (F1-1 & F1-2)
+
+    func testEditsJsonWithOverflowRevisionOffsetProducesRecoveryWarningAndSidecarOnNextEdit() throws {
+        let (url, _) = try createTestMeeting()
+        let editsFile = url.appendingPathComponent("edits.json")
+        let json = """
+        {
+            "version": 1,
+            "editsAtLastSummary": 0,
+            "batches": [
+                {
+                    "id": "11111111-1111-1111-1111-111111111111",
+                    "at": "2026-09-05T12:00:00Z",
+                    "kind": "inline",
+                    "rowEdits": [
+                        {
+                            "rowID": "22222222-2222-2222-2222-222222222222",
+                            "before": "before",
+                            "after": "after"
+                        }
+                    ]
+                }
+            ],
+            "revisionOffset": 9223372036854775807
+        }
+        """
+        try json.write(to: editsFile, atomically: true, encoding: .utf8)
+
+        let warning = try store.updateSummary(at: url, summary: "New summary")
+        XCTAssertNotNil(warning)
+        XCTAssertTrue(warning?.contains("Edit history was unreadable and has been reset") == true)
+
+        let files = try FileManager.default.contentsOfDirectory(atPath: url.path)
+        let corruptSidecars = files.filter { $0.hasPrefix("edits.json.corrupt-") }
+        XCTAssertEqual(corruptSidecars.count, 1)
+    }
+
+    func testEditsJsonWithMissingOrNullBatchesProducesRecoveryWarningAndSidecarOnNextEdit() throws {
+        // 1. Missing batches
+        let (url1, _) = try createTestMeeting()
+        let editsFile1 = url1.appendingPathComponent("edits.json")
+        try "{\"version\":1,\"editsAtLastSummary\":2}".write(to: editsFile1, atomically: true, encoding: .utf8)
+
+        let warning1 = try store.updateSummary(at: url1, summary: "Summary 1")
+        XCTAssertNotNil(warning1)
+        XCTAssertTrue(warning1?.contains("Edit history was unreadable and has been reset") == true)
+
+        let files1 = try FileManager.default.contentsOfDirectory(atPath: url1.path)
+        XCTAssertEqual(files1.filter { $0.hasPrefix("edits.json.corrupt-") }.count, 1)
+
+        // 2. Null batches
+        let (url2, _) = try createTestMeeting()
+        let editsFile2 = url2.appendingPathComponent("edits.json")
+        try "{\"version\":1,\"editsAtLastSummary\":2,\"batches\":null}".write(to: editsFile2, atomically: true, encoding: .utf8)
+
+        let warning2 = try store.updateSummary(at: url2, summary: "Summary 2")
+        XCTAssertNotNil(warning2)
+        XCTAssertTrue(warning2?.contains("Edit history was unreadable and has been reset") == true)
+
+        let files2 = try FileManager.default.contentsOfDirectory(atPath: url2.path)
+        XCTAssertEqual(files2.filter { $0.hasPrefix("edits.json.corrupt-") }.count, 1)
+    }
+
+    func testUndoAtBoundaryOffsetThrowsEditLogCorruptAndLeavesFilesUnchanged() throws {
+        let (url, _) = try createTestMeeting()
+        let rowID = store.load(url)!.rows[0].id
+        _ = try store.updateRow(at: url, rowID: rowID, english: "Changed English")
+
+        let currentLog = store.editLog(at: url)
+        XCTAssertGreaterThan(currentLog.editCount, 0)
+        let boundaryOffset = Int.max - currentLog.editCount
+
+        // Update edits.json with revisionOffset set to boundaryOffset
+        var boundaryLog = currentLog
+        boundaryLog.revisionOffset = boundaryOffset
+
+        let editsFile = url.appendingPathComponent("edits.json")
+        let sessionFile = url.appendingPathComponent("session.json")
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(boundaryLog).write(to: editsFile)
+
+        let sessionBefore = try Data(contentsOf: sessionFile)
+        let editsBefore = try Data(contentsOf: editsFile)
+
+        XCTAssertThrowsError(try store.undoLastEdit(at: url)) { error in
+            guard case MeetingStoreError.editLogCorrupt(let message) = error else {
+                XCTFail("Expected editLogCorrupt, got \(error)")
+                return
+            }
+            XCTAssertTrue(message.contains("revision counter overflow"))
+        }
+
+        let sessionAfter = try Data(contentsOf: sessionFile)
+        let editsAfter = try Data(contentsOf: editsFile)
+
+        XCTAssertEqual(sessionBefore, sessionAfter)
+        XCTAssertEqual(editsBefore, editsAfter)
+    }
+
+    // MARK: - Fix Round 2 Tests (F2-1)
+
+    func testInlineEditAtMaxRevisionThrowsEditLogCorruptAndLeavesFilesUnchanged() throws {
+        let (url, rows) = try createTestMeeting()
+        let editsFile = url.appendingPathComponent("edits.json")
+        let sessionFile = url.appendingPathComponent("session.json")
+
+        let boundaryLog = TranscriptEditLog(
+            version: 1,
+            editsAtLastSummary: 0,
+            batches: [],
+            revisionOffset: Int.max
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(boundaryLog).write(to: editsFile)
+
+        let sessionBefore = try Data(contentsOf: sessionFile)
+        let editsBefore = try Data(contentsOf: editsFile)
+
+        XCTAssertThrowsError(try store.updateRow(at: url, rowID: rows[0].id, english: "New text")) { error in
+            guard case MeetingStoreError.editLogCorrupt(let message) = error else {
+                XCTFail("Expected editLogCorrupt, got \(error)")
+                return
+            }
+            XCTAssertTrue(message.contains("revision counter overflow"))
+        }
+
+        let sessionAfter = try Data(contentsOf: sessionFile)
+        let editsAfter = try Data(contentsOf: editsFile)
+
+        XCTAssertEqual(sessionBefore, sessionAfter)
+        XCTAssertEqual(editsBefore, editsAfter)
+    }
+
+    func testReplaceAllWeightTwoAtBoundaryThrowsEditLogCorruptAndLeavesFilesUnchanged() throws {
+        let (url, _) = try createTestMeeting()
+        let editsFile = url.appendingPathComponent("edits.json")
+        let sessionFile = url.appendingPathComponent("session.json")
+
+        let boundaryLog = TranscriptEditLog(
+            version: 1,
+            editsAtLastSummary: 0,
+            batches: [],
+            revisionOffset: Int.max - 1
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(boundaryLog).write(to: editsFile)
+
+        let sessionBefore = try Data(contentsOf: sessionFile)
+        let editsBefore = try Data(contentsOf: editsFile)
+
+        // "Apple" appears in row1 and row3: 2 row edits, weight = 2
+        XCTAssertThrowsError(
+            try store.replaceAll(
+                at: url,
+                find: "Apple",
+                replacement: "Fruit",
+                caseSensitive: true,
+                wholeWord: true,
+                includeSummary: false
+            )
+        ) { error in
+            guard case MeetingStoreError.editLogCorrupt(let message) = error else {
+                XCTFail("Expected editLogCorrupt, got \(error)")
+                return
+            }
+            XCTAssertTrue(message.contains("revision counter overflow"))
+        }
+
+        let sessionAfter = try Data(contentsOf: sessionFile)
+        let editsAfter = try Data(contentsOf: editsFile)
+
+        XCTAssertEqual(sessionBefore, sessionAfter)
+        XCTAssertEqual(editsBefore, editsAfter)
+    }
+
+    func testReplaceAllWeightTwoAtBoundaryMinusTwoSucceedsWithMaxRevision() throws {
+        let (url, _) = try createTestMeeting()
+        let editsFile = url.appendingPathComponent("edits.json")
+
+        let boundaryLog = TranscriptEditLog(
+            version: 1,
+            editsAtLastSummary: 0,
+            batches: [],
+            revisionOffset: Int.max - 2
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(boundaryLog).write(to: editsFile)
+
+        let result = try store.replaceAll(
+            at: url,
+            find: "Apple",
+            replacement: "Fruit",
+            caseSensitive: true,
+            wholeWord: true,
+            includeSummary: false
+        )
+
+        XCTAssertEqual(result.changedRowCount, 2)
+        XCTAssertEqual(result.log.revision, Int.max)
+        XCTAssertEqual(result.log.editCount, 2)
+        XCTAssertEqual(result.log.revisionOffset, Int.max - 2)
+
+        let loadedLog = store.editLog(at: url)
+        XCTAssertEqual(loadedLog.revision, Int.max)
+        XCTAssertEqual(loadedLog.editCount, 2)
+        XCTAssertEqual(loadedLog.revisionOffset, Int.max - 2)
+    }
 }

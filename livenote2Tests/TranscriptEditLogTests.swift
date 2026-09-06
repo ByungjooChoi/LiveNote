@@ -187,4 +187,155 @@ final class TranscriptEditLogTests: XCTestCase {
         XCTAssertEqual(loaded.revision, 3)
         XCTAssertEqual(loaded.pendingEditsSinceSummary, 1)
     }
+
+    // MARK: - Fix Round 1 Tests (F1-1 & F1-2)
+
+    func testRevisionOffsetOverflowFailsToDecode() {
+        let json = """
+        {
+            "version": 1,
+            "editsAtLastSummary": 0,
+            "batches": [
+                {
+                    "id": "11111111-1111-1111-1111-111111111111",
+                    "at": "2026-09-05T12:00:00Z",
+                    "kind": "inline",
+                    "rowEdits": [
+                        {
+                            "rowID": "22222222-2222-2222-2222-222222222222",
+                            "before": "before",
+                            "after": "after"
+                        }
+                    ]
+                }
+            ],
+            "revisionOffset": 9223372036854775807
+        }
+        """.data(using: .utf8)!
+
+        XCTAssertThrowsError(try TranscriptEditLog.load(from: json)) { error in
+            guard case MeetingStoreError.editLogCorrupt = error else {
+                XCTFail("Expected editLogCorrupt, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testNegativeRevisionOffsetFailsToDecode() {
+        let json = """
+        {
+            "version": 1,
+            "editsAtLastSummary": 0,
+            "batches": [],
+            "revisionOffset": -1
+        }
+        """.data(using: .utf8)!
+
+        XCTAssertThrowsError(try TranscriptEditLog.load(from: json)) { error in
+            guard case MeetingStoreError.editLogCorrupt = error else {
+                XCTFail("Expected editLogCorrupt, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testNegativeEditsAtLastSummaryFailsToDecode() {
+        let json = """
+        {
+            "version": 1,
+            "editsAtLastSummary": -1,
+            "batches": [],
+            "revisionOffset": 0
+        }
+        """.data(using: .utf8)!
+
+        XCTAssertThrowsError(try TranscriptEditLog.load(from: json)) { error in
+            guard case MeetingStoreError.editLogCorrupt = error else {
+                XCTFail("Expected editLogCorrupt, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testMissingBatchesFailsToDecode() {
+        let json = """
+        {"version":1,"editsAtLastSummary":2}
+        """.data(using: .utf8)!
+
+        XCTAssertThrowsError(try TranscriptEditLog.load(from: json)) { error in
+            guard case MeetingStoreError.editLogCorrupt = error else {
+                XCTFail("Expected editLogCorrupt, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testNullBatchesFailsToDecode() {
+        let json = """
+        {"version":1,"editsAtLastSummary":2,"batches":null}
+        """.data(using: .utf8)!
+
+        XCTAssertThrowsError(try TranscriptEditLog.load(from: json)) { error in
+            guard case MeetingStoreError.editLogCorrupt = error else {
+                XCTFail("Expected editLogCorrupt, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testLegacyFileWithAllThreeFieldsAndNoRevisionOffsetDecodesWithOffsetZero() throws {
+        let json = """
+        {
+            "version": 1,
+            "editsAtLastSummary": 2,
+            "batches": []
+        }
+        """.data(using: .utf8)!
+
+        let log = try TranscriptEditLog.load(from: json)
+        XCTAssertEqual(log.version, 1)
+        XCTAssertEqual(log.editsAtLastSummary, 2)
+        XCTAssertEqual(log.batches.count, 0)
+        XCTAssertEqual(log.revisionOffset, 0)
+    }
+
+    // MARK: - Fix Round 2 Tests (F2-1)
+
+    func testRevisionAfterAppending() throws {
+        // Normal add returns the sum
+        let log1 = TranscriptEditLog(version: 1, editsAtLastSummary: 0, batches: [], revisionOffset: 5)
+        XCTAssertEqual(try log1.revisionAfterAppending(weight: 3), 8)
+        XCTAssertEqual(try log1.revisionAfterAppending(weight: 0), 5)
+
+        // Exact boundary reaches Int.max without overflow
+        let logBoundary = TranscriptEditLog(version: 1, editsAtLastSummary: 0, batches: [], revisionOffset: Int.max - 2)
+        XCTAssertEqual(try logBoundary.revisionAfterAppending(weight: 2), Int.max)
+
+        // Overflow throws editLogCorrupt
+        let logMax = TranscriptEditLog(version: 1, editsAtLastSummary: 0, batches: [], revisionOffset: Int.max)
+        XCTAssertThrowsError(try logMax.revisionAfterAppending(weight: 1)) { error in
+            guard case MeetingStoreError.editLogCorrupt(let message) = error else {
+                XCTFail("Expected editLogCorrupt, got \(error)")
+                return
+            }
+            XCTAssertTrue(message.contains("revision counter overflow"))
+        }
+
+        let logNearMax = TranscriptEditLog(version: 1, editsAtLastSummary: 0, batches: [], revisionOffset: Int.max - 1)
+        XCTAssertThrowsError(try logNearMax.revisionAfterAppending(weight: 2)) { error in
+            guard case MeetingStoreError.editLogCorrupt(let message) = error else {
+                XCTFail("Expected editLogCorrupt, got \(error)")
+                return
+            }
+            XCTAssertTrue(message.contains("revision counter overflow"))
+        }
+
+        // Negative weight throws
+        XCTAssertThrowsError(try log1.revisionAfterAppending(weight: -1)) { error in
+            guard case MeetingStoreError.editLogCorrupt = error else {
+                XCTFail("Expected editLogCorrupt, got \(error)")
+                return
+            }
+        }
+    }
 }

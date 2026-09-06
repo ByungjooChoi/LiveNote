@@ -448,6 +448,8 @@ final class MeetingStore {
                 summaryBefore: nil,
                 summaryAfter: nil
             )
+            let batchWeight = batch.rowEdits.count + (batch.summaryAfter != nil ? 1 : 0)
+            _ = try mutatingLog.revisionAfterAppending(weight: batchWeight)
             mutatingLog.batches.append(batch)
 
             try stageAndCommit(meeting: meeting, editLog: mutatingLog, recovery: recovery, to: url)
@@ -533,6 +535,8 @@ final class MeetingStore {
                 summaryBefore: summaryBefore,
                 summaryAfter: summaryAfter
             )
+            let batchWeight = batch.rowEdits.count + (batch.summaryAfter != nil ? 1 : 0)
+            _ = try mutatingLog.revisionAfterAppending(weight: batchWeight)
             mutatingLog.batches.append(batch)
 
             try stageAndCommit(meeting: meeting, editLog: mutatingLog, recovery: recovery, to: url)
@@ -598,7 +602,13 @@ final class MeetingStore {
             let e1 = mutatingLog.editCount
             // 되돌리기(Undo)는 마지막 요약 시점 대비 전사 변경이 발생한 것이므로 1건의 미반영 변경으로 계산되며,
             // 오프셋을 통해 제거된 배치의 가중치를 보정한다.
-            mutatingLog.revisionOffset += (e0 - e1) + 1
+            let deltaResult = (e0 - e1).addingReportingOverflow(1)
+            let offsetResult = mutatingLog.revisionOffset.addingReportingOverflow(deltaResult.partialValue)
+            let revResult = offsetResult.partialValue.addingReportingOverflow(e1)
+            guard !deltaResult.overflow, !offsetResult.overflow, !revResult.overflow else {
+                throw MeetingStoreError.editLogCorrupt("revision counter overflow")
+            }
+            mutatingLog.revisionOffset = offsetResult.partialValue
 
             try stageAndCommit(meeting: meeting, editLog: mutatingLog, recovery: recovery, to: url)
             refresh()

@@ -98,18 +98,18 @@ enum MarkdownHTML {
         u == closeParenCode || u == doubleQuoteCode || isWhitespace(u)
     }
 
-    private static func hasHttpPrefix(units: [UTF16.CodeUnit], start: Int) -> Bool {
+    private static func httpSchemeLength(units: [UTF16.CodeUnit], start: Int) -> Int? {
         let count = units.count
-        guard start + 7 <= count else { return false }
+        guard start + 7 <= count else { return nil }
         if units[start] == 104 && units[start + 1] == 116 && units[start + 2] == 116 && units[start + 3] == 112 {
             if units[start + 4] == 58 && units[start + 5] == 47 && units[start + 6] == 47 {
-                return true // http://
+                return 7 // http://
             }
             if start + 8 <= count && units[start + 4] == 115 && units[start + 5] == 58 && units[start + 6] == 47 && units[start + 7] == 47 {
-                return true // https://
+                return 8 // https://
             }
         }
-        return false
+        return nil
     }
 
     /// 인라인 서식 변환 (NUL 제거 -> HTML-escape -> 단일 전방 스캔 토큰화 -> bold/italic -> 단일 패스 복원).
@@ -231,9 +231,9 @@ enum MarkdownHTML {
                    cb + 1 < units.count,
                    units[cb + 1] == openParenCode {
                     let urlStart = cb + 2
-                    if hasHttpPrefix(units: units, start: urlStart) {
+                    if let schemeLength = httpSchemeLength(units: units, start: urlStart) {
                         let stopIndex = findUrlStop(from: urlStart)
-                        if stopIndex < units.count && units[stopIndex] == closeParenCode {
+                        if stopIndex > urlStart + schemeLength && stopIndex < units.count && units[stopIndex] == closeParenCode {
                             if i > lastEnd {
                                 working.append(String(decoding: units[lastEnd..<i], as: UTF16.self))
                             }

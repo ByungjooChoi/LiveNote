@@ -827,14 +827,23 @@ final class BriefingControllerTests: XCTestCase {
         var testCalendar = Calendar(identifier: .gregorian)
         testCalendar.timeZone = TimeZone(secondsFromGMT: 0)!
 
-        var comps = DateComponents()
-        comps.year = 2026
-        comps.month = 9
-        comps.day = 1
-        comps.hour = 8
-        comps.minute = 0
-        comps.second = 0
-        let date8AM = testCalendar.date(from: comps)!
+        var comps6 = DateComponents()
+        comps6.year = 2026
+        comps6.month = 9
+        comps6.day = 1
+        comps6.hour = 6
+        comps6.minute = 0
+        comps6.second = 0
+        let date6AM = testCalendar.date(from: comps6)!
+
+        var comps8 = DateComponents()
+        comps8.year = 2026
+        comps8.month = 9
+        comps8.day = 1
+        comps8.hour = 8
+        comps8.minute = 0
+        comps8.second = 0
+        let date8AM = testCalendar.date(from: comps8)!
 
         _ = try? meetingStore.save(
             rows: [MeetingStoreFixture.row(text: "Past discussion")],
@@ -877,6 +886,8 @@ final class BriefingControllerTests: XCTestCase {
             }
         )
 
+        let currentClock = AtomicBox<Date>(date6AM)
+
         let controller = BriefingController(
             store: briefStore,
             meetingStore: meetingStore,
@@ -884,7 +895,7 @@ final class BriefingControllerTests: XCTestCase {
             backend: fakeBackend,
             openTasksProvider: { _ in [] },
             language: { "English" },
-            now: { date8AM },
+            now: { currentClock.value },
             calendar: testCalendar
         )
 
@@ -903,9 +914,18 @@ final class BriefingControllerTests: XCTestCase {
             attendees: [Attendee(name: "Craig", email: "craig@example.com")]
         )
 
+        // Schedule with provider A before batch hour -> startup task completes and generates nothing
         controller.scheduleMorningBatch(itemsProvider: { [itemA] })
-        controller.scheduleMorningBatch(itemsProvider: { [itemB] })
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertTrue(collector.keys.isEmpty, "Startup before batch hour must not generate any briefs")
 
+        // Reschedule with provider B before batch hour -> startup generates nothing
+        controller.scheduleMorningBatch(itemsProvider: { [itemB] })
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertTrue(collector.keys.isEmpty, "Rescheduled startup before batch hour must not generate any briefs")
+
+        // Advance clock to batch hour and post wake notification
+        currentClock.value = date8AM
         NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
 
         for _ in 0..<50 {
@@ -915,6 +935,7 @@ final class BriefingControllerTests: XCTestCase {
             }
         }
 
+        XCTAssertEqual(collector.keys.count, 1, "Only one brief should be generated")
         XCTAssertTrue(collector.keys.contains { $0.contains("Upcoming meeting: Meeting B") }, "Batch must run for item B from rescheduled provider")
         XCTAssertFalse(collector.keys.contains { $0.contains("Upcoming meeting: Meeting A") }, "Batch must never run for item A")
 
