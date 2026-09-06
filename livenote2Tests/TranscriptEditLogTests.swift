@@ -3,6 +3,11 @@ import XCTest
 
 final class TranscriptEditLogTests: XCTestCase {
 
+    override func setUp() {
+        super.setUp()
+        TestLogSandbox.activate()
+    }
+
     func testEncodeDecodeRoundTrip() throws {
         let rowID1 = UUID()
         let rowID2 = UUID()
@@ -148,5 +153,38 @@ final class TranscriptEditLogTests: XCTestCase {
             }
             XCTAssertTrue(message.contains("Unsupported version 2"))
         }
+    }
+
+    // MARK: - U2: Revision and Backward Compatibility Tests
+
+    func testLegacyJSONWithoutRevisionOffsetDecodesProperly() throws {
+        let legacyJSON = """
+        {
+            "version": 1,
+            "editsAtLastSummary": 2,
+            "batches": []
+        }
+        """.data(using: .utf8)!
+
+        let log = try TranscriptEditLog.load(from: legacyJSON)
+        XCTAssertEqual(log.revisionOffset, 0)
+        XCTAssertEqual(log.revision, 0)
+        XCTAssertEqual(log.editsAtLastSummary, 2)
+        XCTAssertEqual(log.pendingEditsSinceSummary, 0)
+    }
+
+    func testRoundTripEncodesRevisionOffset() throws {
+        let log = TranscriptEditLog(version: 1, editsAtLastSummary: 2, batches: [], revisionOffset: 3)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(log)
+
+        let jsonString = String(data: data, encoding: .utf8)!
+        XCTAssertTrue(jsonString.contains("\"revisionOffset\":3"))
+
+        let loaded = try TranscriptEditLog.load(from: data)
+        XCTAssertEqual(loaded.revisionOffset, 3)
+        XCTAssertEqual(loaded.revision, 3)
+        XCTAssertEqual(loaded.pendingEditsSinceSummary, 1)
     }
 }

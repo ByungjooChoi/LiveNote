@@ -75,12 +75,44 @@ enum MarkdownHTML {
         return result
     }
 
-    private static let inlineRegex = try? NSRegularExpression(
-        pattern: #"`([^`]+)`|\[([^\]]+)\]\((https?://[^)\s"]+)\)"#,
-        options: []
-    )
+    private static let backtickCode: UTF16.CodeUnit = 96      // '`'
+    private static let openBracketCode: UTF16.CodeUnit = 91  // '['
+    private static let closeBracketCode: UTF16.CodeUnit = 93 // ']'
+    private static let openParenCode: UTF16.CodeUnit = 40    // '('
+    private static let closeParenCode: UTF16.CodeUnit = 41   // ')'
+    private static let doubleQuoteCode: UTF16.CodeUnit = 34  // '"'
 
-    /// 인라인 서식 변환 (NUL 제거 -> HTML-escape -> 단일 스캔 토큰화 -> bold/italic -> 단일 패스 복원).
+    private static func isWhitespace(_ u: UTF16.CodeUnit) -> Bool {
+        switch u {
+        case 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20:
+            return true
+        default:
+            if u > 127, let scalar = UnicodeScalar(u) {
+                return CharacterSet.whitespacesAndNewlines.contains(scalar)
+            }
+            return false
+        }
+    }
+
+    private static func isUrlStopChar(_ u: UTF16.CodeUnit) -> Bool {
+        u == closeParenCode || u == doubleQuoteCode || isWhitespace(u)
+    }
+
+    private static func hasHttpPrefix(units: [UTF16.CodeUnit], start: Int) -> Bool {
+        let count = units.count
+        guard start + 7 <= count else { return false }
+        if units[start] == 104 && units[start + 1] == 116 && units[start + 2] == 116 && units[start + 3] == 112 {
+            if units[start + 4] == 58 && units[start + 5] == 47 && units[start + 6] == 47 {
+                return true // http://
+            }
+            if start + 8 <= count && units[start + 4] == 115 && units[start + 5] == 58 && units[start + 6] == 47 && units[start + 7] == 47 {
+                return true // https://
+            }
+        }
+        return false
+    }
+
+    /// 인라인 서식 변환 (NUL 제거 -> HTML-escape -> 단일 전방 스캔 토큰화 -> bold/italic -> 단일 패스 복원).
     static func inline(_ text: String) -> String {
         // NUL 문자 위조 방지: 입력에서 모든 U+0000 제거
         let sanitized = text.filter { $0 != "\u{0000}" }
@@ -89,45 +121,142 @@ enum MarkdownHTML {
     }
 
     private static func renderSegments(in text: String) -> String {
-        guard let inlineRegex else { return text }
+        let units = Array(text.utf16)
+        guard !units.isEmpty else { return text }
 
         var working = ""
         working.reserveCapacity(text.count)
         var codePlaceholders: [String] = []
         var linkPlaceholders: [String] = []
 
-        let nsString = text as NSString
-        let fullRange = NSRange(location: 0, length: nsString.length)
-        let matches = inlineRegex.matches(in: text, options: [], range: fullRange)
+        var lastBacktickSearchStart = -1
+        var lastBacktickSearchResult: Int? = nil
 
-        var lastEnd = 0
-
-        for match in matches {
-            if match.range.location > lastEnd {
-                let prefixRange = NSRange(location: lastEnd, length: match.range.location - lastEnd)
-                working.append(nsString.substring(with: prefixRange))
+        func findNextBacktick(from start: Int) -> Int? {
+            if lastBacktickSearchStart != -1 {
+                if let res = lastBacktickSearchResult {
+                    if start <= res {
+                        return res
+                    }
+                } else {
+                    return nil
+                }
             }
-
-            if match.range(at: 1).location != NSNotFound {
-                let codeContent = nsString.substring(with: match.range(at: 1))
-                let placeholder = "\u{0000}C\(codePlaceholders.count)\u{0000}"
-                codePlaceholders.append("<code>\(codeContent)</code>")
-                working.append(placeholder)
-            } else if match.range(at: 2).location != NSNotFound && match.range(at: 3).location != NSNotFound {
-                let rawLabel = nsString.substring(with: match.range(at: 2))
-                let url = nsString.substring(with: match.range(at: 3))
-                let formattedLabel = renderSegments(in: rawLabel)
-                let placeholder = "\u{0000}L\(linkPlaceholders.count)\u{0000}"
-                linkPlaceholders.append("<a href=\"\(url)\">\(formattedLabel)</a>")
-                working.append(placeholder)
+            var scan = start
+            while scan < units.count {
+                if units[scan] == backtickCode {
+                    lastBacktickSearchStart = start
+                    lastBacktickSearchResult = scan
+                    return scan
+                }
+                scan += 1
             }
-
-            lastEnd = match.range.location + match.range.length
+            lastBacktickSearchStart = start
+            lastBacktickSearchResult = nil
+            return nil
         }
 
-        if lastEnd < nsString.length {
-            let suffixRange = NSRange(location: lastEnd, length: nsString.length - lastEnd)
-            working.append(nsString.substring(with: suffixRange))
+        var lastBracketSearchStart = -1
+        var lastBracketSearchResult: Int? = nil
+
+        func findNextCloseBracket(from start: Int) -> Int? {
+            if lastBracketSearchStart != -1 {
+                if let res = lastBracketSearchResult {
+                    if start <= res {
+                        return res
+                    }
+                } else {
+                    return nil
+                }
+            }
+            var scan = start
+            while scan < units.count {
+                if units[scan] == closeBracketCode {
+                    lastBracketSearchStart = start
+                    lastBracketSearchResult = scan
+                    return scan
+                }
+                scan += 1
+            }
+            lastBracketSearchStart = start
+            lastBracketSearchResult = nil
+            return nil
+        }
+
+        var lastUrlStopSearchStart = -1
+        var lastUrlStopSearchResult = -1
+
+        func findUrlStop(from start: Int) -> Int {
+            if lastUrlStopSearchStart != -1 {
+                if start <= lastUrlStopSearchResult {
+                    return lastUrlStopSearchResult
+                }
+            }
+            var scan = start
+            while scan < units.count {
+                if isUrlStopChar(units[scan]) {
+                    lastUrlStopSearchStart = start
+                    lastUrlStopSearchResult = scan
+                    return scan
+                }
+                scan += 1
+            }
+            lastUrlStopSearchStart = start
+            lastUrlStopSearchResult = units.count
+            return units.count
+        }
+
+        var i = 0
+        var lastEnd = 0
+
+        while i < units.count {
+            let u = units[i]
+            if u == backtickCode {
+                if let j = findNextBacktick(from: i + 1), j > i + 1 {
+                    if i > lastEnd {
+                        working.append(String(decoding: units[lastEnd..<i], as: UTF16.self))
+                    }
+                    let codeContent = String(decoding: units[(i + 1)..<j], as: UTF16.self)
+                    let placeholder = "\u{0000}C\(codePlaceholders.count)\u{0000}"
+                    codePlaceholders.append("<code>\(codeContent)</code>")
+                    working.append(placeholder)
+                    i = j + 1
+                    lastEnd = i
+                    continue
+                }
+                i += 1
+            } else if u == openBracketCode {
+                if let cb = findNextCloseBracket(from: i + 1),
+                   cb > i + 1,
+                   cb + 1 < units.count,
+                   units[cb + 1] == openParenCode {
+                    let urlStart = cb + 2
+                    if hasHttpPrefix(units: units, start: urlStart) {
+                        let stopIndex = findUrlStop(from: urlStart)
+                        if stopIndex < units.count && units[stopIndex] == closeParenCode {
+                            if i > lastEnd {
+                                working.append(String(decoding: units[lastEnd..<i], as: UTF16.self))
+                            }
+                            let rawLabel = String(decoding: units[(i + 1)..<cb], as: UTF16.self)
+                            let url = String(decoding: units[urlStart..<stopIndex], as: UTF16.self)
+                            let formattedLabel = renderSegments(in: rawLabel)
+                            let placeholder = "\u{0000}L\(linkPlaceholders.count)\u{0000}"
+                            linkPlaceholders.append("<a href=\"\(url)\">\(formattedLabel)</a>")
+                            working.append(placeholder)
+                            i = stopIndex + 1
+                            lastEnd = i
+                            continue
+                        }
+                    }
+                }
+                i += 1
+            } else {
+                i += 1
+            }
+        }
+
+        if lastEnd < units.count {
+            working.append(String(decoding: units[lastEnd..<units.count], as: UTF16.self))
         }
 
         working = applyBoldItalic(working)

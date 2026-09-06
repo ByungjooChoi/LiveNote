@@ -4,6 +4,11 @@ import EventKit
 
 final class UpcomingMeetingItemTests: XCTestCase {
 
+    override func setUp() {
+        super.setUp()
+        TestLogSandbox.activate()
+    }
+
     func testEventKeyAndDefaults() {
         let now = Date(timeIntervalSince1970: 1788220800)
         let item = CalendarMonitor.UpcomingMeetingItem(
@@ -159,5 +164,134 @@ final class UpcomingMeetingItemTests: XCTestCase {
         // Second notification call at same time does not re-fire (approachingNotifiedKeys deduplication)
         monitor.notifyMeetingApproaching(now: now)
         XCTAssertEqual(notifiedItems.count, 1)
+    }
+
+    // MARK: - S6: Session Attribution Tests (no AppState construction)
+
+    func testResolveSessionItemExplicitWinsAndHeuristicNotInvoked() {
+        let explicit = CalendarMonitor.UpcomingMeetingItem(
+            id: "explicit-key@123",
+            title: "Explicit Meeting",
+            start: Date(),
+            end: Date().addingTimeInterval(1800)
+        )
+        var heuristicInvoked = false
+        let resolved = AppState.resolveSessionItem(explicit: explicit) {
+            heuristicInvoked = true
+            return CalendarMonitor.UpcomingMeetingItem(
+                id: "heuristic-key@123",
+                title: "Heuristic Meeting",
+                start: Date(),
+                end: Date().addingTimeInterval(1800)
+            )
+        }
+        XCTAssertEqual(resolved?.id, "explicit-key@123")
+        XCTAssertEqual(resolved?.title, "Explicit Meeting")
+        XCTAssertFalse(heuristicInvoked, "Heuristic must not be invoked when explicit item is provided")
+    }
+
+    func testResolveSessionItemNilExplicitFallsBackToHeuristic() {
+        var heuristicInvoked = false
+        let heuristicItem = CalendarMonitor.UpcomingMeetingItem(
+            id: "heuristic-key@456",
+            title: "Heuristic Meeting",
+            start: Date(),
+            end: Date().addingTimeInterval(1800)
+        )
+        let resolved = AppState.resolveSessionItem(explicit: nil) {
+            heuristicInvoked = true
+            return heuristicItem
+        }
+        XCTAssertTrue(heuristicInvoked, "Heuristic must be invoked when explicit item is nil")
+        XCTAssertEqual(resolved?.id, "heuristic-key@456")
+        XCTAssertEqual(resolved?.title, "Heuristic Meeting")
+    }
+
+    func testResolveSessionItemBothNilReturnsNil() {
+        var heuristicInvoked = false
+        let resolved = AppState.resolveSessionItem(explicit: nil) {
+            heuristicInvoked = true
+            return nil
+        }
+        XCTAssertTrue(heuristicInvoked)
+        XCTAssertNil(resolved)
+    }
+
+    func testSessionContextFromItemReturnsTitleAndAttendees() {
+        let attendees = [
+            Attendee(name: "Alice", email: "alice@example.com"),
+            Attendee(name: "Bob", email: "bob@example.com")
+        ]
+        let item = CalendarMonitor.UpcomingMeetingItem(
+            id: "item-789",
+            title: "Project Review",
+            start: Date(),
+            end: Date().addingTimeInterval(3600),
+            attendees: attendees
+        )
+        let context = AppState.sessionContext(from: item)
+        XCTAssertEqual(context.title, "Project Review")
+        XCTAssertEqual(context.attendees, attendees)
+    }
+
+    @MainActor
+    func testOnRecordRequestedReceivesItemMatchingAlertKey() throws {
+        let monitor = CalendarMonitor()
+        let webLink = try XCTUnwrap(URL(string: "https://zoom.us/j/999"))
+        let alert = MeetingAlert(
+            key: "alert-event-999@1788220800",
+            title: "Sprint Retro",
+            start: Date(),
+            end: Date().addingTimeInterval(1800),
+            webLink: webLink,
+            deepLink: nil
+        )
+
+        var receivedItem: CalendarMonitor.UpcomingMeetingItem?
+        monitor.onRecordRequested = { item in
+            receivedItem = item
+        }
+
+        monitor.triggerRecordRequestedForTesting(candidate: alert)
+        XCTAssertNotNil(receivedItem)
+        XCTAssertEqual(receivedItem?.eventKey, alert.key)
+        XCTAssertEqual(receivedItem?.title, "Sprint Retro")
+    }
+
+    @MainActor
+    func testOnRecordRequestedCarriesTodayUpcomingMetadataWhenAvailable() throws {
+        let monitor = CalendarMonitor()
+        let now = Date()
+        let attendees = [Attendee(name: "Charlie", email: "charlie@example.com")]
+        let existingItem = CalendarMonitor.UpcomingMeetingItem(
+            id: "alert-event-777@1788220800",
+            title: "Rich Metadata Meeting",
+            start: now,
+            end: now.addingTimeInterval(1800),
+            webLink: URL(string: "https://zoom.us/j/777"),
+            deepLink: nil,
+            attendees: attendees
+        )
+        monitor.setTodayUpcomingForTesting([existingItem])
+
+        let webLink = try XCTUnwrap(URL(string: "https://zoom.us/j/777"))
+        let alert = MeetingAlert(
+            key: "alert-event-777@1788220800",
+            title: "Fallback Title",
+            start: now,
+            end: now.addingTimeInterval(1800),
+            webLink: webLink,
+            deepLink: nil
+        )
+
+        var receivedItem: CalendarMonitor.UpcomingMeetingItem?
+        monitor.onRecordRequested = { item in
+            receivedItem = item
+        }
+
+        monitor.triggerRecordRequestedForTesting(candidate: alert)
+        XCTAssertEqual(receivedItem?.eventKey, alert.key)
+        XCTAssertEqual(receivedItem?.title, "Rich Metadata Meeting")
+        XCTAssertEqual(receivedItem?.attendees, attendees)
     }
 }

@@ -35,6 +35,7 @@ final class TaskStoreTests: XCTestCase {
 
     override func setUpWithError() throws {
         try super.setUpWithError()
+        TestLogSandbox.activate()
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("LiveNoteTaskStoreTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -45,7 +46,8 @@ final class TaskStoreTests: XCTestCase {
     }
 
     override func tearDown() {
-        AppLog.directoryOverride = nil
+        AppLog.flush()
+        AppLog.directoryOverride = TestLogSandbox.directory
         if let root { try? FileManager.default.removeItem(at: root) }
         if let logRoot { try? FileManager.default.removeItem(at: logRoot) }
         store = nil

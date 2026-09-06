@@ -471,6 +471,11 @@ final class PeopleDirectory {
     private(set) var isLoading = false
     private(set) var lastWarning: String?
 
+    var isRefreshPending: Bool { needsRefresh }
+
+    @ObservationIgnored var readGate: (@Sendable () async -> Void)?
+    @ObservationIgnored var onRefreshQueued: (([MeetingSummary]) -> Void)?
+
     @ObservationIgnored private let reader: @Sendable (URL) throws -> [String]
     @ObservationIgnored private var cache: [URL: (modDate: Date, names: [String])] = [:]
     @ObservationIgnored private var activeTask: Task<Void, Never>?
@@ -528,6 +533,7 @@ final class PeopleDirectory {
 
         if let existing = activeTask {
             needsRefresh = true
+            onRefreshQueued?(meetings)
             await existing.value
             return
         }
@@ -562,8 +568,12 @@ final class PeopleDirectory {
         let cachedDates = cache.mapValues { $0.modDate }
         let urls = meetings.map(\.url)
         let reader = self.reader
+        let readGate = self.readGate
 
         let readResults = await Task.detached(priority: .utility) { () -> [(URL, Date, Result<[String], Error>)] in
+            if let readGate {
+                await readGate()
+            }
             var list: [(URL, Date, Result<[String], Error>)] = []
             var seen = Set<URL>()
             for url in urls {

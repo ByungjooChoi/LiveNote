@@ -6,6 +6,11 @@ import XCTest
 @MainActor
 final class AttendeeTests: XCTestCase {
 
+    override func setUp() {
+        super.setUp()
+        TestLogSandbox.activate()
+    }
+
     // MARK: - mailto 파싱
 
     func testEmailFromMailtoURL() {

@@ -201,6 +201,10 @@ final class RecordingReminder {
         }
     }
 
+    var consecutiveHitsForTesting: Int {
+        policy.consecutiveHits
+    }
+
     func setEnabled(_ on: Bool) {
         isEnabled = on
         generation += 1
@@ -232,6 +236,8 @@ final class RecordingReminder {
                 self.tickNow()
             }
         }
+
+        tickNow()
     }
 
     func stop() {

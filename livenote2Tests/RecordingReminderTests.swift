@@ -71,9 +71,12 @@ final class RecordingReminderTests: XCTestCase {
     private var suiteName: String!
     private var defaults: UserDefaults!
     private var tempLogDir: URL!
+    private var previousLogOverride: URL?
 
     override func setUp() {
         super.setUp()
+        TestLogSandbox.activate()
+        previousLogOverride = AppLog.directoryOverride
         suiteName = "RecordingReminderTests-\(UUID().uuidString)"
         defaults = UserDefaults(suiteName: suiteName)!
         tempLogDir = FileManager.default.temporaryDirectory
@@ -83,7 +86,8 @@ final class RecordingReminderTests: XCTestCase {
     }
 
     override func tearDown() {
-        AppLog.directoryOverride = nil
+        AppLog.flush()
+        AppLog.directoryOverride = previousLogOverride
         if let tempLogDir {
             try? FileManager.default.removeItem(at: tempLogDir)
         }
@@ -700,5 +704,87 @@ final class RecordingReminderTests: XCTestCase {
         reminder.tickNow()
         await waitUntil { fakeNotifier.deliveredAppNames == ["Zoom"] }
         XCTAssertEqual(fakeNotifier.deliveredAppNames.count, 1)
+    }
+
+    // MARK: - U1: Immediate First Probe Tests
+
+    func testStartProbesImmediatelySettingHit() {
+        let fakeProbe = FakeRecordingReminderProbe()
+        let fakeNotifier = FakeRecordingReminderNotifier()
+
+        let reminder = RecordingReminder(
+            probe: fakeProbe,
+            notifier: fakeNotifier,
+            defaults: defaults,
+            tickInterval: 60
+        )
+
+        XCTAssertEqual(fakeProbe.probeCallCount, 0)
+        XCTAssertEqual(reminder.consecutiveHitsForTesting, 0)
+
+        reminder.start()
+        defer { reminder.stop() }
+
+        XCTAssertEqual(fakeProbe.probeCallCount, 1)
+        XCTAssertEqual(reminder.consecutiveHitsForTesting, 1)
+    }
+
+    func testStartTimerDeliversWithinExpectedWindow() async {
+        let fakeProbe = FakeRecordingReminderProbe()
+        let fakeNotifier = FakeRecordingReminderNotifier()
+
+        let reminder = RecordingReminder(
+            probe: fakeProbe,
+            notifier: fakeNotifier,
+            defaults: defaults,
+            tickInterval: 0.05
+        )
+
+        reminder.start()
+        defer { reminder.stop() }
+
+        await waitUntil({ fakeNotifier.deliveredAppNames == ["Zoom"] }, timeout: 0.5)
+        XCTAssertEqual(fakeNotifier.deliveredAppNames, ["Zoom"])
+    }
+
+    func testToggleSuppressesDuplicateDeliveryInSameMeeting() async {
+        let fakeProbe = FakeRecordingReminderProbe()
+        let fakeNotifier = FakeRecordingReminderNotifier()
+
+        let reminder = RecordingReminder(
+            probe: fakeProbe,
+            notifier: fakeNotifier,
+            defaults: defaults,
+            tickInterval: 0.05
+        )
+
+        reminder.start()
+        await waitUntil({ fakeNotifier.deliveredAppNames == ["Zoom"] }, timeout: 0.5)
+        XCTAssertEqual(fakeNotifier.deliveredAppNames.count, 1)
+
+        reminder.setEnabled(false)
+        reminder.setEnabled(true)
+        defer { reminder.stop() }
+
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(fakeNotifier.deliveredAppNames.count, 1, "Immediate tick and subsequent ticks must be suppressed")
+    }
+
+    func testStartTwiceProbesImmediatelyOnlyOnce() {
+        let fakeProbe = FakeRecordingReminderProbe()
+        let fakeNotifier = FakeRecordingReminderNotifier()
+
+        let reminder = RecordingReminder(
+            probe: fakeProbe,
+            notifier: fakeNotifier,
+            defaults: defaults,
+            tickInterval: 60
+        )
+
+        reminder.start()
+        defer { reminder.stop() }
+        reminder.start()
+
+        XCTAssertEqual(fakeProbe.probeCallCount, 1, "Second start call while running must not probe again")
     }
 }

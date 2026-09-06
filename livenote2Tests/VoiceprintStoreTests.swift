@@ -6,10 +6,13 @@ final class VoiceprintStoreTests: XCTestCase {
 
     private var tempDir: URL!
     private var testDefaults: UserDefaults!
+    private var previousLogOverride: URL?
     private let suiteName = "VoiceprintStoreTests-\(UUID().uuidString)"
 
     override func setUp() {
         super.setUp()
+        TestLogSandbox.activate()
+        previousLogOverride = AppLog.directoryOverride
         tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("VoiceprintStoreTests-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
@@ -18,7 +21,8 @@ final class VoiceprintStoreTests: XCTestCase {
     }
 
     override func tearDown() {
-        AppLog.directoryOverride = nil
+        AppLog.flush()
+        AppLog.directoryOverride = previousLogOverride
         testDefaults.removePersistentDomain(forName: suiteName)
         try? FileManager.default.removeItem(at: tempDir)
         super.tearDown()

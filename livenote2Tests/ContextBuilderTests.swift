@@ -10,6 +10,7 @@ final class ContextBuilderTests: XCTestCase {
 
     override func setUpWithError() throws {
         try super.setUpWithError()
+        TestLogSandbox.activate()
         store = try MeetingStoreFixture.makeStore()
     }
 

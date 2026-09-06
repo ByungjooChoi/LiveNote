@@ -7,14 +7,15 @@ final class OfflineDiarizerTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
+        TestLogSandbox.activate()
         tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("OfflineDiarizerTests-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        AppLog.directoryOverride = tempDir.appendingPathComponent("logs")
     }
 
     override func tearDown() {
-        AppLog.directoryOverride = nil
+        AppLog.flush()
+        AppLog.directoryOverride = TestLogSandbox.directory
         try? FileManager.default.removeItem(at: tempDir)
         super.tearDown()
     }
@@ -389,14 +390,13 @@ final class OfflineDiarizerTests: XCTestCase {
         XCTAssertEqual(Double(clip.count) / 16_000.0, clipSecs, accuracy: 0.01)
     }
 
-    func testWAVStreamReaderTruncatedDataChunk() throws {
-        // T7: WAV whose data chunk declares 1,000,000 bytes but file only contains 1600 samples (3200 bytes)
+    func testWAVStreamReaderShortFileRejectThrowsTypedError() throws {
         let sr = 16_000
         let actualSamples = [Float](repeating: 0.2, count: 1600)
         let fakeDataSize: UInt32 = 1_000_000
         let fileSize: UInt32 = 36 + fakeDataSize
 
-        let fileURL = tempDir.appendingPathComponent("truncated_\(UUID().uuidString).wav")
+        let fileURL = tempDir.appendingPathComponent("truncated_reject_\(UUID().uuidString).wav")
         var data = Data()
         data.append(contentsOf: "RIFF".utf8)
         var fileSizeLE = fileSize.littleEndian
@@ -429,16 +429,141 @@ final class OfflineDiarizerTests: XCTestCase {
 
         try data.write(to: fileURL)
 
-        var reader = try OfflineDiarizer.WAVStreamReader(url: fileURL)
+        XCTAssertThrowsError(try OfflineDiarizer.WAVStreamReader(url: fileURL, truncation: .reject)) { error in
+            guard case let OfflineDiarizer.WAVStreamError.truncatedData(expectedBytes, availableBytes) = error else {
+                XCTFail("Expected WAVStreamError.truncatedData, got \(error)")
+                return
+            }
+            XCTAssertEqual(expectedBytes, 1_000_000)
+            XCTAssertEqual(availableBytes, 3200)
+            XCTAssertEqual(error.localizedDescription, "WAV data chunk shorter than header: expected 1000000 bytes, found 3200")
+        }
+
+        // Default policy is also .reject
+        XCTAssertThrowsError(try OfflineDiarizer.WAVStreamReader(url: fileURL)) { error in
+            guard case let OfflineDiarizer.WAVStreamError.truncatedData(expectedBytes, availableBytes) = error else {
+                XCTFail("Expected WAVStreamError.truncatedData with default policy, got \(error)")
+                return
+            }
+            XCTAssertEqual(expectedBytes, 1_000_000)
+            XCTAssertEqual(availableBytes, 3200)
+        }
+    }
+
+    func testWAVStreamReaderShortFileTolerateReadsAvailableFrames() throws {
+        let sr = 16_000
+        let actualSamples = [Float](repeating: 0.2, count: 1600)
+        let fakeDataSize: UInt32 = 1_000_000
+        let fileSize: UInt32 = 36 + fakeDataSize
+
+        let fileURL = tempDir.appendingPathComponent("truncated_tolerate_\(UUID().uuidString).wav")
+        var data = Data()
+        data.append(contentsOf: "RIFF".utf8)
+        var fileSizeLE = fileSize.littleEndian
+        data.append(Data(bytes: &fileSizeLE, count: 4))
+        data.append(contentsOf: "WAVEfmt ".utf8)
+        var fmtSize: UInt32 = 16
+        data.append(Data(bytes: &fmtSize, count: 4))
+        var format: UInt16 = 1
+        data.append(Data(bytes: &format, count: 2))
+        var ch: UInt16 = 1
+        data.append(Data(bytes: &ch, count: 2))
+        var sRate: UInt32 = UInt32(sr)
+        data.append(Data(bytes: &sRate, count: 4))
+        var byteRate: UInt32 = UInt32(sr * 2)
+        data.append(Data(bytes: &byteRate, count: 4))
+        var blockAlign: UInt16 = 2
+        data.append(Data(bytes: &blockAlign, count: 2))
+        var bits: UInt16 = 16
+        data.append(Data(bytes: &bits, count: 2))
+
+        data.append(contentsOf: "data".utf8)
+        var dSizeLE = fakeDataSize.littleEndian
+        data.append(Data(bytes: &dSizeLE, count: 4))
+
+        for sample in actualSamples {
+            let int16Val = Int16(sample * 32767.0).littleEndian
+            var val = int16Val
+            data.append(Data(bytes: &val, count: 2))
+        }
+
+        try data.write(to: fileURL)
+
+        var reader = try OfflineDiarizer.WAVStreamReader(url: fileURL, truncation: .tolerate)
         defer { reader.close() }
+
+        XCTAssertTrue(reader.wasTruncated)
+        XCTAssertEqual(reader.dataSize, 3200)
 
         let firstChunk = try reader.nextFrames(maxFrames: 1600)
         XCTAssertNotNil(firstChunk)
         XCTAssertEqual(firstChunk?.count, 1600)
 
-        // Second chunk reaches EOF and returns nil gracefully without throwing
         let secondChunk = try reader.nextFrames(maxFrames: 1600)
         XCTAssertNil(secondChunk)
+    }
+
+    func testWAVStreamReaderWellFormedFileWorksUnderBothPolicies() throws {
+        let samples = [Float](repeating: 0.4, count: 1600)
+        let wavURL = try createWAVFile(samples: samples, sampleRate: 16_000)
+
+        var readerReject = try OfflineDiarizer.WAVStreamReader(url: wavURL, truncation: .reject)
+        defer { readerReject.close() }
+        XCTAssertFalse(readerReject.wasTruncated)
+        let framesReject = try readerReject.nextFrames(maxFrames: 1600)
+        XCTAssertEqual(framesReject?.count, 1600)
+
+        var readerTolerate = try OfflineDiarizer.WAVStreamReader(url: wavURL, truncation: .tolerate)
+        defer { readerTolerate.close() }
+        XCTAssertFalse(readerTolerate.wasTruncated)
+        let framesTolerate = try readerTolerate.nextFrames(maxFrames: 1600)
+        XCTAssertEqual(framesTolerate?.count, 1600)
+    }
+
+    func testWAVStreamReaderOddByteCountUnderTolerateReturnsWholeFrames() throws {
+        let sr = 16_000
+        let fileURL = tempDir.appendingPathComponent("truncated_odd_\(UUID().uuidString).wav")
+        var data = Data()
+        data.append(contentsOf: "RIFF".utf8)
+        var fileSizeLE = UInt32(36 + 1000).littleEndian
+        data.append(Data(bytes: &fileSizeLE, count: 4))
+        data.append(contentsOf: "WAVEfmt ".utf8)
+        var fmtSize: UInt32 = 16
+        data.append(Data(bytes: &fmtSize, count: 4))
+        var format: UInt16 = 1
+        data.append(Data(bytes: &format, count: 2))
+        var ch: UInt16 = 1
+        data.append(Data(bytes: &ch, count: 2))
+        var sRate: UInt32 = UInt32(sr)
+        data.append(Data(bytes: &sRate, count: 4))
+        var byteRate: UInt32 = UInt32(sr * 2)
+        data.append(Data(bytes: &byteRate, count: 4))
+        var blockAlign: UInt16 = 2
+        data.append(Data(bytes: &blockAlign, count: 2))
+        var bits: UInt16 = 16
+        data.append(Data(bytes: &bits, count: 2))
+
+        data.append(contentsOf: "data".utf8)
+        var dSizeLE = UInt32(1000).littleEndian
+        data.append(Data(bytes: &dSizeLE, count: 4))
+
+        // Write 7 bytes: 3 full 16-bit frames (6 bytes) + 1 partial byte
+        data.append(contentsOf: [0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70])
+
+        try data.write(to: fileURL)
+
+        var reader = try OfflineDiarizer.WAVStreamReader(url: fileURL, truncation: .tolerate)
+        defer { reader.close() }
+
+        XCTAssertTrue(reader.wasTruncated)
+        XCTAssertEqual(reader.dataSize, 7)
+
+        let frames = try reader.nextFrames(maxFrames: 100)
+        XCTAssertNotNil(frames)
+        XCTAssertEqual(frames?.count, 3, "7 bytes with 2 bytes/frame should yield exactly 3 whole frames")
+
+        let next = try reader.nextFrames(maxFrames: 100)
+        XCTAssertNil(next)
     }
 
     func testMeEnrollmentClipFiveMinuteContinuousTone() async throws {

@@ -364,7 +364,7 @@ struct HomeView: View {
                         Spacer()
                         if item.isNow(), !app.isRunning {
                             Button("Start now") {
-                                app.startUpcomingMeeting(link: item.deepLink ?? item.webLink)
+                                app.startUpcomingMeeting(item: item)
                                 screen = .live
                             }
                             .buttonStyle(.borderedProminent)

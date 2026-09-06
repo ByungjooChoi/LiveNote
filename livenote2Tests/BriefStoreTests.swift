@@ -6,10 +6,13 @@ final class BriefStoreTests: XCTestCase {
 
     private var rootURL: URL!
     private var logRoot: URL!
+    private var previousLogOverride: URL?
     private var store: BriefStore!
 
     override func setUpWithError() throws {
         try super.setUpWithError()
+        TestLogSandbox.activate()
+        previousLogOverride = AppLog.directoryOverride
         rootURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("LiveNoteBriefTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
@@ -20,7 +23,8 @@ final class BriefStoreTests: XCTestCase {
     }
 
     override func tearDown() {
-        AppLog.directoryOverride = nil
+        AppLog.flush()
+        AppLog.directoryOverride = previousLogOverride
         if let rootURL { try? FileManager.default.removeItem(at: rootURL) }
         if let logRoot { try? FileManager.default.removeItem(at: logRoot) }
         store = nil

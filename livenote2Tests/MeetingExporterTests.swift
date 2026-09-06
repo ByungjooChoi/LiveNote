@@ -5,9 +5,12 @@ import XCTest
 final class MeetingExporterTests: XCTestCase {
 
     private var tempDir: URL!
+    private var previousLogOverride: URL?
 
     override func setUp() {
         super.setUp()
+        TestLogSandbox.activate()
+        previousLogOverride = AppLog.directoryOverride
         tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("MeetingExporterTests-\(UUID().uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
@@ -15,7 +18,8 @@ final class MeetingExporterTests: XCTestCase {
     }
 
     override func tearDown() {
-        AppLog.directoryOverride = nil
+        AppLog.flush()
+        AppLog.directoryOverride = previousLogOverride
         if let tempDir {
             try? FileManager.default.removeItem(at: tempDir)
         }
@@ -608,5 +612,105 @@ final class MeetingExporterTests: XCTestCase {
             bound,
             "t(8000) = \(t8k)s should scale linearly compared to t(2000) = \(t2k)s (bound: \(bound)s)"
         )
+    }
+
+    // MARK: - U3: Scanner Equivalence Corpus and Pathological Scaling Tests
+
+    func testInlineScannerEquivalenceCorpus() {
+        let corpus: [(input: String, expected: String)] = [
+            (
+                "`hello world`",
+                "<code>hello world</code>"
+            ),
+            (
+                "[Google](https://google.com)",
+                #"<a href="https://google.com">Google</a>"#
+            ),
+            (
+                "`unclosed backtick",
+                "`unclosed backtick"
+            ),
+            (
+                "[unclosed bracket",
+                "[unclosed bracket"
+            ),
+            (
+                "[label](notaurl)",
+                "[label](notaurl)"
+            ),
+            (
+                "[label](http://example.com with space)",
+                "[label](http://example.com with space)"
+            ),
+            (
+                "[](http://example.com)",
+                "[](http://example.com)"
+            ),
+            (
+                "[`code`](https://example.com)",
+                #"<a href="https://example.com"><code>code</code></a>"#
+            ),
+            (
+                "](https://example.com)",
+                "](https://example.com)"
+            ),
+            (
+                "`e\u{0301}`",
+                "<code>e\u{0301}</code>"
+            ),
+            (
+                "[x](https://example.com/`v1`)",
+                #"<a href="https://example.com/`v1`">x</a>"#
+            ),
+            (
+                "Text with `code` and [link](https://example.com) end",
+                #"Text with <code>code</code> and <a href="https://example.com">link</a> end"#
+            ),
+            (
+                "**bold** and *italic* with `code` and [link](http://test.com)",
+                #"<strong>bold</strong> and <em>italic</em> with <code>code</code> and <a href="http://test.com">link</a>"#
+            )
+        ]
+
+        for (input, expected) in corpus {
+            XCTAssertEqual(MarkdownHTML.inline(input), expected, "Mismatch for input: \(input)")
+        }
+    }
+
+    private func assertScalingLinear(patternName: String, generator: (Int) -> String) {
+        func measure(count: Int) -> TimeInterval {
+            let input = generator(count)
+            let t0 = Date()
+            _ = MarkdownHTML.inline(input)
+            return Date().timeIntervalSince(t0)
+        }
+        let t2k = min(measure(count: 2_000), measure(count: 2_000))
+        let t8k = min(measure(count: 8_000), measure(count: 8_000))
+        let bound = 8.0 * max(t2k, 0.005)
+        XCTAssertLessThan(
+            t8k,
+            bound,
+            "\(patternName) t(8000) = \(t8k)s should scale linearly compared to t(2000) = \(t2k)s (bound: \(bound)s)"
+        )
+    }
+
+    func testScalingUnclosedOpenBracket() {
+        assertScalingLinear(patternName: "unclosed [ ") { String(repeating: "[ ", count: $0) }
+    }
+
+    func testScalingUnclosedLinkUrl() {
+        assertScalingLinear(patternName: "unclosed [a](http://x") { String(repeating: "[a](http://x", count: $0) }
+    }
+
+    func testScalingRepeatedOpenBracketFollowedByOneCloseBracket() {
+        assertScalingLinear(patternName: "[ repeated then ]") { String(repeating: "[", count: $0) + "]" }
+    }
+
+    func testScalingRepeatedBackticksFollowedByOneLetter() {
+        assertScalingLinear(patternName: "` repeated then a") { String(repeating: "`", count: $0) + "a" }
+    }
+
+    func testScalingRepeatedDoubleAsterisk() {
+        assertScalingLinear(patternName: "** repeated") { String(repeating: "**", count: $0) }
     }
 }

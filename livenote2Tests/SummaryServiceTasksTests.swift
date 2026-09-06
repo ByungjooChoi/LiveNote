@@ -7,11 +7,14 @@ final class SummaryServiceTasksTests: XCTestCase {
 
     private var root: URL!
     private var logRoot: URL!
+    private var previousLogOverride: URL?
     private var store: TaskStore!
     private var controller: TasksController!
 
     override func setUpWithError() throws {
         try super.setUpWithError()
+        TestLogSandbox.activate()
+        previousLogOverride = AppLog.directoryOverride
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("LiveNoteSummaryTasksTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -23,7 +26,8 @@ final class SummaryServiceTasksTests: XCTestCase {
     }
 
     override func tearDown() {
-        AppLog.directoryOverride = nil
+        AppLog.flush()
+        AppLog.directoryOverride = previousLogOverride
         if let root { try? FileManager.default.removeItem(at: root) }
         if let logRoot { try? FileManager.default.removeItem(at: logRoot) }
         controller = nil

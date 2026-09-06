@@ -6,9 +6,12 @@ final class PeopleDirectoryTests: XCTestCase {
 
     private var tempLogDir: URL!
     private var testStore: MeetingStore?
+    private var previousLogOverride: URL?
 
     override func setUp() {
         super.setUp()
+        TestLogSandbox.activate()
+        previousLogOverride = AppLog.directoryOverride
         tempLogDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("AppLogTests-\(UUID().uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(at: tempLogDir, withIntermediateDirectories: true)
@@ -16,7 +19,8 @@ final class PeopleDirectoryTests: XCTestCase {
     }
 
     override func tearDown() {
-        AppLog.directoryOverride = nil
+        AppLog.flush()
+        AppLog.directoryOverride = previousLogOverride
         if let tempLogDir {
             try? FileManager.default.removeItem(at: tempLogDir)
         }
@@ -351,26 +355,117 @@ final class PeopleDirectoryTests: XCTestCase {
     func testConcurrentRefreshCoalescing() async {
         let u1 = URL(fileURLWithPath: "/tmp/coal-1-\(UUID().uuidString)")
         let u2 = URL(fileURLWithPath: "/tmp/coal-2-\(UUID().uuidString)")
+        let u3 = URL(fileURLWithPath: "/tmp/coal-3-\(UUID().uuidString)")
 
         let m1 = MeetingSummary(url: u1, title: "M1", dateLabel: "d", startedAt: Date(timeIntervalSince1970: 100), rowCount: 1, durationSeconds: 10, attendees: [Attendee(name: "User One", email: "one@test.com")])
         let m2 = MeetingSummary(url: u2, title: "M2", dateLabel: "d", startedAt: Date(timeIntervalSince1970: 200), rowCount: 1, durationSeconds: 10, attendees: [Attendee(name: "User Two", email: "two@test.com")])
+        let m3 = MeetingSummary(url: u3, title: "M3", dateLabel: "d", startedAt: Date(timeIntervalSince1970: 300), rowCount: 1, durationSeconds: 10, attendees: [Attendee(name: "User Three", email: "three@test.com")])
 
-        let counter = SafeCounter()
+        final class URLRecorder: @unchecked Sendable {
+            private let lock = NSLock()
+            private(set) var urls: [URL] = []
+            func record(_ url: URL) {
+                lock.lock()
+                urls.append(url)
+                lock.unlock()
+            }
+        }
+        let recorder = URLRecorder()
+
         let directory = PeopleDirectory { url in
-            counter.increment()
-            Thread.sleep(forTimeInterval: 0.05)
+            recorder.record(url)
             return [url.lastPathComponent]
         }
 
-        async let r1: Void = directory.refresh(meetings: [m1], myName: "Me")
-        async let r2: Void = directory.refresh(meetings: [m2], myName: "Me")
+        actor TestGate {
+            private var isReleased = false
+            private var continuations: [CheckedContinuation<Void, Never>] = []
 
-        _ = await (r1, r2)
+            func wait() async {
+                if isReleased { return }
+                await withCheckedContinuation { cont in
+                    continuations.append(cont)
+                }
+            }
 
-        XCTAssertLessThanOrEqual(counter.value, 2)
-        // 최종 상태는 m2의 내용이 정상 반영되어 있어야 함
-        let names = directory.people.map { $0.displayName }
-        XCTAssertTrue(names.contains("User Two"))
+            func release() {
+                isReleased = true
+                for cont in continuations {
+                    cont.resume()
+                }
+                continuations.removeAll()
+            }
+        }
+
+        let gate = TestGate()
+        addTeardownBlock {
+            Task {
+                await gate.release()
+            }
+        }
+
+        let readerEntered = expectation(description: "reader entered")
+        let m2Queued = expectation(description: "m2 queued")
+        let m3Queued = expectation(description: "m3 queued")
+
+        final class FirstEntryFlag: @unchecked Sendable {
+            private let lock = NSLock()
+            private var done = false
+            func markFirst() -> Bool {
+                lock.lock()
+                defer { lock.unlock() }
+                if !done {
+                    done = true
+                    return true
+                }
+                return false
+            }
+        }
+        let firstEntry = FirstEntryFlag()
+
+        directory.readGate = {
+            if firstEntry.markFirst() {
+                readerEntered.fulfill()
+            }
+            await gate.wait()
+        }
+
+        directory.onRefreshQueued = { meetings in
+            let meetingUrls = meetings.map(\.url)
+            if meetingUrls == [u2] {
+                m2Queued.fulfill()
+            } else if meetingUrls == [u3] {
+                m3Queued.fulfill()
+            }
+        }
+
+        let t1 = Task { @MainActor in
+            await directory.refresh(meetings: [m1], myName: "Me")
+        }
+        await fulfillment(of: [readerEntered], timeout: 5.0)
+
+        let t2 = Task { @MainActor in
+            await directory.refresh(meetings: [m2], myName: "Me")
+        }
+        await fulfillment(of: [m2Queued], timeout: 5.0)
+
+        let t3 = Task { @MainActor in
+            await directory.refresh(meetings: [m3], myName: "Me")
+        }
+        await fulfillment(of: [m3Queued], timeout: 5.0)
+
+        await gate.release()
+
+        await t1.value
+        await t2.value
+        await t3.value
+
+        XCTAssertEqual(recorder.urls, [u1, u3], "Reader should be called with u1 then u3, skipping u2")
+        let peopleNames = directory.people.map(\.displayName)
+        XCTAssertTrue(peopleNames.contains("User Three"))
+        XCTAssertFalse(peopleNames.contains("User Two"))
+        XCTAssertFalse(directory.isLoading)
+        XCTAssertFalse(directory.isRefreshPending)
     }
 
     // MARK: - 14. 실제 Fixture 폴더에서 readSpeakerNames 파싱 검증

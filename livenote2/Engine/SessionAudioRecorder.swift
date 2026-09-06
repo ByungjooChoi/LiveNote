@@ -39,16 +39,109 @@ actor SessionAudioRecorder {
 
     private static let activeFolders = ActiveFolderRegistry()
 
+    private final class PurgeRetryCoordinator: @unchecked Sendable {
+        private let lock = NSLock()
+        private var pendingTask: Task<Void, Never>?
+        private var roots = Set<URL>()
+
+        var isPending: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return pendingTask != nil
+        }
+
+        func schedule(after seconds: TimeInterval, in root: URL) -> Bool {
+            lock.lock()
+            roots.insert(root)
+            if pendingTask != nil {
+                lock.unlock()
+                return false
+            }
+
+            let task = Task { [weak self] in
+                if seconds > 0 {
+                    try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                }
+                guard !Task.isCancelled else {
+                    self?.clearSlot()
+                    return
+                }
+                let targetRoots = self?.drainRoots() ?? []
+                for r in targetRoots {
+                    SessionAudioRecorder.purgeStale(in: r)
+                }
+                self?.clearSlot()
+            }
+            pendingTask = task
+            lock.unlock()
+            return true
+        }
+
+        func cancel() {
+            lock.lock()
+            pendingTask?.cancel()
+            pendingTask = nil
+            roots.removeAll()
+            lock.unlock()
+        }
+
+        private func clearSlot() {
+            lock.lock()
+            pendingTask = nil
+            roots.removeAll()
+            lock.unlock()
+        }
+
+        private func drainRoots() -> Set<URL> {
+            lock.lock()
+            defer { lock.unlock() }
+            let current = roots
+            roots.removeAll()
+            return current
+        }
+    }
+
+    private static let purgeCoordinator = PurgeRetryCoordinator()
+
+    nonisolated static var purgeRetryPending: Bool {
+        purgeCoordinator.isPending
+    }
+
+    @discardableResult
+    nonisolated static func schedulePurgeRetry(after seconds: TimeInterval, in root: URL) -> Bool {
+        purgeCoordinator.schedule(after: seconds, in: root)
+    }
+
+    nonisolated static func cancelPurgeRetry() {
+        purgeCoordinator.cancel()
+    }
+
     private let sampleRate: Int = 16_000
     private var handles: [AudioChannel: FileHandle] = [:]
     private var dataBytes: [AudioChannel: UInt32] = [:]
     private var urls: [AudioChannel: URL] = [:]
 
+    private let rootDirectory: URL
+    private let remover: (@Sendable (URL) throws -> Void)?
     private let folder: URL
+    private var isDeleting = false
 
-    init(rootDirectory: URL = FileManager.default.temporaryDirectory) {
-        folder = rootDirectory
+    init(
+        rootDirectory: URL = FileManager.default.temporaryDirectory,
+        remover: (@Sendable (URL) throws -> Void)? = nil
+    ) {
+        self.rootDirectory = rootDirectory
+        self.remover = remover
+        self.folder = rootDirectory
             .appendingPathComponent("livenote2-session-\(UUID().uuidString)", isDirectory: true)
+    }
+
+    private func removeItem(at url: URL) throws {
+        if let remover = remover {
+            try remover(url)
+        } else {
+            try FileManager.default.removeItem(at: url)
+        }
     }
 
     /// 세션 임시 폴더 URL
@@ -113,16 +206,54 @@ actor SessionAudioRecorder {
     }
 
     /// 임시 오디오 완전 삭제 (재디코딩 후 반드시 호출)
-    func deleteFiles() {
+    func deleteFiles(retryDelays: [TimeInterval] = [0.5, 2, 5], purgeRetryDelay: TimeInterval = 60) async {
+        guard !isDeleting else {
+            AppLog.write("app", "삭제 진행 중, 중복 호출 무시")
+            return
+        }
+        isDeleting = true
+        defer { isDeleting = false }
+
         for handle in handles.values { try? handle.close() }
         handles = [:]
-        do {
-            try FileManager.default.removeItem(at: folder)
-            AppLog.write("app", "세션 오디오 임시 파일 삭제")
-        } catch {
-            AppLog.write("app", "세션 오디오 임시 파일 삭제 실패: \(error.localizedDescription)")
+
+        var attempt = 0
+        let totalAttempts = 1 + retryDelays.count
+        var lastErrorDescription: String = "unknown"
+
+        while attempt < totalAttempts {
+            attempt += 1
+
+            // a folder that no longer exists counts as success
+            if !FileManager.default.fileExists(atPath: folder.path) {
+                AppLog.write("app", "세션 오디오 임시 파일 삭제")
+                Self.activeFolders.unregister(folder.lastPathComponent)
+                return
+            }
+
+            do {
+                try removeItem(at: folder)
+                AppLog.write("app", "세션 오디오 임시 파일 삭제")
+                Self.activeFolders.unregister(folder.lastPathComponent)
+                return
+            } catch {
+                lastErrorDescription = error.localizedDescription
+                if attempt < totalAttempts {
+                    let delay = retryDelays[attempt - 1]
+                    do {
+                        try await Task.sleep(nanoseconds: UInt64(max(0, delay) * 1_000_000_000))
+                    } catch {
+                        // if the awaiting task is cancelled during a sleep, stop retrying and treat it like the final failure
+                        break
+                    }
+                }
+            }
         }
+
+        // Final failure (or cancellation)
+        AppLog.write("app", "세션 오디오 임시 파일 삭제 실패 (\(attempt)회): \(lastErrorDescription)")
         Self.activeFolders.unregister(folder.lastPathComponent)
+        _ = Self.schedulePurgeRetry(after: purgeRetryDelay, in: rootDirectory)
     }
 
     /// 이전 세션이 비정상 종료로 남긴 임시 폴더 청소 (앱 시작 시 호출)

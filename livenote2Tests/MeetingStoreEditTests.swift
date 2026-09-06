@@ -6,9 +6,12 @@ final class MeetingStoreEditTests: XCTestCase {
 
     private var store: MeetingStore!
     private var tempLogDir: URL!
+    private var previousLogOverride: URL?
 
     override func setUp() {
         super.setUp()
+        TestLogSandbox.activate()
+        previousLogOverride = AppLog.directoryOverride
         tempLogDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("AppLogTests-\(UUID().uuidString)", isDirectory: true)
         AppLog.directoryOverride = tempLogDir
@@ -20,7 +23,8 @@ final class MeetingStoreEditTests: XCTestCase {
     }
 
     override func tearDown() {
-        AppLog.directoryOverride = nil
+        AppLog.flush()
+        AppLog.directoryOverride = previousLogOverride
         if let store {
             MeetingStoreFixture.cleanUp(store)
         }
@@ -578,6 +582,70 @@ final class MeetingStoreEditTests: XCTestCase {
         log = store.editLog(at: url)
         XCTAssertEqual(log.editsAtLastSummary, 2)
         XCTAssertEqual(log.pendingEditsSinceSummary, 0)
+    }
+
+    // MARK: - U2: Revision Consistency Tests
+
+    func testUndoAfterSummaryIncrementsRevisionAndSetsPendingToOne() throws {
+        let (url, rows) = try createTestMeeting()
+        _ = try store.updateRow(at: url, rowID: rows[0].id, english: "Row 0 Edit 1")
+        _ = try store.updateRow(at: url, rowID: rows[1].id, english: "Row 1 Edit 1")
+
+        var log = store.editLog(at: url)
+        XCTAssertEqual(log.editCount, 2)
+        XCTAssertEqual(log.revision, 2)
+
+        try store.updateSummary(at: url, summary: "Regenerated summary")
+        log = store.editLog(at: url)
+        XCTAssertEqual(log.editsAtLastSummary, 2)
+        XCTAssertEqual(log.pendingEditsSinceSummary, 0)
+
+        let result = try store.undoLastEdit(at: url)
+        let undoLog = result.log
+        XCTAssertEqual(undoLog.pendingEditsSinceSummary, 1)
+        XCTAssertEqual(undoLog.editCount, 1)
+        XCTAssertEqual(undoLog.revision, 3)
+    }
+
+    func testUndoThenFourEditsReachesBannerThresholdOfFive() throws {
+        let (url, rows) = try createTestMeeting()
+        _ = try store.updateRow(at: url, rowID: rows[0].id, english: "Row 0 Edit 1")
+        _ = try store.updateRow(at: url, rowID: rows[1].id, english: "Row 1 Edit 1")
+
+        try store.updateSummary(at: url, summary: "Regenerated summary")
+        _ = try store.undoLastEdit(at: url)
+
+        _ = try store.updateRow(at: url, rowID: rows[1].id, english: "Row 1 Edit 2")
+        _ = try store.updateRow(at: url, rowID: rows[2].id, english: "Row 2 Edit 1")
+        _ = try store.updateRow(at: url, rowID: rows[0].id, english: "Row 0 Edit 2")
+        _ = try store.updateRow(at: url, rowID: rows[1].id, english: "Row 1 Edit 3")
+
+        let log = store.editLog(at: url)
+        XCTAssertEqual(log.pendingEditsSinceSummary, 5)
+    }
+
+    func testReplaceAllThreeRowsPlusSummaryBatchUndoIncreasesRevisionByOne() throws {
+        let (url, _) = try createTestMeeting(summaryText: "Initial summary with Apple")
+
+        // 1. Summary-changing batch (only summary matched)
+        _ = try store.replaceAll(at: url, find: "Initial", replacement: "Updated", caseSensitive: true, wholeWord: true, includeSummary: true)
+
+        // 2. ReplaceAll batch affecting 3 rows (all 3 rows contain "about")
+        let replaceResult = try store.replaceAll(at: url, find: "about", replacement: "regarding", caseSensitive: true, wholeWord: true, includeSummary: false)
+        XCTAssertEqual(replaceResult.changedRowCount, 3)
+
+        // 3. Mark summary regenerated
+        try store.markSummaryRegenerated(at: url)
+        let beforeUndoLog = store.editLog(at: url)
+        XCTAssertEqual(beforeUndoLog.revision, 4)
+        XCTAssertEqual(beforeUndoLog.editsAtLastSummary, 4)
+        XCTAssertEqual(beforeUndoLog.pendingEditsSinceSummary, 0)
+
+        // 4. Undo the 3-row batch
+        let undoResult = try store.undoLastEdit(at: url)
+        XCTAssertEqual(undoResult.log.editCount, 1)
+        XCTAssertEqual(undoResult.log.revision, 5, "Revision must increase by exactly 1")
+        XCTAssertEqual(undoResult.log.pendingEditsSinceSummary, 1)
     }
 
     func testTwoSequentialReplaceAllAndTwoUndosRestoreOriginal() throws {

@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 enum TaskStatus: String, Codable, Sendable {
     case open
@@ -19,6 +20,25 @@ struct TaskItem: Codable, Identifiable, Equatable, Sendable {
     var completedAt: Date?
 }
 
+struct TaskCommitJournal: Codable, Equatable, Sendable {
+    struct Entry: Codable, Equatable, Sendable {
+        let meetingPath: String
+        let hadPrevious: Bool
+    }
+    let version: Int
+    let token: String
+    let previousIndexDigest: String
+    let indexDigest: String
+    let entries: [Entry]
+}
+
+enum RecoveryOutcome: Equatable, Sendable {
+    case none
+    case rolledForward(meetings: Int)
+    case rolledBack(meetings: Int)
+    case journalCorrupt(movedTo: URL)
+}
+
 enum TaskStoreError: LocalizedError, Equatable {
     case cannotDeleteMeetingTask
     case taskNotFound
@@ -27,12 +47,14 @@ enum TaskStoreError: LocalizedError, Equatable {
     case invalidDueDate
     case commitFailed(move: any Error, rollback: (any Error)?)
     case cleanupFailed(path: String, underlying: any Error)
+    case recoveryPending
 
     static func == (lhs: TaskStoreError, rhs: TaskStoreError) -> Bool {
         switch (lhs, rhs) {
         case (.cannotDeleteMeetingTask, .cannotDeleteMeetingTask),
              (.taskNotFound, .taskNotFound),
-             (.invalidDueDate, .invalidDueDate):
+             (.invalidDueDate, .invalidDueDate),
+             (.recoveryPending, .recoveryPending):
             return true
         case (.indexUnreadable(let a), .indexUnreadable(let b)):
             return a == b
@@ -70,6 +92,8 @@ enum TaskStoreError: LocalizedError, Equatable {
             }
         case .cleanupFailed(let path, let underlying):
             return "Failed to clean up file at \(path): \(underlying.localizedDescription)"
+        case .recoveryPending:
+            return "Task index needs recovery: previous commit was interrupted"
         }
     }
 }
@@ -90,6 +114,7 @@ struct ImportOutcome: Sendable {
     }
 }
 
+/// All TaskStore mutations must run on the main actor.
 struct TaskStore: Sendable {
     let rootURL: URL
     let indexWriter: (@Sendable (Data, URL) throws -> Void)?
@@ -125,6 +150,41 @@ struct TaskStore: Sendable {
 
     private var indexURL: URL {
         tasksDirectoryURL.appendingPathComponent("index.json")
+    }
+
+    private var journalURL: URL {
+        tasksDirectoryURL.appendingPathComponent("commit-journal.json")
+    }
+
+    private static func sha256Hex(of data: Data) -> String {
+        let digest = SHA256.hash(data: data)
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func isValidHex64(_ s: String) -> Bool {
+        guard s.utf8.count == 64 else { return false }
+        return s.allSatisfy { $0.isHexDigit }
+    }
+
+    func encodeIndex(_ items: [TaskItem]) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try encoder.encode(items)
+    }
+
+    func writeIndex(_ data: Data) throws {
+        try FileManager.default.createDirectory(at: tasksDirectoryURL, withIntermediateDirectories: true)
+        if let indexWriter = indexWriter {
+            try indexWriter(data, indexURL)
+        } else {
+            try data.write(to: indexURL, options: .atomic)
+        }
+    }
+
+    private func saveIndex(_ items: [TaskItem]) throws {
+        let data = try encodeIndex(items)
+        try writeIndex(data)
     }
 
     /// Reads <meeting>/tasks.json.
@@ -192,19 +252,6 @@ struct TaskStore: Sendable {
         }
     }
 
-    private func saveIndex(_ items: [TaskItem]) throws {
-        try FileManager.default.createDirectory(at: tasksDirectoryURL, withIntermediateDirectories: true)
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let data = try encoder.encode(items)
-        if let indexWriter = indexWriter {
-            try indexWriter(data, indexURL)
-        } else {
-            try data.write(to: indexURL, options: .atomic)
-        }
-    }
-
     func all() throws -> [TaskItem] {
         try loadIndex().sorted { $0.createdAt > $1.createdAt }
     }
@@ -236,17 +283,191 @@ struct TaskStore: Sendable {
         }
     }
 
+    /// Recovers an interrupted commit by inspecting commit-journal.json.
+    func recoverInterruptedCommit() throws -> RecoveryOutcome {
+        guard FileManager.default.fileExists(atPath: journalURL.path) else {
+            return .none
+        }
+
+        func markCorrupt() -> RecoveryOutcome {
+            let timestamp = Int(Date().timeIntervalSince1970)
+            let corruptURL = tasksDirectoryURL.appendingPathComponent("commit-journal.json.corrupt-\(timestamp)")
+            do {
+                try FileManager.default.moveItem(at: journalURL, to: corruptURL)
+            } catch {
+                AppLog.write("tasks", "손상 커밋 저널 이동 실패: \(error.localizedDescription)")
+            }
+            AppLog.write("tasks", "손상된 커밋 저널 이동: \(corruptURL.lastPathComponent)")
+            return .journalCorrupt(movedTo: corruptURL)
+        }
+
+        let journalData: Data
+        do {
+            journalData = try Data(contentsOf: journalURL)
+        } catch {
+            return markCorrupt()
+        }
+
+        let decoder = JSONDecoder()
+        let journal: TaskCommitJournal
+        do {
+            journal = try decoder.decode(TaskCommitJournal.self, from: journalData)
+        } catch {
+            return markCorrupt()
+        }
+
+        guard journal.version == 1 else {
+            return markCorrupt()
+        }
+
+        guard UUID(uuidString: journal.token) != nil else {
+            return markCorrupt()
+        }
+
+        guard Self.isValidHex64(journal.indexDigest) else {
+            return markCorrupt()
+        }
+
+        if !journal.previousIndexDigest.isEmpty {
+            guard Self.isValidHex64(journal.previousIndexDigest) else {
+                return markCorrupt()
+            }
+        }
+
+        let entryPaths = journal.entries.map(\.meetingPath)
+        guard Set(entryPaths).count == entryPaths.count else {
+            return markCorrupt()
+        }
+
+        let rootStandard = rootURL.resolvingSymlinksInPath().standardizedFileURL.path
+        let rootPrefix = rootStandard.hasSuffix("/") ? rootStandard : rootStandard + "/"
+
+        for entry in journal.entries {
+            let mURL = URL(fileURLWithPath: entry.meetingPath)
+
+            var isSymlink = false
+            if let attrs = try? FileManager.default.attributesOfItem(atPath: entry.meetingPath),
+               (attrs[.type] as? FileAttributeType) == .typeSymbolicLink {
+                isSymlink = true
+            } else {
+                let values = try? mURL.resourceValues(forKeys: [.isSymbolicLinkKey])
+                isSymlink = values?.isSymbolicLink == true
+            }
+            if isSymlink {
+                return markCorrupt()
+            }
+
+            let resolvedPath = mURL.resolvingSymlinksInPath().standardizedFileURL.path
+            guard resolvedPath.hasPrefix(rootPrefix), resolvedPath != rootStandard else {
+                return markCorrupt()
+            }
+        }
+
+        let currentIndexData = (try? Data(contentsOf: indexURL)) ?? Data()
+        let currentDigest = currentIndexData.isEmpty ? "" : Self.sha256Hex(of: currentIndexData)
+
+        if currentDigest == journal.indexDigest && journal.indexDigest != journal.previousIndexDigest {
+            // Roll forward
+            for entry in journal.entries {
+                let mURL = URL(fileURLWithPath: entry.meetingPath)
+                let prevFile = mURL.appendingPathComponent("tasks.json.prev")
+                let prevTmpFile = mURL.appendingPathComponent("tasks.json.prev.tmp")
+                let tmpFile = mURL.appendingPathComponent("tasks.json.tmp")
+
+                for target in [prevFile, prevTmpFile, tmpFile] {
+                    if FileManager.default.fileExists(atPath: target.path) {
+                        do {
+                            try removeFile(at: target)
+                        } catch {
+                            AppLog.write("tasks", "롤포워드 중 파일 정리 실패: \(error.localizedDescription)")
+                            throw error
+                        }
+                    }
+                }
+            }
+
+            do {
+                try removeFile(at: journalURL)
+            } catch {
+                AppLog.write("tasks", "롤포워드 중 저널 삭제 실패: \(error.localizedDescription)")
+                throw error
+            }
+
+            AppLog.write("tasks", "커밋 저널 롤포워드 완료 count=\(journal.entries.count)")
+            return .rolledForward(meetings: journal.entries.count)
+        } else {
+            // Roll back (including indexDigest == previousIndexDigest)
+            for entry in journal.entries {
+                let mURL = URL(fileURLWithPath: entry.meetingPath)
+                let meetingFile = mURL.appendingPathComponent("tasks.json")
+                let prevFile = mURL.appendingPathComponent("tasks.json.prev")
+                let prevTmpFile = mURL.appendingPathComponent("tasks.json.prev.tmp")
+                let tmpFile = mURL.appendingPathComponent("tasks.json.tmp")
+
+                if entry.hadPrevious {
+                    if FileManager.default.fileExists(atPath: prevFile.path) {
+                        do {
+                            if FileManager.default.fileExists(atPath: meetingFile.path) {
+                                _ = try FileManager.default.replaceItemAt(meetingFile, withItemAt: prevFile)
+                            } else {
+                                try FileManager.default.moveItem(at: prevFile, to: meetingFile)
+                            }
+                        } catch {
+                            AppLog.write("tasks", "롤백 중 prev 복원 실패: \(error.localizedDescription)")
+                            throw error
+                        }
+                    } else {
+                        AppLog.write("tasks", "롤백: hadPrevious=true이나 prev 파일 없음, tasks.json 유지 url=\(mURL.lastPathComponent)")
+                    }
+                } else {
+                    if FileManager.default.fileExists(atPath: meetingFile.path) {
+                        do {
+                            try removeFile(at: meetingFile)
+                        } catch {
+                            AppLog.write("tasks", "롤백 중 신규 tasks.json 삭제 실패: \(error.localizedDescription)")
+                            throw error
+                        }
+                    }
+                }
+
+                for target in [prevTmpFile, tmpFile] {
+                    if FileManager.default.fileExists(atPath: target.path) {
+                        do {
+                            try removeFile(at: target)
+                        } catch {
+                            AppLog.write("tasks", "롤백 중 tmp 정리 실패: \(error.localizedDescription)")
+                            throw error
+                        }
+                    }
+                }
+            }
+
+            do {
+                try removeFile(at: journalURL)
+            } catch {
+                AppLog.write("tasks", "롤백 중 저널 삭제 실패: \(error.localizedDescription)")
+                throw error
+            }
+
+            AppLog.write("tasks", "커밋 저널 롤백 완료 count=\(journal.entries.count)")
+            return .rolledBack(meetings: journal.entries.count)
+        }
+    }
+
     /// Replaces meeting tasks upon summary regeneration.
-    /// Commit order (T1):
-    /// 1. Encode both payloads first (any encoding error throws before touching disk).
-    /// 2. Write the meeting file to tasks.json.tmp; if old tasks.json exists, copy it to tasks.json.prev.
-    /// 3. Move tasks.json.tmp -> tasks.json (replaceItemAt).
-    /// 4. Save the index LAST (atomic write). If it fails: restore tasks.json from tasks.json.prev (or delete if none); throw TaskStoreError.commitFailed(move: indexError, rollback: restoreError?).
-    /// 5. On success delete tasks.json.prev. Post-commit cleanup failures surface as warnings.
-    /// Preserves existing IDs, creation dates, and done status for matching items in the index using queue matching.
-    /// Meeting file gets status = .open, completedAt = nil as the extraction original.
+    /// Commit order:
+    /// 0. Check unresolved recovery journal; encode every payload including the final index Data, compute digests.
+    /// 1. Write the journal atomically (.atomic).
+    /// 2. Per meeting: copy tasks.json to tasks.json.prev.tmp, rename atomically to tasks.json.prev; write tasks.json.tmp, replace tasks.json.
+    /// 3. Write the index using the pre-encoded Data.
+    /// 4. Delete .prev, .prev.tmp, .tmp files.
+    /// 5. Delete the journal.
     @discardableResult
     func replaceTasks(_ items: [TaskItem], for meetingURL: URL) throws -> (items: [TaskItem], warnings: [String]) {
+        guard !FileManager.default.fileExists(atPath: journalURL.path) else {
+            throw TaskStoreError.recoveryPending
+        }
+
         // Validate that existing meeting file is readable/not corrupt
         _ = try loadMeetingTasks(at: meetingURL)
 
@@ -301,45 +522,62 @@ struct TaskStore: Sendable {
         }
         newIndex.append(contentsOf: mergedIndexItems)
 
-        // 1. Encode both payloads first (any encoding error throws before touching disk)
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let meetingData = try encoder.encode(meetingFileItems)
-        _ = try encoder.encode(newIndex)
-
-        // 2. Pre-commit cleanup: remove stale .tmp / .prev
+        // Pre-commit cleanup: remove stale .tmp / .prev / .prev.tmp
         try FileManager.default.createDirectory(at: meetingURL, withIntermediateDirectories: true)
         let meetingTasksFile = meetingURL.appendingPathComponent("tasks.json")
         let meetingTasksTmp = meetingURL.appendingPathComponent("tasks.json.tmp")
         let meetingTasksPrev = meetingURL.appendingPathComponent("tasks.json.prev")
+        let meetingTasksPrevTmp = meetingURL.appendingPathComponent("tasks.json.prev.tmp")
 
-        if FileManager.default.fileExists(atPath: meetingTasksTmp.path) {
-            do {
-                try removeFile(at: meetingTasksTmp)
-            } catch {
-                AppLog.write("tasks", "Pre-commit tmp cleanup failed path=\(meetingTasksTmp.path): \(error.localizedDescription)")
-                throw TaskStoreError.cleanupFailed(path: meetingTasksTmp.path, underlying: error)
-            }
-        }
-        if FileManager.default.fileExists(atPath: meetingTasksPrev.path) {
-            do {
-                try removeFile(at: meetingTasksPrev)
-            } catch {
-                AppLog.write("tasks", "Pre-commit prev cleanup failed path=\(meetingTasksPrev.path): \(error.localizedDescription)")
-                throw TaskStoreError.cleanupFailed(path: meetingTasksPrev.path, underlying: error)
+        for staleURL in [meetingTasksTmp, meetingTasksPrevTmp, meetingTasksPrev] {
+            if FileManager.default.fileExists(atPath: staleURL.path) {
+                do {
+                    try removeFile(at: staleURL)
+                } catch {
+                    AppLog.write("tasks", "Pre-commit cleanup failed path=\(staleURL.path): \(error.localizedDescription)")
+                    throw TaskStoreError.cleanupFailed(path: staleURL.path, underlying: error)
+                }
             }
         }
 
-        try meetingData.write(to: meetingTasksTmp, options: .atomic)
+        // 0. Encode every payload including the final index Data, compute both digests
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let meetingData = try encoder.encode(meetingFileItems)
+        let newIndexData = try encodeIndex(newIndex)
+
+        let previousIndexData = (try? Data(contentsOf: indexURL)) ?? Data()
+        let previousIndexDigest = previousIndexData.isEmpty ? "" : Self.sha256Hex(of: previousIndexData)
+        let newIndexDigest = Self.sha256Hex(of: newIndexData)
 
         let hadPreviousMeetingFile = FileManager.default.fileExists(atPath: meetingTasksFile.path)
-        if hadPreviousMeetingFile {
-            try FileManager.default.copyItem(at: meetingTasksFile, to: meetingTasksPrev)
-        }
+        let stdMeetingPath = meetingURL.resolvingSymlinksInPath().standardizedFileURL.path
 
-        // 3. Move tasks.json.tmp -> tasks.json (replaceItemAt)
+        let journal = TaskCommitJournal(
+            version: 1,
+            token: UUID().uuidString,
+            previousIndexDigest: previousIndexDigest,
+            indexDigest: newIndexDigest,
+            entries: [
+                TaskCommitJournal.Entry(meetingPath: stdMeetingPath, hadPrevious: hadPreviousMeetingFile)
+            ]
+        )
+        let journalEncoder = JSONEncoder()
+        journalEncoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let journalData = try journalEncoder.encode(journal)
+
+        // 1. Write the journal atomically (.atomic)
+        try FileManager.default.createDirectory(at: tasksDirectoryURL, withIntermediateDirectories: true)
+        try journalData.write(to: journalURL, options: .atomic)
+
+        // 2. Per meeting: backup to .prev.tmp -> .prev; write .tmp, replace tasks.json
         do {
+            if hadPreviousMeetingFile {
+                try FileManager.default.copyItem(at: meetingTasksFile, to: meetingTasksPrevTmp)
+                try FileManager.default.moveItem(at: meetingTasksPrevTmp, to: meetingTasksPrev)
+            }
+            try meetingData.write(to: meetingTasksTmp, options: .atomic)
             if hadPreviousMeetingFile {
                 _ = try FileManager.default.replaceItemAt(meetingTasksFile, withItemAt: meetingTasksTmp)
             } else {
@@ -347,21 +585,28 @@ struct TaskStore: Sendable {
             }
         } catch let moveError {
             var moveRollbackErr: (any Error)? = nil
-            if FileManager.default.fileExists(atPath: meetingTasksTmp.path) {
-                do {
-                    try removeFile(at: meetingTasksTmp)
-                } catch {
-                    moveRollbackErr = error
-                    AppLog.write("tasks", "이동 실패 후 tmp 정리 실패: \(error.localizedDescription)")
+            for stale in [meetingTasksTmp, meetingTasksPrevTmp] {
+                if FileManager.default.fileExists(atPath: stale.path) {
+                    do { try removeFile(at: stale) } catch { if moveRollbackErr == nil { moveRollbackErr = error } }
                 }
             }
             if FileManager.default.fileExists(atPath: meetingTasksPrev.path) {
-                do {
-                    try removeFile(at: meetingTasksPrev)
-                } catch {
-                    if moveRollbackErr == nil { moveRollbackErr = error }
-                    AppLog.write("tasks", "이동 실패 후 prev 정리 실패: \(error.localizedDescription)")
+                if hadPreviousMeetingFile {
+                    do {
+                        if FileManager.default.fileExists(atPath: meetingTasksFile.path) {
+                            _ = try FileManager.default.replaceItemAt(meetingTasksFile, withItemAt: meetingTasksPrev)
+                        } else {
+                            try FileManager.default.moveItem(at: meetingTasksPrev, to: meetingTasksFile)
+                        }
+                    } catch {
+                        if moveRollbackErr == nil { moveRollbackErr = error }
+                    }
                 }
+                do { try removeFile(at: meetingTasksPrev) } catch { if moveRollbackErr == nil { moveRollbackErr = error } }
+            }
+
+            if moveRollbackErr == nil {
+                try? removeFile(at: journalURL)
             }
             AppLog.write("tasks", "회의 폴더 tasks.json 이동 실패 url=\(meetingURL.lastPathComponent): \(moveError.localizedDescription)")
             if let moveRollbackErr = moveRollbackErr {
@@ -370,55 +615,94 @@ struct TaskStore: Sendable {
             throw moveError
         }
 
-        // 4. Save the index LAST (atomic write). If it fails: restore tasks.json from tasks.json.prev (or delete if none)
-        do {
-            try saveIndex(newIndex)
-        } catch let indexError {
-            var restoreError: (any Error)? = nil
-            if hadPreviousMeetingFile {
-                do {
-                    if FileManager.default.fileExists(atPath: meetingTasksFile.path) {
-                        _ = try FileManager.default.replaceItemAt(meetingTasksFile, withItemAt: meetingTasksPrev)
-                    } else {
-                        try FileManager.default.moveItem(at: meetingTasksPrev, to: meetingTasksFile)
-                    }
-                } catch let rErr {
-                    restoreError = rErr
-                    AppLog.write("tasks", "회의 tasks.json 롤백 복원 실패 url=\(meetingURL.lastPathComponent): \(rErr.localizedDescription)")
-                }
-            } else {
-                do {
-                    if FileManager.default.fileExists(atPath: meetingTasksFile.path) {
-                        try removeFile(at: meetingTasksFile)
-                    }
-                } catch let rErr {
-                    restoreError = rErr
-                    AppLog.write("tasks", "신규 회의 tasks.json 정리 실패 url=\(meetingURL.lastPathComponent): \(rErr.localizedDescription)")
-                }
-            }
-
-            if FileManager.default.fileExists(atPath: meetingTasksPrev.path) {
-                do {
-                    try removeFile(at: meetingTasksPrev)
-                } catch let prevCleanupErr {
-                    if restoreError == nil { restoreError = prevCleanupErr }
-                    AppLog.write("tasks", "롤백 후 prev 정리 실패 url=\(meetingURL.lastPathComponent): \(prevCleanupErr.localizedDescription)")
-                }
-            }
-
-            AppLog.write("tasks", "인덱스 저장 실패 및 회의 파일 롤백 url=\(meetingURL.lastPathComponent): \(indexError.localizedDescription)")
-            throw TaskStoreError.commitFailed(move: indexError, rollback: restoreError)
-        }
-
-        // 5. Post-commit cleanup: delete tasks.json.prev. Failures surface as warnings.
+        // 3. Write the index using the pre-encoded Data
         var warnings: [String] = []
-        if FileManager.default.fileExists(atPath: meetingTasksPrev.path) {
-            do {
-                try removeFile(at: meetingTasksPrev)
-            } catch let cleanupErr {
-                let warn = "Failed to remove backup file at \(meetingTasksPrev.path): \(cleanupErr.localizedDescription)"
+
+        do {
+            try writeIndex(newIndexData)
+        } catch let indexError {
+            if let existingIndexData = try? Data(contentsOf: indexURL),
+               Self.sha256Hex(of: existingIndexData) == newIndexDigest {
+                let warn = "Index write threw but file was committed: \(indexError.localizedDescription)"
                 AppLog.write("tasks", warn)
                 warnings.append(warn)
+            } else {
+                var restoreError: (any Error)? = nil
+                if hadPreviousMeetingFile {
+                    do {
+                        if FileManager.default.fileExists(atPath: meetingTasksFile.path) {
+                            try? FileManager.default.removeItem(at: meetingTasksFile)
+                        }
+                        if FileManager.default.fileExists(atPath: meetingTasksPrev.path) {
+                            try FileManager.default.copyItem(at: meetingTasksPrev, to: meetingTasksFile)
+                            try removeFile(at: meetingTasksPrev)
+                        }
+                    } catch let rErr {
+                        restoreError = rErr
+                        AppLog.write("tasks", "회의 tasks.json 롤백 복원 실패 url=\(meetingURL.lastPathComponent): \(rErr.localizedDescription)")
+                    }
+                } else {
+                    do {
+                        if FileManager.default.fileExists(atPath: meetingTasksFile.path) {
+                            try removeFile(at: meetingTasksFile)
+                        }
+                    } catch let rErr {
+                        restoreError = rErr
+                        AppLog.write("tasks", "신규 회의 tasks.json 정리 실패 url=\(meetingURL.lastPathComponent): \(rErr.localizedDescription)")
+                    }
+                }
+
+                for stale in [meetingTasksPrevTmp, meetingTasksTmp] {
+                    if FileManager.default.fileExists(atPath: stale.path) {
+                        do {
+                            try removeFile(at: stale)
+                        } catch let cleanupErr {
+                            if restoreError == nil { restoreError = cleanupErr }
+                            AppLog.write("tasks", "롤백 후 파일 정리 실패 url=\(meetingURL.lastPathComponent): \(cleanupErr.localizedDescription)")
+                        }
+                    }
+                }
+
+                if let restoreError = restoreError {
+                    AppLog.write("tasks", "인덱스 저장 실패 및 롤백 실패, 저널 유지: \(indexError.localizedDescription)")
+                    throw TaskStoreError.commitFailed(move: indexError, rollback: restoreError)
+                } else {
+                    try? removeFile(at: journalURL)
+                    AppLog.write("tasks", "인덱스 저장 실패 및 회의 파일 롤백 url=\(meetingURL.lastPathComponent): \(indexError.localizedDescription)")
+                    throw TaskStoreError.commitFailed(move: indexError, rollback: nil)
+                }
+            }
+        }
+
+        // 4. Delete .prev, .prev.tmp, .tmp files
+        for cleanupTarget in [meetingTasksPrev, meetingTasksPrevTmp, meetingTasksTmp] {
+            if FileManager.default.fileExists(atPath: cleanupTarget.path) {
+                do {
+                    try removeFile(at: cleanupTarget)
+                } catch {
+                    do {
+                        try removeFile(at: cleanupTarget)
+                    } catch let cleanupErr {
+                        let warn = "Failed to remove backup file at \(cleanupTarget.path): \(cleanupErr.localizedDescription)"
+                        AppLog.write("tasks", warn)
+                        warnings.append(warn)
+                    }
+                }
+            }
+        }
+
+        // 5. Delete the journal
+        if FileManager.default.fileExists(atPath: journalURL.path) {
+            do {
+                try removeFile(at: journalURL)
+            } catch {
+                do {
+                    try removeFile(at: journalURL)
+                } catch let journalErr {
+                    let warn = "Failed to delete commit journal at \(journalURL.path): \(journalErr.localizedDescription)"
+                    AppLog.write("tasks", warn)
+                    warnings.append(warn)
+                }
             }
         }
 
@@ -426,12 +710,12 @@ struct TaskStore: Sendable {
     }
 
     /// Upserts imported tasks into index by (meetingURL, normalized title).
-    /// Items whose meeting-file write fails are NOT added to index or saved items.
-    /// Existing items keep ID/status/createdAt; new ones are appended.
-    /// Also appends to <meeting>/tasks.json when meetingURL is non-nil with status = .open, completedAt = nil.
-    /// Returns ImportOutcome with saved items, per-meeting write failures, and warnings.
     @discardableResult
     func appendImported(_ items: [TaskItem]) throws -> ImportOutcome {
+        guard !FileManager.default.fileExists(atPath: journalURL.path) else {
+            throw TaskStoreError.recoveryPending
+        }
+
         let previousIndex = try loadIndex()
 
         // Check each meeting file for corruption before mutating anything
@@ -448,29 +732,29 @@ struct TaskStore: Sendable {
         let urlLessItems = items.filter { $0.meetingURL == nil }
         let itemsByMeeting = Dictionary(grouping: items.filter { $0.meetingURL != nil }) { $0.meetingURL! }
 
-        // 1. Prepare meeting file payloads and perform pre-commit cleanups
-        var meetingDataByUrl: [URL: (data: Data, tasks: [TaskItem])] = [:]
-        for (meetingURL, meetingItems) in itemsByMeeting {
+        // Pre-commit cleanups: remove stale .tmp / .prev.tmp / .prev
+        for meetingURL in distinctMeetingURLs {
             let meetingTasksTmp = meetingURL.appendingPathComponent("tasks.json.tmp")
             let meetingTasksPrev = meetingURL.appendingPathComponent("tasks.json.prev")
+            let meetingTasksPrevTmp = meetingURL.appendingPathComponent("tasks.json.prev.tmp")
 
-            if FileManager.default.fileExists(atPath: meetingTasksTmp.path) {
-                do {
-                    try removeFile(at: meetingTasksTmp)
-                } catch {
-                    AppLog.write("tasks", "Pre-commit tmp cleanup failed path=\(meetingTasksTmp.path): \(error.localizedDescription)")
-                    throw TaskStoreError.cleanupFailed(path: meetingTasksTmp.path, underlying: error)
+            for stale in [meetingTasksTmp, meetingTasksPrevTmp, meetingTasksPrev] {
+                if FileManager.default.fileExists(atPath: stale.path) {
+                    do {
+                        try removeFile(at: stale)
+                    } catch {
+                        AppLog.write("tasks", "Pre-commit cleanup failed path=\(stale.path): \(error.localizedDescription)")
+                        throw TaskStoreError.cleanupFailed(path: stale.path, underlying: error)
+                    }
                 }
             }
-            if FileManager.default.fileExists(atPath: meetingTasksPrev.path) {
-                do {
-                    try removeFile(at: meetingTasksPrev)
-                } catch {
-                    AppLog.write("tasks", "Pre-commit prev cleanup failed path=\(meetingTasksPrev.path): \(error.localizedDescription)")
-                    throw TaskStoreError.cleanupFailed(path: meetingTasksPrev.path, underlying: error)
-                }
-            }
+        }
 
+        // 1 & 2. Write meeting files: write .tmp, copy old to .prev.tmp -> .prev, replace tasks.json
+        var failures: [(meetingURL: URL?, error: any Error)] = []
+        var committedMeetings: [(url: URL, hadPrev: Bool, items: [TaskItem])] = []
+
+        for (meetingURL, meetingItems) in itemsByMeeting {
             let existingMeetingTasks = existingTasksByMeeting[meetingURL] ?? []
             var meetingQueues: [String: [TaskItem]] = [:]
             for t in existingMeetingTasks {
@@ -482,7 +766,6 @@ struct TaskStore: Sendable {
             for item in meetingItems {
                 let key = item.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
                 var meetingItem = item
-                // Status is index-only: meeting file items always have status = .open, completedAt = nil
                 meetingItem.status = .open
                 meetingItem.completedAt = nil
 
@@ -499,52 +782,34 @@ struct TaskStore: Sendable {
                 }
             }
 
-            let data = try encoder.encode(mergedMeetingTasks)
-            meetingDataByUrl[meetingURL] = (data, mergedMeetingTasks)
-        }
-
-        // 2 & 3. Write meeting files to .tmp, copy old to .prev, move .tmp -> tasks.json
-        var failures: [(meetingURL: URL?, error: any Error)] = []
-        var committedMeetings: [(url: URL, hadPrev: Bool, items: [TaskItem])] = []
-
-        for (meetingURL, entry) in meetingDataByUrl {
-            let meetingTasksFile = meetingURL.appendingPathComponent("tasks.json")
             let meetingTasksTmp = meetingURL.appendingPathComponent("tasks.json.tmp")
             let meetingTasksPrev = meetingURL.appendingPathComponent("tasks.json.prev")
+            let meetingTasksPrevTmp = meetingURL.appendingPathComponent("tasks.json.prev.tmp")
+            let meetingTasksFile = meetingURL.appendingPathComponent("tasks.json")
 
             do {
+                let data = try encoder.encode(mergedMeetingTasks)
                 try FileManager.default.createDirectory(at: meetingURL, withIntermediateDirectories: true)
-                try entry.data.write(to: meetingTasksTmp, options: .atomic)
-
+                try data.write(to: meetingTasksTmp, options: .atomic)
                 let hadPrev = FileManager.default.fileExists(atPath: meetingTasksFile.path)
                 if hadPrev {
-                    try FileManager.default.copyItem(at: meetingTasksFile, to: meetingTasksPrev)
-                }
-
-                if hadPrev {
+                    try FileManager.default.copyItem(at: meetingTasksFile, to: meetingTasksPrevTmp)
+                    try FileManager.default.moveItem(at: meetingTasksPrevTmp, to: meetingTasksPrev)
                     _ = try FileManager.default.replaceItemAt(meetingTasksFile, withItemAt: meetingTasksTmp)
                 } else {
                     try FileManager.default.moveItem(at: meetingTasksTmp, to: meetingTasksFile)
                 }
-
-                let originalItems = itemsByMeeting[meetingURL] ?? []
-                committedMeetings.append((url: meetingURL, hadPrev: hadPrev, items: originalItems))
+                committedMeetings.append((url: meetingURL, hadPrev: hadPrev, items: meetingItems))
             } catch let writeError {
                 var rollbackCleanupError: (any Error)? = nil
-                if FileManager.default.fileExists(atPath: meetingTasksTmp.path) {
-                    do {
-                        try removeFile(at: meetingTasksTmp)
-                    } catch let tmpErr {
-                        if rollbackCleanupError == nil { rollbackCleanupError = tmpErr }
-                        AppLog.write("tasks", "회의 실패 후 tmp 정리 실패: \(tmpErr.localizedDescription)")
-                    }
-                }
-                if FileManager.default.fileExists(atPath: meetingTasksPrev.path) {
-                    do {
-                        try removeFile(at: meetingTasksPrev)
-                    } catch let prevErr {
-                        if rollbackCleanupError == nil { rollbackCleanupError = prevErr }
-                        AppLog.write("tasks", "회의 실패 후 prev 정리 실패: \(prevErr.localizedDescription)")
+                for stale in [meetingTasksTmp, meetingTasksPrevTmp, meetingTasksPrev] {
+                    if FileManager.default.fileExists(atPath: stale.path) {
+                        do {
+                            try removeFile(at: stale)
+                        } catch let tmpErr {
+                            if rollbackCleanupError == nil { rollbackCleanupError = tmpErr }
+                            AppLog.write("tasks", "회의 실패 후 정리 실패: \(tmpErr.localizedDescription)")
+                        }
                     }
                 }
                 AppLog.write("tasks", "회의 폴더 tasks.json 추가 실패 url=\(meetingURL.lastPathComponent): \(writeError.localizedDescription)")
@@ -556,6 +821,10 @@ struct TaskStore: Sendable {
                 }
                 failures.append((meetingURL: meetingURL, error: reportedError))
             }
+        }
+
+        if committedMeetings.isEmpty && urlLessItems.isEmpty {
+            return ImportOutcome(saved: [], failures: failures, warnings: [])
         }
 
         // Build newIndex only from items that committed to meeting files, plus url-less items
@@ -592,60 +861,146 @@ struct TaskStore: Sendable {
             savedItems.append(incoming)
         }
 
-        // 4. Save the index LAST (authoritative). If it fails: restore all committed meeting files
-        do {
-            try saveIndex(newIndex)
-        } catch let indexError {
-            var firstRestoreError: (any Error)? = nil
-            for (meetingURL, hadPrev, _) in committedMeetings {
-                let meetingTasksFile = meetingURL.appendingPathComponent("tasks.json")
-                let meetingTasksPrev = meetingURL.appendingPathComponent("tasks.json.prev")
+        // 0. Encode final index Data and compute digests
+        let newIndexData = try encodeIndex(newIndex)
+        let previousIndexData = (try? Data(contentsOf: indexURL)) ?? Data()
+        let previousIndexDigest = previousIndexData.isEmpty ? "" : Self.sha256Hex(of: previousIndexData)
+        let newIndexDigest = Self.sha256Hex(of: newIndexData)
 
-                if hadPrev {
-                    do {
-                        if FileManager.default.fileExists(atPath: meetingTasksFile.path) {
-                            _ = try FileManager.default.replaceItemAt(meetingTasksFile, withItemAt: meetingTasksPrev)
-                        } else {
-                            try FileManager.default.moveItem(at: meetingTasksPrev, to: meetingTasksFile)
-                        }
-                    } catch let rErr {
-                        if firstRestoreError == nil { firstRestoreError = rErr }
-                        AppLog.write("tasks", "회의 tasks.json 롤백 복원 실패 url=\(meetingURL.lastPathComponent): \(rErr.localizedDescription)")
-                    }
+        let journalEntries = committedMeetings.map { m in
+            TaskCommitJournal.Entry(
+                meetingPath: m.url.resolvingSymlinksInPath().standardizedFileURL.path,
+                hadPrevious: m.hadPrev
+            )
+        }
+        let journal = TaskCommitJournal(
+            version: 1,
+            token: UUID().uuidString,
+            previousIndexDigest: previousIndexDigest,
+            indexDigest: newIndexDigest,
+            entries: journalEntries
+        )
+        let journalEncoder = JSONEncoder()
+        journalEncoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let journalData = try journalEncoder.encode(journal)
+
+        // 1. Write journal atomically
+        do {
+            try FileManager.default.createDirectory(at: tasksDirectoryURL, withIntermediateDirectories: true)
+            try journalData.write(to: journalURL, options: .atomic)
+        } catch {
+            // Rollback committed meetings
+            for m in committedMeetings {
+                let meetingTasksFile = m.url.appendingPathComponent("tasks.json")
+                let meetingTasksPrev = m.url.appendingPathComponent("tasks.json.prev")
+                if m.hadPrev {
+                    try? FileManager.default.removeItem(at: meetingTasksFile)
+                    try? FileManager.default.copyItem(at: meetingTasksPrev, to: meetingTasksFile)
                 } else {
-                    do {
-                        if FileManager.default.fileExists(atPath: meetingTasksFile.path) {
-                            try removeFile(at: meetingTasksFile)
+                    try? removeFile(at: meetingTasksFile)
+                }
+                try? removeFile(at: meetingTasksPrev)
+            }
+            throw error
+        }
+
+        // 3. Write the index using pre-encoded Data
+        var warnings: [String] = []
+        do {
+            try writeIndex(newIndexData)
+        } catch let indexError {
+            if let existingIndexData = try? Data(contentsOf: indexURL),
+               Self.sha256Hex(of: existingIndexData) == newIndexDigest {
+                let warn = "Index write threw but file was committed: \(indexError.localizedDescription)"
+                AppLog.write("tasks", warn)
+                warnings.append(warn)
+            } else {
+                var firstRestoreError: (any Error)? = nil
+                for (meetingURL, hadPrev, _) in committedMeetings {
+                    let meetingTasksFile = meetingURL.appendingPathComponent("tasks.json")
+                    let meetingTasksPrev = meetingURL.appendingPathComponent("tasks.json.prev")
+                    let meetingTasksPrevTmp = meetingURL.appendingPathComponent("tasks.json.prev.tmp")
+                    let meetingTasksTmp = meetingURL.appendingPathComponent("tasks.json.tmp")
+
+                    if hadPrev {
+                        do {
+                            if FileManager.default.fileExists(atPath: meetingTasksFile.path) {
+                                try? FileManager.default.removeItem(at: meetingTasksFile)
+                            }
+                            if FileManager.default.fileExists(atPath: meetingTasksPrev.path) {
+                                try FileManager.default.copyItem(at: meetingTasksPrev, to: meetingTasksFile)
+                                try removeFile(at: meetingTasksPrev)
+                            }
+                        } catch let rErr {
+                            if firstRestoreError == nil { firstRestoreError = rErr }
+                            AppLog.write("tasks", "회의 tasks.json 롤백 복원 실패 url=\(meetingURL.lastPathComponent): \(rErr.localizedDescription)")
                         }
-                    } catch let rErr {
-                        if firstRestoreError == nil { firstRestoreError = rErr }
-                        AppLog.write("tasks", "신규 회의 tasks.json 정리 실패 url=\(meetingURL.lastPathComponent): \(rErr.localizedDescription)")
+                    } else {
+                        do {
+                            if FileManager.default.fileExists(atPath: meetingTasksFile.path) {
+                                try removeFile(at: meetingTasksFile)
+                            }
+                        } catch let rErr {
+                            if firstRestoreError == nil { firstRestoreError = rErr }
+                            AppLog.write("tasks", "신규 회의 tasks.json 정리 실패 url=\(meetingURL.lastPathComponent): \(rErr.localizedDescription)")
+                        }
+                    }
+
+                    for stale in [meetingTasksPrevTmp, meetingTasksTmp] {
+                        if FileManager.default.fileExists(atPath: stale.path) {
+                            do {
+                                try removeFile(at: stale)
+                            } catch let rErr {
+                                if firstRestoreError == nil { firstRestoreError = rErr }
+                                AppLog.write("tasks", "롤백 후 파일 정리 실패: \(rErr.localizedDescription)")
+                            }
+                        }
                     }
                 }
 
-                if FileManager.default.fileExists(atPath: meetingTasksPrev.path) {
+                if let firstRestoreError = firstRestoreError {
+                    AppLog.write("tasks", "인덱스 저장 실패 및 롤백 실패, 저널 유지: \(indexError.localizedDescription)")
+                    throw TaskStoreError.commitFailed(move: indexError, rollback: firstRestoreError)
+                } else {
+                    try? removeFile(at: journalURL)
+                    AppLog.write("tasks", "인덱스 저장 실패 및 회의 파일들 롤백: \(indexError.localizedDescription)")
+                    throw TaskStoreError.commitFailed(move: indexError, rollback: nil)
+                }
+            }
+        }
+
+        // 4. Delete .prev, .prev.tmp, .tmp files for all committed meetings
+        for (meetingURL, _, _) in committedMeetings {
+            let meetingTasksPrev = meetingURL.appendingPathComponent("tasks.json.prev")
+            let meetingTasksPrevTmp = meetingURL.appendingPathComponent("tasks.json.prev.tmp")
+            let meetingTasksTmp = meetingURL.appendingPathComponent("tasks.json.tmp")
+
+            for cleanupTarget in [meetingTasksPrev, meetingTasksPrevTmp, meetingTasksTmp] {
+                if FileManager.default.fileExists(atPath: cleanupTarget.path) {
                     do {
-                        try removeFile(at: meetingTasksPrev)
-                    } catch let rErr {
-                        if firstRestoreError == nil { firstRestoreError = rErr }
-                        AppLog.write("tasks", "롤백 후 prev 정리 실패: \(rErr.localizedDescription)")
+                        try removeFile(at: cleanupTarget)
+                    } catch {
+                        do {
+                            try removeFile(at: cleanupTarget)
+                        } catch let cleanupErr {
+                            let warn = "Failed to remove backup file at \(cleanupTarget.path): \(cleanupErr.localizedDescription)"
+                            AppLog.write("tasks", warn)
+                            warnings.append(warn)
+                        }
                     }
                 }
             }
-
-            AppLog.write("tasks", "인덱스 저장 실패 및 회의 파일들 롤백: \(indexError.localizedDescription)")
-            throw TaskStoreError.commitFailed(move: indexError, rollback: firstRestoreError)
         }
 
-        // 5. Post-commit cleanup: delete tasks.json.prev for all committed meetings. Post-commit failures -> warnings
-        var warnings: [String] = []
-        for (meetingURL, _, _) in committedMeetings {
-            let meetingTasksPrev = meetingURL.appendingPathComponent("tasks.json.prev")
-            if FileManager.default.fileExists(atPath: meetingTasksPrev.path) {
+        // 5. Delete the journal
+        if FileManager.default.fileExists(atPath: journalURL.path) {
+            do {
+                try removeFile(at: journalURL)
+            } catch {
                 do {
-                    try removeFile(at: meetingTasksPrev)
-                } catch let cleanupErr {
-                    let warn = "Failed to remove backup file at \(meetingTasksPrev.path): \(cleanupErr.localizedDescription)"
+                    try removeFile(at: journalURL)
+                } catch let journalErr {
+                    let warn = "Failed to delete commit journal at \(journalURL.path): \(journalErr.localizedDescription)"
                     AppLog.write("tasks", warn)
                     warnings.append(warn)
                 }

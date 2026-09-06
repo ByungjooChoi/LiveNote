@@ -190,8 +190,11 @@ actor OfflineDiarizer {
 
     /// 본인(Me) 음성 등록용 오디오 클립 추출 (마이크 전체 WAV를 스트리밍 스캔하여 최대 maxSeconds 음성 수집, 침묵 제거, 16kHz 리샘플링)
     nonisolated static func meEnrollmentClip(wavURL: URL, maxSeconds: Double = 60.0) throws -> (samples: [Float], seconds: Double) {
-        var reader = try WAVStreamReader(url: wavURL)
+        var reader = try WAVStreamReader(url: wavURL, truncation: .tolerate)
         defer { reader.close() }
+        if reader.wasTruncated {
+            AppLog.write("voice", "Me 음성 등록 WAV 데이터 청크가 헤더보다 짧음 (잘림 허용됨)")
+        }
         let chunkFrames = reader.sampleRate * 10
         return try collectVoicedSamples(
             next: { try reader.nextFrames(maxFrames: chunkFrames) },
@@ -378,17 +381,37 @@ actor OfflineDiarizer {
         return try parseWAVData(data)
     }
 
+    enum TruncationPolicy: Sendable {
+        case reject
+        case tolerate
+    }
+
+    enum WAVStreamError: LocalizedError, Equatable {
+        case truncatedData(expectedBytes: Int, availableBytes: Int)
+
+        var errorDescription: String? {
+            switch self {
+            case .truncatedData(let expectedBytes, let availableBytes):
+                return "WAV data chunk shorter than header: expected \(expectedBytes) bytes, found \(availableBytes)"
+            }
+        }
+    }
+
     /// 스트리밍 방식으로 16-bit PCM WAV 파일에서 오디오 프레임을 청크 단위로 읽는 리더
     struct WAVStreamReader {
+        typealias TruncationPolicy = OfflineDiarizer.TruncationPolicy
+        typealias WAVStreamError = OfflineDiarizer.WAVStreamError
+
         private let handle: FileHandle
         let channels: Int
         let sampleRate: Int
         let bitsPerSample: Int
         let dataOffset: Int
         let dataSize: Int
+        let wasTruncated: Bool
         private var bytesReadFromData: Int = 0
 
-        init(url: URL) throws {
+        init(url: URL, truncation: TruncationPolicy = .reject) throws {
             let handle = try FileHandle(forReadingFrom: url)
             self.handle = handle
 
@@ -406,7 +429,29 @@ actor OfflineDiarizer {
             self.sampleRate = sr
             self.bitsPerSample = bits
             self.dataOffset = offset
-            self.dataSize = size
+
+            let fileSize: Int
+            if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+               let num = attrs[.size] as? NSNumber {
+                fileSize = num.intValue
+            } else {
+                fileSize = Int(try handle.seekToEnd())
+            }
+
+            let availableBytes = max(0, fileSize - offset)
+            if fileSize < offset + size {
+                switch truncation {
+                case .reject:
+                    try? handle.close()
+                    throw WAVStreamError.truncatedData(expectedBytes: size, availableBytes: availableBytes)
+                case .tolerate:
+                    self.dataSize = availableBytes
+                    self.wasTruncated = true
+                }
+            } else {
+                self.dataSize = size
+                self.wasTruncated = false
+            }
 
             try handle.seek(toOffset: UInt64(offset))
         }
@@ -419,11 +464,13 @@ actor OfflineDiarizer {
             guard maxFrames > 0, bytesReadFromData < dataSize else { return nil }
 
             let bytesPerFrame = channels * (bitsPerSample / 8)
+            guard bytesPerFrame > 0 else { return nil }
+
             let bytesWanted = maxFrames * bytesPerFrame
             let bytesAvailable = dataSize - bytesReadFromData
             let bytesToRead = min(bytesWanted, bytesAvailable)
 
-            guard bytesToRead > 0 else { return nil }
+            guard bytesToRead >= bytesPerFrame else { return nil }
 
             guard let chunkData = try handle.read(upToCount: bytesToRead), !chunkData.isEmpty else {
                 return nil

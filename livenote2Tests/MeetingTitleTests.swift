@@ -6,6 +6,11 @@ import XCTest
 @MainActor
 final class MeetingTitleTests: XCTestCase {
 
+    override func setUp() {
+        super.setUp()
+        TestLogSandbox.activate()
+    }
+
     // MARK: - titleFromSummary
 
     func testTitleFromFirstH1() {

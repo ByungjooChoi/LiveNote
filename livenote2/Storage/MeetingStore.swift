@@ -326,7 +326,7 @@ final class MeetingStore {
         try Self.validateUniqueIDs(meeting.rows)
         meeting.summary = summary
         var (log, recovery) = try loadLogForMutation(at: url)
-        log.editsAtLastSummary = log.editCount
+        log.editsAtLastSummary = log.revision
         try stageAndCommit(meeting: meeting, editLog: log, recovery: recovery, to: url)
         refresh()
         return recovery != nil ? "Edit history was unreadable and has been reset" : nil
@@ -340,7 +340,7 @@ final class MeetingStore {
         }
         try Self.validateUniqueIDs(meeting.rows)
         var (log, recovery) = try loadLogForMutation(at: url)
-        log.editsAtLastSummary = log.editCount
+        log.editsAtLastSummary = log.revision
         try stageAndCommit(meeting: meeting, editLog: log, recovery: recovery, to: url)
         refresh()
         return recovery != nil ? "Edit history was unreadable and has been reset" : nil
@@ -593,7 +593,12 @@ final class MeetingStore {
                 meeting.summary = summaryBefore
             }
 
+            let e0 = mutatingLog.editCount
             mutatingLog.batches.removeLast()
+            let e1 = mutatingLog.editCount
+            // 되돌리기(Undo)는 마지막 요약 시점 대비 전사 변경이 발생한 것이므로 1건의 미반영 변경으로 계산되며,
+            // 오프셋을 통해 제거된 배치의 가중치를 보정한다.
+            mutatingLog.revisionOffset += (e0 - e1) + 1
 
             try stageAndCommit(meeting: meeting, editLog: mutatingLog, recovery: recovery, to: url)
             refresh()

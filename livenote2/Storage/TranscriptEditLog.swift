@@ -60,11 +60,17 @@ struct TranscriptEditBatch: Codable, Equatable, Identifiable, Sendable {
 /// 회의 전사 편집 이력 로그 (edits.json).
 struct TranscriptEditLog: Codable, Equatable, Sendable {
     var version: Int = 1
-    var editsAtLastSummary: Int = 0             // 요약이 마지막으로 생성/재생성되었을 때의 총 rowEdits 개수
+    var editsAtLastSummary: Int = 0             // 요약이 마지막으로 생성/재생성되었을 때의 revision
     var batches: [TranscriptEditBatch] = []
+    var revisionOffset: Int = 0
 
     var editCount: Int {
         batches.reduce(0) { $0 + $1.rowEdits.count + ($1.summaryAfter != nil ? 1 : 0) }
+    }
+
+    /// 단조 증가하는 전체 개정 번호: 편집마다 배치 가중치만큼 증가하고, 되돌리기(Undo)마다 정확히 1씩 증가.
+    var revision: Int {
+        editCount + revisionOffset
     }
 
     var editedRowIDs: Set<UUID> {
@@ -82,13 +88,42 @@ struct TranscriptEditLog: Codable, Equatable, Sendable {
     }
 
     var pendingEditsSinceSummary: Int {
-        max(0, editCount - editsAtLastSummary)
+        max(0, revision - editsAtLastSummary)
     }
 
-    init(version: Int = 1, editsAtLastSummary: Int = 0, batches: [TranscriptEditBatch] = []) {
+    init(
+        version: Int = 1,
+        editsAtLastSummary: Int = 0,
+        batches: [TranscriptEditBatch] = [],
+        revisionOffset: Int = 0
+    ) {
         self.version = version
         self.editsAtLastSummary = editsAtLastSummary
         self.batches = batches
+        self.revisionOffset = revisionOffset
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case version
+        case editsAtLastSummary
+        case batches
+        case revisionOffset
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        self.editsAtLastSummary = try container.decodeIfPresent(Int.self, forKey: .editsAtLastSummary) ?? 0
+        self.batches = try container.decodeIfPresent([TranscriptEditBatch].self, forKey: .batches) ?? []
+        self.revisionOffset = try container.decodeIfPresent(Int.self, forKey: .revisionOffset) ?? 0
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(version, forKey: .version)
+        try container.encode(editsAtLastSummary, forKey: .editsAtLastSummary)
+        try container.encode(batches, forKey: .batches)
+        try container.encode(revisionOffset, forKey: .revisionOffset)
     }
 
     /// JSON 데이터로부터 편집 로그 디코딩.

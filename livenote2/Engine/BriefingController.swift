@@ -22,6 +22,11 @@ final class BriefingController {
         var enabled: Bool
         var skipLargeMeetings: Bool
         var batchHour: Int // default 7
+        var dailyBatchLimit: Int {
+            didSet {
+                if dailyBatchLimit <= 0 { dailyBatchLimit = 10 }
+            }
+        }
 
         init(defaults: UserDefaults = .standard) {
             if defaults.object(forKey: "briefsEnabled") != nil {
@@ -36,13 +41,35 @@ final class BriefingController {
             }
             let hour = defaults.integer(forKey: "briefsBatchHour")
             self.batchHour = hour > 0 ? hour : 7
+
+            if defaults.object(forKey: "briefsDailyBatchLimit") != nil {
+                let limit = defaults.integer(forKey: "briefsDailyBatchLimit")
+                self.dailyBatchLimit = limit > 0 ? limit : 10
+            } else {
+                self.dailyBatchLimit = 10
+            }
         }
 
         func persist(to defaults: UserDefaults = .standard) {
             defaults.set(enabled, forKey: "briefsEnabled")
             defaults.set(skipLargeMeetings, forKey: "briefsSkipLarge")
             defaults.set(batchHour, forKey: "briefsBatchHour")
+            defaults.set(dailyBatchLimit, forKey: "briefsDailyBatchLimit")
         }
+    }
+
+    enum BriefEnsureOutcome: Equatable, Sendable {
+        case disabled
+        case alreadyInMemory
+        case loadedFromDisk
+        case cacheUnreadable
+        case inProgress
+        case skippedLarge
+        case noHistory
+        case tasksUnavailable
+        case generated
+        case generationFailed
+        case deferred
     }
 
     private(set) var briefs: [String: Brief] = [:]
@@ -53,6 +80,7 @@ final class BriefingController {
     private(set) var lastError: String?
     private(set) var currentBrief: Brief?
     private(set) var sessionEventKey: String?
+    private(set) var lastBatchDeferredKeys: Set<String> = []
     var onUserNotice: ((String) -> Void)?
 
     var settings: Settings {
@@ -74,6 +102,7 @@ final class BriefingController {
     @ObservationIgnored private var startupTask: Task<Void, Never>?
     @ObservationIgnored private var wakeObserver: NSObjectProtocol?
     @ObservationIgnored private var lastBatchRunDate: Date?
+    @ObservationIgnored private var itemsProvider: (() -> [UpcomingMeetingItem])?
     @ObservationIgnored private(set) var wakeHandleCount: Int = 0
 
     @ObservationIgnored var observerRegistered: Bool { wakeObserver != nil }
@@ -101,6 +130,7 @@ final class BriefingController {
     }
 
     deinit {
+        itemsProvider = nil
         startupTask?.cancel()
         batchTask?.cancel()
         if let wakeObserver {
@@ -110,6 +140,7 @@ final class BriefingController {
 
     /// 배치 스케줄러 및 옵저버 취소.
     func cancelBatch() {
+        itemsProvider = nil
         startupTask?.cancel()
         startupTask = nil
         batchTask?.cancel()
@@ -164,15 +195,16 @@ final class BriefingController {
 
     /// 브리핑 생성 보장 (캐시 확인, 미존재 시 생성).
     /// force=true 시 기존 캐시를 미리 지우지 않고 새로 생성 후 덮어씁니다(실패 시 이전 캐시 보존).
-    func ensureBrief(for item: UpcomingMeetingItem, force: Bool = false) async {
-        if !settings.enabled && !force { return }
+    @discardableResult
+    func ensureBrief(for item: UpcomingMeetingItem, force: Bool = false, allowGeneration: Bool = true) async -> BriefEnsureOutcome {
+        if !settings.enabled && !force { return .disabled }
 
         if force {
             noHistoryKeys.remove(item.eventKey)
             skippedKeys.remove(item.eventKey)
             errors.removeValue(forKey: item.eventKey)
         } else {
-            if briefs[item.eventKey] != nil { return }
+            if briefs[item.eventKey] != nil { return .alreadyInMemory }
             do {
                 if let loaded = try store.load(eventKey: item.eventKey) {
                     briefs[item.eventKey] = loaded
@@ -180,19 +212,24 @@ final class BriefingController {
                     if item.eventKey == sessionEventKey {
                         currentBrief = loaded
                     }
-                    return
+                    return .loadedFromDisk
                 }
             } catch {
                 let msg = "Cached brief unreadable: \(error.localizedDescription)"
                 errors[item.eventKey] = msg
                 lastError = msg
                 AppLog.write("brief", "[\(item.eventKey)] \(msg)")
-                return
+                return .cacheUnreadable
             }
-            if noHistoryKeys.contains(item.eventKey) || skippedKeys.contains(item.eventKey) { return }
+            if skippedKeys.contains(item.eventKey) { return .skippedLarge }
+            if noHistoryKeys.contains(item.eventKey) { return .noHistory }
         }
 
-        guard !generating.contains(item.eventKey) else { return }
+        guard allowGeneration else {
+            return .deferred
+        }
+
+        guard !generating.contains(item.eventKey) else { return .inProgress }
         generating.insert(item.eventKey)
         defer { generating.remove(item.eventKey) }
 
@@ -210,13 +247,13 @@ final class BriefingController {
         guard let candidates = cand else {
             skippedKeys.insert(item.eventKey)
             AppLog.write("brief", "[\(item.eventKey)] 대규모 회의(8명 이상) 건너뜀")
-            return
+            return .skippedLarge
         }
 
         guard !candidates.isEmpty else {
             noHistoryKeys.insert(item.eventKey)
             AppLog.write("brief", "[\(item.eventKey)] 과거 관련 회의 없음 (no history)")
-            return
+            return .noHistory
         }
 
         let attendeeNames = item.attendees.map(\.name)
@@ -228,7 +265,7 @@ final class BriefingController {
             errors[item.eventKey] = msg
             lastError = msg
             AppLog.write("brief", "[\(item.eventKey)] \(msg)")
-            return
+            return .tasksUnavailable
         }
 
         let lang = language()
@@ -251,11 +288,13 @@ final class BriefingController {
             }
             lastError = nil
             AppLog.write("brief", "[\(item.eventKey)] 브리핑 생성 완료 (기반 회의 \(generated.basedOn.count)건)")
+            return .generated
         } catch {
             let msg = error.localizedDescription
             errors[item.eventKey] = msg
             lastError = msg
             AppLog.write("brief", "[\(item.eventKey)] 브리핑 생성 실패: \(error)")
+            return .generationFailed
         }
     }
 
@@ -278,8 +317,22 @@ final class BriefingController {
         lastBatchRunDate = currentNow
 
         AppLog.write("brief", "Running morning batch (\(reason)) for \(items.count) items")
+        lastBatchDeferredKeys = []
+        var consumedCount = 0
+        let limit = settings.dailyBatchLimit
+
         for item in items {
-            await ensureBrief(for: item)
+            let allowGen = consumedCount < limit
+            let outcome = await ensureBrief(for: item, allowGeneration: allowGen)
+            if outcome == .generated || outcome == .generationFailed {
+                consumedCount += 1
+            } else if outcome == .deferred {
+                lastBatchDeferredKeys.insert(item.eventKey)
+            }
+        }
+
+        if !lastBatchDeferredKeys.isEmpty {
+            AppLog.write("brief", "아침 배치 상한 \(limit)건 도달, \(lastBatchDeferredKeys.count)건 보류 (10분 전 트리거 또는 수동 새로고침으로 생성)")
         }
     }
 
@@ -305,6 +358,7 @@ final class BriefingController {
 
     /// 아침 일괄 배치 스케줄러 등록 (타이머 + Sleep 복귀 시 NSWorkspace.didWakeNotification 감지).
     func scheduleMorningBatch(itemsProvider: @escaping () -> [UpcomingMeetingItem]) {
+        self.itemsProvider = itemsProvider
         startupTask?.cancel()
         batchTask?.cancel()
 
@@ -317,15 +371,18 @@ final class BriefingController {
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     self.wakeHandleCount += 1
-                    await self.runMorningBatchIfNeeded(items: itemsProvider(), reason: "wake")
+                    let items = self.itemsProvider?() ?? []
+                    await self.runMorningBatchIfNeeded(items: items, reason: "wake")
                 }
             }
         }
 
         startupTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            self.preloadCached(for: itemsProvider())
-            await self.runMorningBatchIfNeeded(items: itemsProvider(), reason: "startup")
+            let items = self.itemsProvider?() ?? []
+            self.preloadCached(for: items)
+            guard !Task.isCancelled else { return }
+            await self.runMorningBatchIfNeeded(items: self.itemsProvider?() ?? [], reason: "startup")
         }
 
         batchTask = Task { @MainActor [weak self] in
@@ -341,7 +398,8 @@ final class BriefingController {
                 }
                 guard !Task.isCancelled else { break }
                 guard let self else { break }
-                await self.runMorningBatchIfNeeded(items: itemsProvider(), reason: "timer")
+                let items = self.itemsProvider?() ?? []
+                await self.runMorningBatchIfNeeded(items: items, reason: "timer")
             }
         }
     }

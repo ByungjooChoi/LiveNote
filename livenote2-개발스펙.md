@@ -334,6 +334,10 @@ Weekly Update의 system 프롬프트는 SA(Solutions Architect) 주간보고 규
 - 저장소 분리 원칙: 회의 폴더의 `<meetingURL>/tasks.json`은 회의 요약 생성 시점의 원본을 기록하고, 완료 상태 변경이나 수동 추가/삭제 등 일상적인 상태 변경은 전역 `~/Documents/LiveNote/tasks/index.json` 색인에만 반영한다.
 - 요약 갱신 시 상태 보존: `replaceTasks(_:for:)`는 회의 요약이 재생성될 때 같은 제목(대소문자 무시, trim)의 기존 태스크가 이미 `done` 상태이면 `id`, `done` 상태, `completedAt`, `createdAt`을 그대로 유지해 색인과 병합한다.
 - 수동 태스크: `addManual(title:owner:due:)`로 직접 추가 가능하며, 수동 태스크만 `delete(id:)`로 삭제할 수 있다 (회의 태스크 삭제 시도 시 `TaskStoreError.cannotDeleteMeetingTask` 오류 발생).
+- 원자적 2단계 커밋 저널 및 시작 복구 (v1.8.1): `replaceTasks` 및 `appendImported` 수행 시 회의 `tasks.json`과 전역 `tasks/index.json` 간 세대 불일치를 방지하기 위해 `tasks/commit-journal.json` 저널을 원자적으로 기록.
+  - 저널 구조: `version` (1), `token` (UUID 문자열), `previousIndexDigest`, `indexDigest` (CryptoKit SHA-256 64자리 hex), `entries: [{meetingPath, hadPrevious}]`.
+  - 커밋 순서: (0) 페이로드 사전 인코딩 및 다이제스트 계산 -> (1) 저널 원자적 기록 (.atomic) -> (2) 회의별 `tasks.json`을 `tasks.json.prev.tmp`를 거쳐 `tasks.json.prev`로 안전 백업 후 `tasks.json.tmp`로 교체 -> (3) `index.json` 기록 -> (4) `.prev` 백업 파일 정리 -> (5) 저널 삭제.
+  - 시작 시 복구 (`recoverInterruptedCommit`): 저널 무결성 검증(버전, UUID, 다이제스트 64자리 hex, 중복 경로 금지, 심볼릭 링크 거부 및 rootURL 하위 검증). 손상 시 `commit-journal.json.corrupt-<ts>`로 안전 격리. 인덱스 다이제스트 일치 시 롤포워드(백업 및 저널 정리), 불일치 시 롤백(`.prev`에서 복원, 신규 파일 삭제). 복구 미완료 시 `TaskStoreError.recoveryPending`으로 쓰기 차단, `TasksController.init`에서 앱 시작 시 자동 복구.
 
 **추출 및 정규화 (`Engine/SummaryService.swift`, `Engine/TaskExtractor.swift`, `TaskOwnerNormalizer`)**:
 - 요약 프롬프트 확장: `SummaryService.userPrompt` 끝에 `<!-- tasks ... -->` 기계 가독성 블록 요구 문구를 추가하고 회의 일시를 전달하여 상대 기한(예: "tomorrow", "by Friday")을 절대 날짜(yyyy-MM-dd)로 계산하도록 지시.
@@ -406,10 +410,21 @@ Weekly Update의 system 프롬프트는 SA(Solutions Architect) 주간보고 규
 
 **트리거 및 라이프사이클 (`Engine/BriefingController.swift`)**:
 - 1. 아침 07:00 일괄 배치 (`scheduleMorningBatch`: 타이머 + Mac 잠자기 복귀 시 `NSWorkspace.didWakeNotification` 감지).
+  - 배치 제공자 및 시작 취소 (v1.8.1): `scheduleMorningBatch(itemsProvider:)`는 `@ObservationIgnored private var itemsProvider`에 클로저를 보관하여 재스케줄 시 항상 최신 제공자를 평가. `cancelBatch()`는 제공자를 nil로 비우고, 시작 태스크는 캐시 프리로드 후 취소 상태(`guard !Task.isCancelled`)를 확인하여 배치 중복/미실행을 보장.
+  - 일일 생성 상한 (`dailyBatchLimit`, v1.8.1): `Settings.dailyBatchLimit` (UserDefaults `briefsDailyBatchLimit`, 기본값 10, <=0 시 10으로 폴백). 아침 배치에서 생성 완료 및 실패 건수 합이 상한에 도달하면 나머지 일정은 `allowGeneration: false`로 호출하여 디스크 캐시만 로드하고 미캐시 일정은 `.deferred`로 수집(`lastBatchDeferredKeys`). 10분 전 임박 트리거 및 수동 새로고침은 상한 없이 즉시 생성.
 - 2. 회의 시작 10분 전 임박 감지 (`CalendarMonitor.onMeetingApproaching`).
 - 3. Coming up UI 수동 새로고침 아이콘 클릭.
 - 캐시 존재 시 재생성을 건너뛰며, `force: true` 시 무효화 후 재생성.
 - 회의 시작 시 `beginSession(item:)`으로 `currentBrief`를 활성화하고, 종료 시 `endSession()` 및 `copyBriefIfAvailable` 수행.
+- 세션 귀속 및 명시적 캘린더 일정 연동 (v1.8.1, S6):
+  - `AppState.start(mode:calendarItem:)`: 명시적으로 전달된 일정(`calendarItem`)이 있으면 `resolveSessionItem`을 통해 휴리스틱(`calendar.ongoingUpcomingItem()`) 대신 명시적 일정을 세션에 귀속. 명시적 일정이 전달된 경우 휴리스틱 클로저는 호출되지 않음.
+  - 귀속 출처 로깅: `brief` 로그에 `세션 귀속 source=explicit|heuristic|none key=<eventKey or ->` 1줄 기록.
+  - 제목 및 참석자 연동: 명시적 일정이 존재할 경우 `sessionContext(from:)`로 추출한 일정의 `title`과 `attendees`를 직접 세션 제목(`meetingTitle = normalizedTitle(title)`) 및 참석자(`meetingAttendees`, `attendeeCandidates`)로 설정하여, 다른 동시 진행 일정과 섞이지 않도록 보장.
+  - 진입점 배선:
+    - Home의 다가오는 회의 "Start now": `startUpcomingMeeting(item:)`으로 해당 `UpcomingMeetingItem`을 직접 전달하여 링크 오픈 및 `start(calendarItem:)` 호출 (`ContentView.swift:367`).
+    - 회의 임박 알림 팝업 "Start LiveNote only": `CalendarMonitor.onRecordRequested`가 `UpcomingMeetingItem`을 전달하고 `AppState`가 `start(calendarItem:)` 호출.
+    - 캘린더 시작 시각 도달 자동 시작: `onMeetingTimeReached`가 `beginAutoStart(reason:calendarItem:)`을 통해 카운트다운 완료(`onExpire`) 시 `start(calendarItem:)`으로 해당 일정 전달.
+    - 회의 앱 실행 감지 자동 시작 및 수동 일반 시작: `calendarItem == nil`로 호출되어 기존 휴리스틱(`source=heuristic`) 유지.
 
 ### 5.16 화자 메모리 및 성문 인식 (Phase 3, v1.7.0)
 
@@ -447,9 +462,11 @@ Weekly Update의 system 프롬프트는 SA(Solutions Architect) 주간보고 규
 **6. 비동기 수명주기 및 2-pass 파이프라인 (Async Lifecycle)**:
 - `stop()` 호출 시 불변 `TwoPassJob`(스냅샷 + 참조)을 생성하고 `Task { [weak self, job] }`에서 파이프라인 실행. await 지점마다 AppState 해제 가능성을 대비해 디스크 저장은 `job.meetingStore` 경유.
 - 파이프라인 순서: 1차 저장(라이브 행) -> `recorder.finish()` -> 다이어라이제이션 태스크 시작 -> 2-pass 텍스트 재디코딩(`TranscriptRefiner.refine`) -> 최신 디스크 회의의 수동 편집 덮어쓰기 -> 2차 저장(정제 행, 실패 시 throw 및 pending 재시도 등록) -> 요약 생성 -> 본인(me) 성문 등록(다이어라이제이션과 독립) -> 다이어라이제이션 최대 120초 대기 -> 결과 반영(최신 디스크 수동 편집과 병합 후 디스크 갱신, 세션ID 일치 시에만 라이브 상태 반영).
-- 임시 WAV 폴더 소유권 및 active lease: `tmp/livenote2-session-<UUID>/`는 해당 세션의 `SessionAudioRecorder`가 소유하며 프로세스 전역 `ActiveFolderRegistry`에 등록. 다이어라이제이션과 me 등록 태스크가 모두 종료된 후 `deleteFiles()`에 의해 단 1회 삭제 및 등록 해제. 30분 하드 리밋 초과 시 폴더에 `retained-until-restart` 마커를 남기고 등록을 유지하며, 백그라운드 태스크가 실제 완료될 때까지 삭제하지 않음.
+- 임시 WAV 폴더 소유권 및 active lease: `tmp/livenote2-session-<UUID>/`는 해당 세션의 `SessionAudioRecorder`가 소유하며 프로세스 전역 `ActiveFolderRegistry`에 등록. 다이어라이제이션과 me 등록 태스크가 모두 종료된 후 `deleteFiles()`에 의해 삭제 및 등록 해제. 30분 하드 리밋 초과 시 폴더에 `retained-until-restart` 마커를 남기고 등록을 유지하며, 백그라운드 태스크가 실제 완료될 때까지 삭제하지 않음.
+  - 삭제 재시도 및 purge 폴백 (v1.8.1): `deleteFiles(retryDelays: [0.5, 2, 5], purgeRetryDelay: 60) async` 지원. 폴더 삭제 실패 시 점증 지연 후 재시도하며, 최종 실패 또는 취소 시 폴더를 레지스트리에서 즉시 등록 해제하여 소유권을 purge로 넘기고 `schedulePurgeRetry(after:in:)`를 통해 60초 후 백그라운드에서 잔재를 자동 청소. 다중 동시 호출은 `isDeleting` 플래그로 1회만 수행.
 - `purgeStale()` 동작: 앱 시작 및 세션 시작 시 실행되며 현재 프로세스의 활성 레코더가 점유(`ActiveFolderRegistry`)하지 않은 폴더만 삭제. 이전 프로세스의 비정상 종료/마커 폴더만 청소.
-- 스트리밍 me 등록 스캔: 마이크 전체 WAV를 `WAVStreamReader`로 스트리밍 스캔하여 최대 60초 분량의 음성(RMS 게이트 통과)을 수집하여 등록(회의 후반부 발화도 정상 반영).
+- 스트리밍 me 등록 스캔 및 절단 정책 (`Engine/OfflineDiarizer.swift`, v1.8.1): 마이크 전체 WAV를 `WAVStreamReader`로 스트리밍 스캔하여 최대 60초 분량의 음성(RMS 게이트 통과)을 수집하여 등록.
+  - `TruncationPolicy` (`.reject`, `.tolerate`): 파일 크기가 헤더 선언 크기보다 작을 때 기본값 `.reject`는 `WAVStreamError.truncatedData` 예외를 발생시키고, me 등록용 세션 내부 경로는 `.tolerate`를 사용하여 가용 바이트까지만 읽고 `wasTruncated` 플래그 및 로그를 남김. 홀수 바이트 절단 시 프레임 경계 정렬로 온전한 프레임만 반환.
 - 정제 전사 저장 실패 및 pending 재시도: 2차 정제 전사 저장 실패 시 조용히 삼키지 않고 `pendingDiarizationResults[url]`에 등록하여 5초 후 자동 재시도 및 수동 재시도 지원.
 - 성문 충돌 카운터 보존: 기존 중심에 흡수 병합(`enroll`) 시 충돌 카운터를 0으로 리셋하지 않고 보존(`existingCentroid.conflicts`). 인물 병합(`merge`) 시에도 병합 중심의 충돌 카운터는 `max(existing.conflicts, sCentroid.conflicts)`로 보존.
 - 성문 임베딩 분리 3개 인스턴스 규칙: 다이어라이제이션과 임베딩 추출은 동기 엔진 호출 동안 액터를 점유하므로 3개 인스턴스로 분리 사용. 세션 다이어라이저(`AppState.offlineDiarizer`), 라이브 승격(`AppState.liveEmbeddingExtractor`), 그리고 me 등록 태스크 내부에서 생성 및 해제되는 임시 인스턴스(`OfflineDiarizer(engine: currentJob.makeEmbeddingEngine())`)로 분리되어 서로 대기하지 않음 (하드 리밋 초과 시 알림 문구: "Session audio kept until speaker recognition finishes; it is deleted afterwards, or at next launch if it never finishes").
@@ -461,13 +478,16 @@ Weekly Update의 system 프롬프트는 SA(Solutions Architect) 주간보고 규
 - 회의 폴더 내 `edits.json`에 원자적 편집 배치(Batch) 이력을 보관.
 - 스키마:
   - `version: Int` (기본값 1)
-  - `editsAtLastSummary: Int` (요약이 마지막으로 생성/재생성되었을 때의 총 rowEdits 개수)
+  - `editsAtLastSummary: Int` (요약이 마지막으로 생성/재생성되었을 때의 revision)
   - `batches: [TranscriptEditBatch]`
     - `id: UUID`, `at: Date`, `kind: TranscriptEditKind (inline / replaceAll)`
     - `find: String?`, `replacement: String?`, `caseSensitive: Bool?`, `wholeWord: Bool?`
     - `rowEdits: [RowEdit]` (`rowID: UUID`, `before: String`, `after: String`, 요약 전용 배치일 때만 빈 배열 가능)
     - `summaryBefore: String?`, `summaryAfter: String?`
-- `editCount`: `batches.reduce(0) { $0 + $1.rowEdits.count + ($1.summaryAfter != nil ? 1 : 0) }` (요약 변경도 1건의 편집으로 가산).
+  - `revisionOffset: Int` (되돌리기 보정 오프셋, v1.8.1 추가, 레거시 디코딩 시 기본값 0, 인코딩 시 항상 포함)
+- `editCount`: `batches.reduce(0) { $0 + $1.rowEdits.count + ($1.summaryAfter != nil ? 1 : 0) }` (배지 표시용 실제 편집 행 및 요약 변경 수).
+- `revision`: `editCount + revisionOffset` (단조 증가하는 전체 개정 번호: 편집 시 배치 가중치만큼 증가, 되돌리기마다 정확히 1씩 증가).
+- `pendingEditsSinceSummary`: `max(0, revision - editsAtLastSummary)`.
 - 손상 파일 트랜잭션 복구: JSON 디코딩 실패, 0바이트 빈 파일(empty file) 또는 version > 1 감지 시 쓰기 트랜잭션의 스테이징 성공 후 커밋 직전에 `edits.json.corrupt-<unix ts>-<UUID prefix 8>`로 백업 이동하고 빈 로그로 커밋하며 결과 경고("Edit history was unreadable and has been reset") 반환. 읽기 실패(권한 오류 등)는 `.writeFailed("read edits.json: ...")`로 전파. 빈 로그 상태에서 undo 호출 시에도 손상 파일 백업 커밋을 수행하고 경고와 함께 `changedRowCount: 0` 반환.
 
 **2. 원자적 스테이징 및 커밋 계약 (Ordering Contract)**:
@@ -487,7 +507,7 @@ Weekly Update의 system 프롬프트는 SA(Solutions Architect) 주간보고 규
 **3. 되돌리기 (Undo) 및 충돌 검증**:
 - 스택의 마지막 배치만 되돌리기 가능 (LIFO).
 - 되돌리기 전 각 `rowEdit`에 대해 디스크 상의 행 텍스트가 `after`와 일치하는지 검증. 불일치 시 `MeetingStoreError.undoConflict(UUID)` 발생("This row was changed after that edit; undo is not possible"). 요약도 `summaryAfter`와 일치하는지 검증하고 불일치 시 `MeetingStoreError.undoSummaryConflict` 발생("The minutes changed after that edit; undo is not possible.").
-- 검증 통과 시 `before` 텍스트로 복원 후 마지막 배치를 제거하고 원자적 스테이징 커밋 실행.
+- 검증 통과 시 `before` 텍스트로 복원 후 마지막 배치를 제거하고, 제거된 배치의 가중치를 보정하여 되돌리기가 1건의 미반영 전사 변경으로 누적되도록 `revisionOffset += (E0 - E1) + 1` (E0: 배치 제거 전 editCount, E1: 제거 후 editCount)을 적용한 후 원자적 스테이징 커밋 실행.
 - 요약 전용 배치의 되돌리기 메뉴 라벨은 `Undo last edit (Replace all, summary only)`로 표시.
 
 **4. 찾아바꾸기 단어 경계(`\b`) 폴백 및 동일 교체 방어**:
@@ -501,7 +521,7 @@ Weekly Update의 system 프롬프트는 SA(Solutions Architect) 주간보고 규
 
 **6. 요약 재생성 알림 (Re-summarize Banner)**:
 - 요약이 이미 생성된 회의에서 요약 시점 이후 누적 전사 수정(`pendingEditsSinceSummary`)이 5건 이상인 경우 상단 배너로 요약 재생성 안내.
-- 요약 저장 API `MeetingStore.updateSummary(at:summary:) throws -> String?` 및 `markSummaryRegenerated(at:) throws -> String?`가 단일 트랜잭션으로 요약 갱신 및 `editsAtLastSummary` 동기화를 원자적으로 수행하고, 손상 로그 복구 시 경고 문구(미발생 시 nil)를 반환.
+- 요약 저장 API `MeetingStore.updateSummary(at:summary:) throws -> String?` 및 `markSummaryRegenerated(at:) throws -> String?`가 단일 트랜잭션으로 요약 갱신 및 `editsAtLastSummary = revision` 동기화를 원자적으로 수행하고, 손상 로그 복구 시 경고 문구(미발생 시 nil)를 반환.
 
 ### 5.18 녹음 리마인더 (RecordingReminder + RecordingReminderNotifier, 2026-09-05 추가, v1.8.0)
 
@@ -513,10 +533,10 @@ Weekly Update의 system 프롬프트는 SA(Solutions Architect) 주간보고 규
 - LiveNote 유휴 상태 (`!app.isActive`, 즉 listening/preparing 중이 아니며 카운트다운 대기 중도 아님).
 
 **2. 2-tick 룰 및 회의별 1회 발송**:
-- 60초 폴링 주기 (`tickInterval = 60s`).
-- Condition C가 2회 연속 충족(약 1~2분 지속)될 때 1회 알림 발송 (`notify(appName)`).
+- 60초 폴링 주기 (`tickInterval = 60s`). `start()` 호출 시 최초 1회 프로브(`tickNow()`)를 동기 실행한 후 주기 루프에 진입하므로, 최초 알림은 종전 약 120초가 아닌 약 60초(1회 폴링 주기) 경과 시점에 발송됨.
+- Condition C가 2회 연속 충족될 때 1회 알림 발송 (`notify(appName)`).
 - 알림이 한 번 발송되면 회의 앱이 계속 실행 중인 동안에는 추가 알림을 억제 (`suppressed`).
-- 회의 도중 설정을 껐다 켜도(`setEnabled(false)` -> `setEnabled(true)`) 연속 충족 카운트만 초기화되고 발송 여부(`notified`)는 보존되어 동일 회의 중복 발송을 방지함.
+- 회의 도중 설정을 껐다 켜도(`setEnabled(false)` -> `setEnabled(true)`) 연속 충족 카운트만 초기화되고 발송 여부(`notified`)는 보존되어 동일 회의 중복 발송을 방지함. `setEnabled(true)` 또한 즉시 프로브를 수행하나 이미 발송된 회의에서는 알림이 억제됨.
 - 회의 앱 종료 감지 (`appName == nil` 또는 `NSWorkspace.didTerminateApplicationNotification`) 시 리셋(`policy.reset()`)되어 다음 회의에서 다시 알림 가능. 이때 대기 중인 비동기 권한 요청 배송도 무효화(`generation += 1`, `pendingDelivery = nil`)하여 종료된 회의 알림 누출을 방지.
 - LiveNote 세션이 시작되면 Condition C가 false가 되어 idle로 돌아가지만, 이미 발송된 회의에서는 알림 억제 상태를 유지.
 - 알림 발송 전 취소 시 재장전(Rearm): `notifier.deliver` 호출 전 세션 무효화(`stale generation`), 직전 재검증 실패(`condition no longer holds`), 권한 대기 중 조건 해제(`condition dropped while awaiting authorization`) 등 사전 취소 시 `policy.rearm()`을 수행하여 같은 회의에서 조건 재충족 시 2-tick 후 다시 알림 가능. 반면 `notifier.deliver` 호출 후 시스템 알림 배송 실패(post-submit failure)는 회의당 1회 시도 원칙에 따라 재장전하지 않음.
@@ -551,7 +571,7 @@ Weekly Update의 system 프롬프트는 SA(Solutions Architect) 주간보고 규
 - 세션 디렉터리 내 `session.json`의 수정 일자(`modificationDate`)를 캐시 키로 사용하여 미변경 폴더의 반복 디스크 I/O를 차단.
 - 백그라운드 읽기: 비동기 `Task.detached(priority: .utility)`에서 경량 Decodable 구조체(`LightweightSession`)로 `speakerNames`([Int: String] 키 정렬 디코딩) 및 rows의 `speakerName`만 선별 디코딩하며, 타입 불일치 등 손상 오류를 숨기지 않고 전파.
 - 디스크 읽기 실패 시 에러를 집계하여 1회 로깅(`AppLog.write("app", "People 디렉터리 읽기 실패 N건: <first error>")`) 및 검색창 하단 `lastWarning`으로 노출하며, 실패한 폴더의 참석자는 그대로 보존.
-- Coalescing: 새로고침 실행 중 들어온 요청은 1회로 합쳐져 현재 실행 뒤에 한 번 더 실행되며, 진행 중인 태스크를 재사용하여 데이터 불일치 및 경쟁 방지.
+- Coalescing: 새로고침 실행 중 들어온 요청은 1회로 합쳐져 현재 실행 뒤에 한 번 더 실행되며, 진행 중인 태스크를 재사용하여 데이터 불일치 및 경쟁 방지. Coalescing 계약은 마지막 요청이 승리하며 최대 1회의 추가 실행만 발생한다(last request wins, at most one extra run)는 원칙을 보장.
 
 **3. 회사별 그룹화 및 검색 필터링**:
 - 그룹화: 첫 번째 이메일 도메인을 회사(`company`)로 취급. 이메일이 없는 인물은 "Other" 그룹으로 최하단 배치.
@@ -577,7 +597,7 @@ Weekly Update의 system 프롬프트는 SA(Solutions Architect) 주간보고 규
 **2. HTML 변환 및 이스케이프 (`MarkdownHTML`)**:
 - NUL 문자 위조 방지 및 단일 패스 복원: 텍스트 처리 시작 시 모든 U+0000(NUL) 문자를 제거하여 플레이스홀더 위조를 차단하고, 플레이스홀더 복원은 한 번의 문자열 순회(`restorePlaceholders`)로 처리하여 이미 삽입된 HTML이 재스캔/재치환되지 않도록 보장.
 - 특수문자 이스케이프: `&`, `<`, `>`, `"`, `'`를 우선 이스케이프하여 사용자 텍스트가 HTML 태그로 해석되지 않도록 방어.
-- 인라인 서식 토큰화: 단일 교차 정규식(alternation regex, `` `([^`]+)`|\[([^\]]+)\]\((https?://[^)\s"]+)\) ``) 1회 매칭 패스로 선형(linear) 시간 내에 토큰화하며, NSRegularExpression의 최좌측 우선(leftmost-first) 일치 규칙으로 더 일찍 시작하는 항목을 최선두로 선택. 코드 스팬은 내부 링크/강조 파싱 없이 리터럴 소비. 링크는 원본 URL(백틱 보존)을 보존하고 라벨은 동일 세그먼트 파이프라인을 재귀 적용(라벨에 `]` 미포함이므로 중첩 링크 방지). 치환 토큰은 오직 NUL, 알파벳 1자, 숫자, NUL(`\u{0000}C(n)\u{0000}`, `\u{0000}L(n)\u{0000}`)만 사용하여 밑줄(_)이나 별표(*)를 배제함으로써 `_italic_` 정규식의 룩어라운드 간섭을 방지. 이후 `applyBoldItalic`을 1회 적용하고 인덱스 기반 단일 패스(`restorePlaceholders`)로 복원.
+- 인라인 서식 토큰화: 단일 교차 정규식 대신 UTF-16 코드 유닛(`Array(text.utf16)`)을 단일 전방 순회하는 자체 스캐너(`renderSegments`)를 사용. 백틱(`), 대괄호([), URL 종료 경계에 대해 단조 메모(monotone memo)를 활용하여 닫히지 않은 토큰(`[ ` 반복, `[a](http://x` 반복 등)이나 병리적 입력 패턴에서도 항상 선형(linear) 시간을 보장. 코드 스팬은 내부 링크/강조 파싱 없이 리터럴 소비. 링크는 원본 URL(백틱 보존)을 보존하고 라벨은 동일 세그먼트 파이프라인을 재귀 적용(라벨에 `]` 미포함이므로 중첩 링크 방지). 치환 토큰은 오직 NUL, 알파벳 1자, 숫자, NUL(`\u{0000}C(n)\u{0000}`, `\u{0000}L(n)\u{0000}`)만 사용하여 밑줄(_)이나 별표(*)를 배제함으로써 `_italic_` 정규식의 룩어라운드 간섭을 방지. 이후 `applyBoldItalic`을 1회 적용하고 인덱스 기반 단일 패스(`restorePlaceholders`)로 복원.
 - 블록 변환: `# ` -> `<h1>`, `## ` -> `<h2>`, 공백 기준 들여쓰기 깊이(`leadingSpaces / 2`)에 따른 중첩 목록(`<ul>` 및 `<li>`), 그 외 일반 텍스트는 개별 `<p>` 단락으로 변환. 비목록 줄 도달 시 열려 있는 모든 목록 닫기.
 - 전체 페이지: `<!doctype html>`, UTF-8 메타 태그, 이스케이프된 `<title>`, 시스템 폰트 및 max-width 720px 반응형 인라인 스타일시트 포함.
 

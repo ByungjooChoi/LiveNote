@@ -7,6 +7,7 @@ import Foundation
 enum MeetingStoreFixture {
 
     static func makeStore() throws -> MeetingStore {
+        TestLogSandbox.activate()
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("LiveNoteTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

@@ -8,9 +8,12 @@ final class RecipeStoreTests: XCTestCase {
 
     private var root: URL!
     private var logRoot: URL!
+    private var previousLogOverride: URL?
 
     override func setUpWithError() throws {
         try super.setUpWithError()
+        TestLogSandbox.activate()
+        previousLogOverride = AppLog.directoryOverride
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("LiveNoteRecipeTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -20,7 +23,8 @@ final class RecipeStoreTests: XCTestCase {
     }
 
     override func tearDown() {
-        AppLog.directoryOverride = nil
+        AppLog.flush()
+        AppLog.directoryOverride = previousLogOverride
         if let root { try? FileManager.default.removeItem(at: root) }
         if let logRoot { try? FileManager.default.removeItem(at: logRoot) }
         root = nil

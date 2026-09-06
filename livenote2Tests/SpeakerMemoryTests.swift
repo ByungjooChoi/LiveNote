@@ -120,6 +120,7 @@ final class SpeakerMemoryTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
+        TestLogSandbox.activate()
         fakeStore = FakeVoiceprintStore()
         memory = SpeakerMemory(store: fakeStore)
     }

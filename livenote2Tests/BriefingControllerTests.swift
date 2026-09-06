@@ -52,6 +52,7 @@ final class BriefingControllerTests: XCTestCase {
 
     override func setUpWithError() throws {
         try super.setUpWithError()
+        TestLogSandbox.activate()
         suiteName = "BriefingControllerTests-\(UUID().uuidString)"
         userDefaults = UserDefaults(suiteName: suiteName)
 
@@ -67,7 +68,8 @@ final class BriefingControllerTests: XCTestCase {
     }
 
     override func tearDown() {
-        AppLog.directoryOverride = nil
+        AppLog.flush()
+        AppLog.directoryOverride = TestLogSandbox.directory
         userDefaults?.removePersistentDomain(forName: suiteName)
         if let rootURL { try? FileManager.default.removeItem(at: rootURL) }
         if let logRoot { try? FileManager.default.removeItem(at: logRoot) }
@@ -381,8 +383,8 @@ final class BriefingControllerTests: XCTestCase {
         )
 
         // Launch two concurrent ensureBrief calls
-        async let first: Void = controller.ensureBrief(for: item)
-        async let second: Void = controller.ensureBrief(for: item)
+        async let first = controller.ensureBrief(for: item)
+        async let second = controller.ensureBrief(for: item)
         _ = await (first, second)
 
         XCTAssertEqual(callCount.value, 1)
@@ -817,6 +819,548 @@ final class BriefingControllerTests: XCTestCase {
         controller.endSession()
         XCTAssertEqual(controller.sessionEventKey, "sessionKey@123")
         XCTAssertNil(controller.currentBrief)
+    }
+
+    // MARK: - S4: scheduleMorningBatch provider & startup cancellation
+
+    func testScheduleMorningBatchRescheduleUsesLatestProviderOnWake() async throws {
+        var testCalendar = Calendar(identifier: .gregorian)
+        testCalendar.timeZone = TimeZone(secondsFromGMT: 0)!
+
+        var comps = DateComponents()
+        comps.year = 2026
+        comps.month = 9
+        comps.day = 1
+        comps.hour = 8
+        comps.minute = 0
+        comps.second = 0
+        let date8AM = testCalendar.date(from: comps)!
+
+        _ = try? meetingStore.save(
+            rows: [MeetingStoreFixture.row(text: "Past discussion")],
+            myName: "Philip",
+            speakerNames: [:],
+            startedAt: date8AM.addingTimeInterval(-7 * 86400),
+            durationSeconds: 1200,
+            title: "Project Sync",
+            summary: "# Summary\nAll good.",
+            attendees: [Attendee(name: "Craig", email: "craig@example.com")],
+            existingURL: nil
+        )
+        meetingStore.refresh()
+
+        final class KeyCollector: @unchecked Sendable {
+            private let lock = NSLock()
+            private var _keys: [String] = []
+            var keys: [String] {
+                lock.lock()
+                defer { lock.unlock() }
+                return _keys
+            }
+            func add(_ key: String) {
+                lock.lock()
+                _keys.append(key)
+                lock.unlock()
+            }
+        }
+
+        let collector = KeyCollector()
+        let fakeBackend = BriefGenerator.Backend(
+            apiKey: { "k" },
+            cloud: { _, user, _ in
+                collector.add(user)
+                return "# Last time\n- Update\n# Open items\n- Item\n# Suggested agenda\n- Bullet 1\n- Bullet 2\n- Bullet 3"
+            },
+            local: { _, user in
+                collector.add(user)
+                return "# Last time\n- Update\n# Open items\n- Item\n# Suggested agenda\n- Bullet 1\n- Bullet 2\n- Bullet 3"
+            }
+        )
+
+        let controller = BriefingController(
+            store: briefStore,
+            meetingStore: meetingStore,
+            defaults: userDefaults,
+            backend: fakeBackend,
+            openTasksProvider: { _ in [] },
+            language: { "English" },
+            now: { date8AM },
+            calendar: testCalendar
+        )
+
+        let itemA = CalendarMonitor.UpcomingMeetingItem(
+            id: "meetingA@123",
+            title: "Meeting A",
+            start: date8AM.addingTimeInterval(1800),
+            end: date8AM.addingTimeInterval(3600),
+            attendees: [Attendee(name: "Craig", email: "craig@example.com")]
+        )
+        let itemB = CalendarMonitor.UpcomingMeetingItem(
+            id: "meetingB@456",
+            title: "Meeting B",
+            start: date8AM.addingTimeInterval(1800),
+            end: date8AM.addingTimeInterval(3600),
+            attendees: [Attendee(name: "Craig", email: "craig@example.com")]
+        )
+
+        controller.scheduleMorningBatch(itemsProvider: { [itemA] })
+        controller.scheduleMorningBatch(itemsProvider: { [itemB] })
+
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
+
+        for _ in 0..<50 {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+            if controller.wakeHandleCount >= 1 && !collector.keys.isEmpty {
+                break
+            }
+        }
+
+        XCTAssertTrue(collector.keys.contains { $0.contains("Upcoming meeting: Meeting B") }, "Batch must run for item B from rescheduled provider")
+        XCTAssertFalse(collector.keys.contains { $0.contains("Upcoming meeting: Meeting A") }, "Batch must never run for item A")
+
+        controller.cancelBatch()
+    }
+
+    func testCancelBatchImmediatelyAfterScheduleLeavesBatchRunUnsetAndGeneratesNothing() async throws {
+        var testCalendar = Calendar(identifier: .gregorian)
+        testCalendar.timeZone = TimeZone(secondsFromGMT: 0)!
+
+        var comps = DateComponents()
+        comps.year = 2026
+        comps.month = 9
+        comps.day = 1
+        comps.hour = 8
+        comps.minute = 0
+        comps.second = 0
+        let date8AM = testCalendar.date(from: comps)!
+
+        _ = try? meetingStore.save(
+            rows: [MeetingStoreFixture.row(text: "Past discussion")],
+            myName: "Philip",
+            speakerNames: [:],
+            startedAt: date8AM.addingTimeInterval(-7 * 86400),
+            durationSeconds: 1200,
+            title: "Project Sync",
+            summary: "# Summary\nAll good.",
+            attendees: [Attendee(name: "Craig", email: "craig@example.com")],
+            existingURL: nil
+        )
+        meetingStore.refresh()
+
+        let backendCalls = AtomicBox(0)
+        let fakeBackend = BriefGenerator.Backend(
+            apiKey: { "k" },
+            cloud: { _, _, _ in
+                backendCalls.value += 1
+                return "# Last time\n- Update\n# Open items\n- Item\n# Suggested agenda\n- Bullet 1\n- Bullet 2\n- Bullet 3"
+            },
+            local: { _, _ in
+                backendCalls.value += 1
+                return "# Last time\n- Update\n# Open items\n- Item\n# Suggested agenda\n- Bullet 1\n- Bullet 2\n- Bullet 3"
+            }
+        )
+
+        let controller = BriefingController(
+            store: briefStore,
+            meetingStore: meetingStore,
+            defaults: userDefaults,
+            backend: fakeBackend,
+            openTasksProvider: { _ in [] },
+            language: { "English" },
+            now: { date8AM },
+            calendar: testCalendar
+        )
+
+        let item = CalendarMonitor.UpcomingMeetingItem(
+            id: "meetingInstant@123",
+            title: "Instant Meeting",
+            start: date8AM.addingTimeInterval(1800),
+            end: date8AM.addingTimeInterval(3600),
+            attendees: [Attendee(name: "Craig", email: "craig@example.com")]
+        )
+
+        controller.scheduleMorningBatch(itemsProvider: { [item] })
+        controller.cancelBatch()
+
+        try? await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertNil(userDefaults.object(forKey: "briefsLastBatchRun"), "briefsLastBatchRun must remain unset")
+        XCTAssertEqual(backendCalls.value, 0, "No brief should have been generated")
+    }
+
+    // MARK: - S5: Morning batch daily LLM cap
+
+    func testMorningBatchDailyLimitCapsGenerationAndDefersRemainder() async throws {
+        let fixedNow = Date(timeIntervalSince1970: 1788220800)
+        _ = try? meetingStore.save(
+            rows: [MeetingStoreFixture.row(text: "Past discussion")],
+            myName: "Philip",
+            speakerNames: [:],
+            startedAt: fixedNow.addingTimeInterval(-7 * 86400),
+            durationSeconds: 1200,
+            title: "Sync",
+            summary: "# Summary\nGood",
+            attendees: [Attendee(name: "Craig", email: "craig@example.com")],
+            existingURL: nil
+        )
+        meetingStore.refresh()
+
+        let backendCalls = AtomicBox(0)
+        let fakeBackend = BriefGenerator.Backend(
+            apiKey: { "k" },
+            cloud: { _, _, _ in
+                backendCalls.value += 1
+                return "# Last time\n- Update\n# Open items\n- Item\n# Suggested agenda\n- Bullet 1\n- Bullet 2\n- Bullet 3"
+            },
+            local: { _, _ in
+                backendCalls.value += 1
+                return "# Last time\n- Update\n# Open items\n- Item\n# Suggested agenda\n- Bullet 1\n- Bullet 2\n- Bullet 3"
+            }
+        )
+
+        let controller = BriefingController(
+            store: briefStore,
+            meetingStore: meetingStore,
+            defaults: userDefaults,
+            backend: fakeBackend,
+            openTasksProvider: { _ in [] },
+            language: { "English" },
+            now: { fixedNow }
+        )
+        controller.settings.dailyBatchLimit = 10
+        controller.settings.batchHour = 0
+
+        var items: [CalendarMonitor.UpcomingMeetingItem] = []
+        for i in 1...12 {
+            items.append(
+                CalendarMonitor.UpcomingMeetingItem(
+                    id: "batchItem-\(i)",
+                    title: "Meeting \(i)",
+                    start: fixedNow.addingTimeInterval(Double(i * 1800)),
+                    end: fixedNow.addingTimeInterval(Double(i * 1800 + 1800)),
+                    attendees: [Attendee(name: "Craig", email: "craig@example.com")]
+                )
+            )
+        }
+
+        await controller.runMorningBatchIfNeeded(items: items, reason: "test")
+
+        XCTAssertEqual(backendCalls.value, 10, "Backend must be called exactly 10 times (limit)")
+        XCTAssertEqual(controller.lastBatchDeferredKeys.count, 2)
+        XCTAssertTrue(controller.lastBatchDeferredKeys.contains(items[10].eventKey))
+        XCTAssertTrue(controller.lastBatchDeferredKeys.contains(items[11].eventKey))
+        XCTAssertEqual(controller.status(for: items[10]), .notStarted)
+        XCTAssertEqual(controller.status(for: items[11]), .notStarted)
+    }
+
+    func testMorningBatchCachedItemsDoNotConsumeCap() async throws {
+        let fixedNow = Date(timeIntervalSince1970: 1788220800)
+        _ = try? meetingStore.save(
+            rows: [MeetingStoreFixture.row(text: "Past discussion")],
+            myName: "Philip",
+            speakerNames: [:],
+            startedAt: fixedNow.addingTimeInterval(-7 * 86400),
+            durationSeconds: 1200,
+            title: "Sync",
+            summary: "# Summary\nGood",
+            attendees: [Attendee(name: "Craig", email: "craig@example.com")],
+            existingURL: nil
+        )
+        meetingStore.refresh()
+
+        let backendCalls = AtomicBox(0)
+        let fakeBackend = BriefGenerator.Backend(
+            apiKey: { "k" },
+            cloud: { _, _, _ in
+                backendCalls.value += 1
+                return "# Last time\n- Update\n# Open items\n- Item\n# Suggested agenda\n- Bullet 1\n- Bullet 2\n- Bullet 3"
+            },
+            local: { _, _ in
+                backendCalls.value += 1
+                return "# Last time\n- Update\n# Open items\n- Item\n# Suggested agenda\n- Bullet 1\n- Bullet 2\n- Bullet 3"
+            }
+        )
+
+        let controller = BriefingController(
+            store: briefStore,
+            meetingStore: meetingStore,
+            defaults: userDefaults,
+            backend: fakeBackend,
+            openTasksProvider: { _ in [] },
+            language: { "English" },
+            now: { fixedNow }
+        )
+        controller.settings.dailyBatchLimit = 10
+        controller.settings.batchHour = 0
+
+        // Pre-cache 3 items on disk
+        for i in 1...3 {
+            let b = Brief(
+                eventKey: "cachedItem-\(i)",
+                markdown: "# Last time\n- Update\n# Open items\n- Item\n# Suggested agenda\n- Bullet 1\n- Bullet 2\n- Bullet 3",
+                generatedAt: fixedNow,
+                basedOn: ["Sync"],
+                suggestedAgendaFirstLine: "Bullet 1"
+            )
+            try briefStore.save(b)
+        }
+
+        var allItems: [CalendarMonitor.UpcomingMeetingItem] = []
+        for i in 1...3 {
+            allItems.append(
+                CalendarMonitor.UpcomingMeetingItem(
+                    id: "cachedItem-\(i)",
+                    title: "Cached Meeting \(i)",
+                    start: fixedNow.addingTimeInterval(Double(i * 1800)),
+                    end: fixedNow.addingTimeInterval(Double(i * 1800 + 1800)),
+                    attendees: [Attendee(name: "Craig", email: "craig@example.com")]
+                )
+            )
+        }
+        for i in 1...12 {
+            allItems.append(
+                CalendarMonitor.UpcomingMeetingItem(
+                    id: "uncachedItem-\(i)",
+                    title: "Uncached Meeting \(i)",
+                    start: fixedNow.addingTimeInterval(Double((i + 3) * 1800)),
+                    end: fixedNow.addingTimeInterval(Double((i + 3) * 1800 + 1800)),
+                    attendees: [Attendee(name: "Craig", email: "craig@example.com")]
+                )
+            )
+        }
+
+        await controller.runMorningBatchIfNeeded(items: allItems, reason: "test")
+
+        // The 3 cached items should not count towards cap, so 10 uncached items generate
+        XCTAssertEqual(backendCalls.value, 10, "Still generates exactly 10 uncached briefs")
+        XCTAssertEqual(controller.lastBatchDeferredKeys.count, 2)
+    }
+
+    func testMorningBatchUncachedThenCachedOnDiskLoadsCachedWithoutDeferring() async throws {
+        let fixedNow = Date(timeIntervalSince1970: 1788220800)
+        _ = try? meetingStore.save(
+            rows: [MeetingStoreFixture.row(text: "Past discussion")],
+            myName: "Philip",
+            speakerNames: [:],
+            startedAt: fixedNow.addingTimeInterval(-7 * 86400),
+            durationSeconds: 1200,
+            title: "Sync",
+            summary: "# Summary\nGood",
+            attendees: [Attendee(name: "Craig", email: "craig@example.com")],
+            existingURL: nil
+        )
+        meetingStore.refresh()
+
+        let backendCalls = AtomicBox(0)
+        let fakeBackend = BriefGenerator.Backend(
+            apiKey: { "k" },
+            cloud: { _, _, _ in
+                backendCalls.value += 1
+                return "# Last time\n- Update\n# Open items\n- Item\n# Suggested agenda\n- Bullet 1\n- Bullet 2\n- Bullet 3"
+            },
+            local: { _, _ in
+                backendCalls.value += 1
+                return "# Last time\n- Update\n# Open items\n- Item\n# Suggested agenda\n- Bullet 1\n- Bullet 2\n- Bullet 3"
+            }
+        )
+
+        let controller = BriefingController(
+            store: briefStore,
+            meetingStore: meetingStore,
+            defaults: userDefaults,
+            backend: fakeBackend,
+            openTasksProvider: { _ in [] },
+            language: { "English" },
+            now: { fixedNow }
+        )
+        controller.settings.dailyBatchLimit = 10
+        controller.settings.batchHour = 0
+
+        var items: [CalendarMonitor.UpcomingMeetingItem] = []
+        for i in 1...10 {
+            items.append(
+                CalendarMonitor.UpcomingMeetingItem(
+                    id: "uncached-\(i)",
+                    title: "Uncached \(i)",
+                    start: fixedNow.addingTimeInterval(Double(i * 1800)),
+                    end: fixedNow.addingTimeInterval(Double(i * 1800 + 1800)),
+                    attendees: [Attendee(name: "Craig", email: "craig@example.com")]
+                )
+            )
+        }
+
+        // Items 11 and 12 pre-cached on disk
+        for i in 11...12 {
+            let item = CalendarMonitor.UpcomingMeetingItem(
+                id: "cachedDisk-\(i)",
+                title: "Cached Disk \(i)",
+                start: fixedNow.addingTimeInterval(Double(i * 1800)),
+                end: fixedNow.addingTimeInterval(Double(i * 1800 + 1800)),
+                attendees: [Attendee(name: "Craig", email: "craig@example.com")]
+            )
+            items.append(item)
+            let b = Brief(
+                eventKey: item.eventKey,
+                markdown: "# Last time\n- Update\n# Open items\n- Item\n# Suggested agenda\n- Bullet 1\n- Bullet 2\n- Bullet 3",
+                generatedAt: fixedNow,
+                basedOn: ["Sync"],
+                suggestedAgendaFirstLine: "Bullet 1"
+            )
+            try briefStore.save(b)
+        }
+
+        await controller.runMorningBatchIfNeeded(items: items, reason: "test")
+
+        XCTAssertEqual(backendCalls.value, 10)
+        XCTAssertTrue(controller.lastBatchDeferredKeys.isEmpty, "lastBatchDeferredKeys must be empty since the last 2 loaded from disk")
+
+        if case .ready = controller.status(for: items[10]) {} else {
+            XCTFail("items[10] must have status .ready")
+        }
+        if case .ready = controller.status(for: items[11]) {} else {
+            XCTFail("items[11] must have status .ready")
+        }
+    }
+
+    func testDeferredItemGeneratesAfterwardsViaEnsureBrief() async throws {
+        let fixedNow = Date(timeIntervalSince1970: 1788220800)
+        _ = try? meetingStore.save(
+            rows: [MeetingStoreFixture.row(text: "Past discussion")],
+            myName: "Philip",
+            speakerNames: [:],
+            startedAt: fixedNow.addingTimeInterval(-7 * 86400),
+            durationSeconds: 1200,
+            title: "Sync",
+            summary: "# Summary\nGood",
+            attendees: [Attendee(name: "Craig", email: "craig@example.com")],
+            existingURL: nil
+        )
+        meetingStore.refresh()
+
+        let backendCalls = AtomicBox(0)
+        let fakeBackend = BriefGenerator.Backend(
+            apiKey: { "k" },
+            cloud: { _, _, _ in
+                backendCalls.value += 1
+                return "# Last time\n- Update\n# Open items\n- Item\n# Suggested agenda\n- Bullet 1\n- Bullet 2\n- Bullet 3"
+            },
+            local: { _, _ in
+                backendCalls.value += 1
+                return "# Last time\n- Update\n# Open items\n- Item\n# Suggested agenda\n- Bullet 1\n- Bullet 2\n- Bullet 3"
+            }
+        )
+
+        let controller = BriefingController(
+            store: briefStore,
+            meetingStore: meetingStore,
+            defaults: userDefaults,
+            backend: fakeBackend,
+            openTasksProvider: { _ in [] },
+            language: { "English" },
+            now: { fixedNow }
+        )
+        controller.settings.dailyBatchLimit = 1
+        controller.settings.batchHour = 0
+
+        let item1 = CalendarMonitor.UpcomingMeetingItem(
+            id: "cap1@1",
+            title: "Meeting 1",
+            start: fixedNow.addingTimeInterval(1800),
+            end: fixedNow.addingTimeInterval(3600),
+            attendees: [Attendee(name: "Craig", email: "craig@example.com")]
+        )
+        let item2 = CalendarMonitor.UpcomingMeetingItem(
+            id: "cap2@2",
+            title: "Meeting 2",
+            start: fixedNow.addingTimeInterval(3600),
+            end: fixedNow.addingTimeInterval(5400),
+            attendees: [Attendee(name: "Craig", email: "craig@example.com")]
+        )
+
+        await controller.runMorningBatchIfNeeded(items: [item1, item2], reason: "test")
+        XCTAssertEqual(backendCalls.value, 1)
+        XCTAssertTrue(controller.lastBatchDeferredKeys.contains(item2.eventKey))
+
+        // Directly call ensureBrief afterwards on deferred item
+        let outcome = await controller.ensureBrief(for: item2)
+        XCTAssertEqual(outcome, .generated)
+        XCTAssertEqual(backendCalls.value, 2)
+        if case .ready = controller.status(for: item2) {} else {
+            XCTFail("item2 must have status .ready after ensureBrief")
+        }
+    }
+
+    func testDailyBatchLimitZeroInDefaultsFallsBackToTen() {
+        userDefaults.set(0, forKey: "briefsDailyBatchLimit")
+        let settings = BriefingController.Settings(defaults: userDefaults)
+        XCTAssertEqual(settings.dailyBatchLimit, 10)
+    }
+
+    func testGenerationFailuresCountTowardCap() async throws {
+        let fixedNow = Date(timeIntervalSince1970: 1788220800)
+        _ = try? meetingStore.save(
+            rows: [MeetingStoreFixture.row(text: "Past discussion")],
+            myName: "Philip",
+            speakerNames: [:],
+            startedAt: fixedNow.addingTimeInterval(-7 * 86400),
+            durationSeconds: 1200,
+            title: "Sync",
+            summary: "# Summary\nGood",
+            attendees: [Attendee(name: "Craig", email: "craig@example.com")],
+            existingURL: nil
+        )
+        meetingStore.refresh()
+
+        let backendCalls = AtomicBox(0)
+        let fakeBackend = BriefGenerator.Backend(
+            apiKey: { "k" },
+            cloud: { _, _, _ in
+                let current = backendCalls.value
+                backendCalls.value += 1
+                if current < 5 {
+                    throw BriefError.emptyResponse
+                }
+                return "# Last time\n- Update\n# Open items\n- Item\n# Suggested agenda\n- Bullet 1\n- Bullet 2\n- Bullet 3"
+            },
+            local: { _, _ in
+                let current = backendCalls.value
+                backendCalls.value += 1
+                if current < 5 {
+                    throw BriefError.emptyResponse
+                }
+                return "# Last time\n- Update\n# Open items\n- Item\n# Suggested agenda\n- Bullet 1\n- Bullet 2\n- Bullet 3"
+            }
+        )
+
+        let controller = BriefingController(
+            store: briefStore,
+            meetingStore: meetingStore,
+            defaults: userDefaults,
+            backend: fakeBackend,
+            openTasksProvider: { _ in [] },
+            language: { "English" },
+            now: { fixedNow }
+        )
+        controller.settings.dailyBatchLimit = 10
+        controller.settings.batchHour = 0
+
+        var items: [CalendarMonitor.UpcomingMeetingItem] = []
+        for i in 1...12 {
+            items.append(
+                CalendarMonitor.UpcomingMeetingItem(
+                    id: "failCapItem-\(i)",
+                    title: "Meeting \(i)",
+                    start: fixedNow.addingTimeInterval(Double(i * 1800)),
+                    end: fixedNow.addingTimeInterval(Double(i * 1800 + 1800)),
+                    attendees: [Attendee(name: "Craig", email: "craig@example.com")]
+                )
+            )
+        }
+
+        await controller.runMorningBatchIfNeeded(items: items, reason: "test")
+
+        XCTAssertEqual(backendCalls.value, 10, "Total attempts must be capped at 10 even with 5 failures")
+        XCTAssertEqual(controller.lastBatchDeferredKeys.count, 2)
     }
 
     func testBeginSessionEndSessionCopyBriefIfAvailableStillWritesBrief() throws {

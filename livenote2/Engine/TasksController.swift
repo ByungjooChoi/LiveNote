@@ -24,6 +24,15 @@ final class TasksController {
 
     init(store: TaskStore = TaskStore()) {
         self.store = store
+        do {
+            let outcome = try store.recoverInterruptedCommit()
+            if outcome != .none {
+                AppLog.write("tasks", "태스크 커밋 저널 복구: \(outcome)")
+            }
+        } catch {
+            lastError = "Task index recovery failed: \(error.localizedDescription)"
+            AppLog.write("tasks", "태스크 커밋 저널 복구 실패: \(error.localizedDescription)")
+        }
         refresh()
     }
 
@@ -76,6 +85,11 @@ final class TasksController {
                     AppLog.write("tasks", "회의 태스크 경고 url=\(meetingURL.lastPathComponent): \(firstWarn)")
                 }
                 AppLog.write("tasks", "회의 태스크 기록 완료 count=\(recordedItems.count) url=\(meetingURL.lastPathComponent)")
+            } catch TaskStoreError.recoveryPending {
+                refresh()
+                let errDesc = "Task index needs recovery: previous commit was interrupted"
+                lastError = errDesc
+                AppLog.write("tasks", "회의 태스크 기록 실패 url=\(meetingURL.lastPathComponent): \(errDesc)")
             } catch {
                 refresh()
                 lastError = error.localizedDescription
@@ -223,6 +237,12 @@ final class TasksController {
                 AppLog.write("tasks", "레시피 태스크 임포트 완료 count=\(savedCount)")
             }
             return .done(imported: savedCount, failed: failedCount, message: message)
+        } catch TaskStoreError.recoveryPending {
+            let errDesc = "Task index needs recovery: previous commit was interrupted"
+            lastError = errDesc
+            AppLog.write("tasks", "레시피 태스크 저장 실패: \(errDesc)")
+            let message = "0 tasks imported. \(importedTasks.count) could not be saved: \(errDesc)"
+            return .done(imported: 0, failed: importedTasks.count, message: message)
         } catch {
             let errDesc: String
             if let commitErr = error as? TaskStoreError,

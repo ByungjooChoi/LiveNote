@@ -29,9 +29,12 @@ final class RecipeRunnerTests: XCTestCase {
 
     private var store: MeetingStore!
     private var logRoot: URL!
+    private var previousLogOverride: URL?
 
     override func setUpWithError() throws {
         try super.setUpWithError()
+        TestLogSandbox.activate()
+        previousLogOverride = AppLog.directoryOverride
         logRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("LiveNoteRecipeRunnerLogs-\(UUID().uuidString)", isDirectory: true)
         AppLog.directoryOverride = logRoot
@@ -41,7 +44,8 @@ final class RecipeRunnerTests: XCTestCase {
     override func tearDown() {
         if let store { MeetingStoreFixture.cleanUp(store) }
         store = nil
-        AppLog.directoryOverride = nil
+        AppLog.flush()
+        AppLog.directoryOverride = previousLogOverride
         if let logRoot { try? FileManager.default.removeItem(at: logRoot) }
         logRoot = nil
         super.tearDown()

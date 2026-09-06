@@ -3,16 +3,23 @@ import XCTest
 
 final class SpeakerMemoryModelsTests: XCTestCase {
 
+    private var tempLogDir: URL!
+    private var previousLogOverride: URL?
+
     override func setUp() {
         super.setUp()
-        AppLog.directoryOverride = FileManager.default.temporaryDirectory
+        TestLogSandbox.activate()
+        previousLogOverride = AppLog.directoryOverride
+        tempLogDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("livenote2-tests-\(UUID().uuidString)", isDirectory: true)
+        AppLog.directoryOverride = tempLogDir
     }
 
     override func tearDown() {
-        if let dir = AppLog.directoryOverride {
-            try? FileManager.default.removeItem(at: dir)
-            AppLog.directoryOverride = nil
+        AppLog.flush()
+        AppLog.directoryOverride = previousLogOverride
+        if let tempLogDir {
+            try? FileManager.default.removeItem(at: tempLogDir)
         }
         super.tearDown()
     }

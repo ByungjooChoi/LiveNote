@@ -3,6 +3,11 @@ import XCTest
 
 final class TranscriptRefinerClusterTests: XCTestCase {
 
+    override func setUp() {
+        super.setUp()
+        TestLogSandbox.activate()
+    }
+
     func testAssignClustersWithDiarization() {
         let segments = [
             SpeakerSegment(clusterID: "spk_1", start: 0.0, end: 5.0, embedding: [], quality: 0.9),

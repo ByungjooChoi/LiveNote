@@ -6,16 +6,20 @@ import Security
 final class GeminiKeyControllerTests: XCTestCase {
 
     private var tempDir: URL!
+    private var previousLogOverride: URL?
 
     override func setUp() {
         super.setUp()
+        TestLogSandbox.activate()
+        previousLogOverride = AppLog.directoryOverride
         tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         AppLog.directoryOverride = tempDir
     }
 
     override func tearDown() {
-        AppLog.directoryOverride = nil
+        AppLog.flush()
+        AppLog.directoryOverride = previousLogOverride
         try? FileManager.default.removeItem(at: tempDir)
         super.tearDown()
     }

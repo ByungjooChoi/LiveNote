@@ -5,16 +5,20 @@ import XCTest
 final class ChatStoreTests: XCTestCase {
 
     private var logRoot: URL!
+    private var previousLogOverride: URL?
 
     override func setUpWithError() throws {
         try super.setUpWithError()
+        TestLogSandbox.activate()
+        previousLogOverride = AppLog.directoryOverride
         logRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("LiveNoteChatStoreLogs-\(UUID().uuidString)", isDirectory: true)
         AppLog.directoryOverride = logRoot
     }
 
     override func tearDown() {
-        AppLog.directoryOverride = nil
+        AppLog.flush()
+        AppLog.directoryOverride = previousLogOverride
         if let logRoot { try? FileManager.default.removeItem(at: logRoot) }
         logRoot = nil
         super.tearDown()

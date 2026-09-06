@@ -41,8 +41,8 @@ final class CalendarMonitor {
 
     /// [참가] 클릭 시 호출 - AppState가 "기록 시작"을 배선합니다.
     @ObservationIgnored var onJoinRequested: (() -> Void)?
-    /// "Start LiveNote only" 선택 시 호출: 링크는 열지 않고 기록만 시작.
-    @ObservationIgnored var onRecordRequested: (() -> Void)?
+    /// "Start LiveNote only" 선택 시 호출: 링크는 열지 않고 해당 일정 정보를 전달하며 기록만 시작.
+    @ObservationIgnored var onRecordRequested: ((UpcomingMeetingItem) -> Void)?
     /// "Change notification settings" 선택 시 호출: AppState가 Settings 화면을 요청.
     @ObservationIgnored var onOpenSettingsRequested: (() -> Void)?
     /// 캘린더 회의 시작 시각 도달 시 호출 (해당 일정 전달).
@@ -180,15 +180,7 @@ final class CalendarMonitor {
         alertedKeys.insert(candidate.key)
         currentAlert = candidate
 
-        let upcomingCandidate = todayUpcoming.first { $0.id == candidate.key }
-            ?? UpcomingMeetingItem(
-                id: candidate.key,
-                title: candidate.title,
-                start: candidate.start,
-                end: candidate.end,
-                webLink: candidate.webLink,
-                deepLink: candidate.deepLink
-            )
+        let upcomingCandidate = upcomingItem(for: candidate)
         let suggestedAgenda = suggestedAgendaProvider?(upcomingCandidate)
 
         panel.show(
@@ -203,7 +195,7 @@ final class CalendarMonitor {
             onRecordOnly: { [weak self] in
                 Task { @MainActor in
                     guard let self else { return }
-                    self.onRecordRequested?()
+                    self.onRecordRequested?(upcomingCandidate)
                     self.dismissAlert()
                 }
             },
@@ -321,9 +313,28 @@ final class CalendarMonitor {
         currentAlert = nil
     }
 
+    /// 알림 후보(MeetingAlert)에 대응하는 UpcomingMeetingItem을 반환한다 (todayUpcoming에 있으면 우선 사용, 없으면 알림 기반 생성).
+    func upcomingItem(for candidate: MeetingAlert) -> UpcomingMeetingItem {
+        todayUpcoming.first { $0.id == candidate.key }
+            ?? UpcomingMeetingItem(
+                id: candidate.key,
+                title: candidate.title,
+                start: candidate.start,
+                end: candidate.end,
+                webLink: candidate.webLink,
+                deepLink: candidate.deepLink
+            )
+    }
+
+    /// 테스트용: 알림 팝업의 "Start LiveNote only" 선택을 시뮬레이션한다.
+    func triggerRecordRequestedForTesting(candidate: MeetingAlert) {
+        let upcomingCandidate = upcomingItem(for: candidate)
+        onRecordRequested?(upcomingCandidate)
+    }
+
     // MARK: - 오늘 일정 (사이드바 "다가오는 회의" + Start now)
 
-    struct UpcomingMeetingItem: Identifiable, Equatable {
+    struct UpcomingMeetingItem: Identifiable, Equatable, Sendable {
         let id: String
         let title: String
         let start: Date

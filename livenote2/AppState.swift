@@ -839,9 +839,9 @@ final class AppState {
         }
 
         // 팝업 메뉴 "Start LiveNote only" → 링크는 열지 않고 기록만 시작
-        calendar.onRecordRequested = { [weak self] in
+        calendar.onRecordRequested = { [weak self] item in
             guard let self, !self.isActive else { return }
-            self.start()
+            self.start(calendarItem: item)
             self.noticeMessage = "Recording started from the calendar alert."
         }
 
@@ -858,7 +858,7 @@ final class AppState {
         // 무시한 경우 false를 돌려주면 CalendarMonitor가 통지 키를 남기지 않고 다음 tick에 재시도한다.
         calendar.onMeetingTimeReached = { [weak self] item in
             guard let self, self.autoStartAtCalendarTime, !self.isActive else { return false }
-            self.beginAutoStart(reason: "\(item.title) is starting")
+            self.beginAutoStart(reason: "\(item.title) is starting", calendarItem: item)
             // 정책: 이미 다른 카운트다운 패널이 떠 있어 beginAutoStart가 아무것도 하지 않은 경우도
             // "처리됨"으로 본다. 그 패널이 곧 기록을 시작하므로 재시도는 중복 시작만 부른다.
             return true
@@ -1769,12 +1769,45 @@ final class AppState {
         mode == .inPerson ? .them : .me
     }
 
-    func start(mode: StartMode = .online) {
+    /// 세션에 귀속할 캘린더 일정을 결정한다. 명시적으로 전달된 일정이 있으면 우선하고,
+    /// 없으면 휴리스틱(현재 진행 중인 일정)을 평가한다. 명시적 일정이 있을 때는 휴리스틱을 호출하지 않는다.
+    nonisolated static func resolveSessionItem(
+        explicit: UpcomingMeetingItem?,
+        heuristic: () -> UpcomingMeetingItem?
+    ) -> UpcomingMeetingItem? {
+        if let explicit {
+            return explicit
+        }
+        return heuristic()
+    }
+
+    /// 명시적 캘린더 일정에서 세션 메타데이터(제목, 참석자)를 추출한다.
+    nonisolated static func sessionContext(
+        from item: UpcomingMeetingItem
+    ) -> (title: String?, attendees: [Attendee]) {
+        (title: item.title, attendees: item.attendees)
+    }
+
+    func start(mode: StartMode = .online, calendarItem: UpcomingMeetingItem? = nil) {
         guard !isActive else { return }
         SessionAudioRecorder.purgeStale()
         sessionID = UUID()
         currentStartMode = mode
-        briefing.beginSession(item: calendar.ongoingUpcomingItem())
+        let sessionItem = Self.resolveSessionItem(explicit: calendarItem) { [calendar] in
+            calendar.ongoingUpcomingItem()
+        }
+        let source: String
+        if calendarItem != nil {
+            source = "explicit"
+        } else if sessionItem != nil {
+            source = "heuristic"
+        } else {
+            source = "none"
+        }
+        let key = sessionItem?.eventKey ?? "-"
+        AppLog.write("brief", "세션 귀속 source=\(source) key=\(key)")
+
+        briefing.beginSession(item: sessionItem)
         phase = .preparing("Preparing…")
         rows.removeAll()
         volatileText = [.me: "", .them: ""]
@@ -1797,8 +1830,13 @@ final class AppState {
         manualSlots.removeAll()
         lastDiarization = nil
         // 진행 중인 캘린더 일정의 참석자 → 화자 이름 원클릭 후보, 제목 → 회의 이름.
-        // 제목과 참석자가 다른 일정에서 섞이지 않도록 한 번의 호출로 같은 일정에서 가져온다.
-        let context = calendar.ongoingMeetingContext()
+        // 명시적 일정이 있으면 그 일정을 사용하고, 없으면 휴리스틱(진행 중인 일정)에서 가져온다.
+        let context: (title: String?, attendees: [Attendee])
+        if let calendarItem {
+            context = Self.sessionContext(from: calendarItem)
+        } else {
+            context = calendar.ongoingMeetingContext()
+        }
         meetingAttendees = context.attendees
         attendeeCandidates = context.attendees.map(\.name)
         meetingTitle = Self.normalizedTitle(context.title)
@@ -2625,12 +2663,12 @@ final class AppState {
     }
 
     /// 자동 시작 진입점. 카운트다운 설정에 따라 패널을 띄우거나 즉시 시작한다.
-    private func beginAutoStart(reason: String) {
+    private func beginAutoStart(reason: String, calendarItem: UpcomingMeetingItem? = nil) {
         guard !isActive else { return }
         let notice = "Recording started automatically (\(reason))."
         let delay = Self.autoStartDelay(countdownEnabled: autoStartCountdown)
         guard delay > 0 else {
-            start()
+            start(calendarItem: calendarItem)
             noticeMessage = notice
             return
         }
@@ -2640,7 +2678,7 @@ final class AppState {
             seconds: delay,
             onExpire: { [weak self] in
                 guard let self, !self.isActive else { return }
-                self.start()
+                self.start(calendarItem: calendarItem)
                 self.noticeMessage = notice
             },
             onCancel: { [weak self] in
@@ -2661,7 +2699,7 @@ final class AppState {
             let appName = app.localizedName ?? "meeting app"
             Task { @MainActor [weak self] in
                 guard let self, self.autoStartOnMeetingApp, !self.isRunning else { return }
-                self.beginAutoStart(reason: "\(appName) launched")
+                self.beginAutoStart(reason: "\(appName) launched", calendarItem: nil)
             }
         }
     }
@@ -2911,14 +2949,14 @@ final class AppState {
     /// 사이드바 "오늘 일정"의 지금 시작: Zoom 미실행이면 참가 링크를 열고 기록 시작.
     /// Home의 Start now: 회의 링크 실행 + 기록 시작을 항상 함께.
     /// (구버전은 Zoom 프로세스가 떠 있으면 링크를 안 열었는데, Zoom은 회의 없이도
-    ///  백그라운드에 상주하므로 참가가 안 되는 버그였음 — zoommtg:// 딥링크는
+    ///  백그라운드에 상주하므로 참가가 안 되는 버그였음. zoommtg:// 딥링크는
     ///  실행 중인 Zoom에 그대로 전달되어 회의 참가로 이어진다.)
-    func startUpcomingMeeting(link: URL?) {
-        if let link {
+    func startUpcomingMeeting(item: UpcomingMeetingItem) {
+        if let link = item.deepLink ?? item.webLink {
             NSWorkspace.shared.open(link)
         }
         if !isActive {
-            start()
+            start(calendarItem: item)
         }
     }
 
